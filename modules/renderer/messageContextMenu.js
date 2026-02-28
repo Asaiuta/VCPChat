@@ -47,6 +47,9 @@ function showContextMenu(event, messageItem, message) {
     const currentSelectedItemVal = mainRefs.currentSelectedItemRef.get();
     const currentTopicIdVal = mainRefs.currentTopicIdRef.get();
 
+    // Capture the right-click target before any async/closure context changes it
+    const rightClickTarget = event.target;
+
     const menu = document.createElement('div');
     menu.id = 'chatContextMenu';
     menu.classList.add('context-menu');
@@ -330,6 +333,55 @@ function showContextMenu(event, messageItem, message) {
             menu.appendChild(readAloudOption);
         }
 
+        // Add "Screenshot" option for assistant messages with HTML preview
+        if (message.role === 'assistant') {
+            const screenshotOption = document.createElement('div');
+            screenshotOption.classList.add('context-menu-item');
+            screenshotOption.innerHTML = `<i class="fas fa-camera"></i> 截图气泡`;
+            screenshotOption.onclick = async () => {
+                closeContextMenu();
+                const { electronAPI, uiHelper } = mainRefs;
+
+                // Strategy 1: right-clicked inside a vcp-html-preview-container (```html block)
+                const htmlPreviewContainer = rightClickTarget.closest('.vcp-html-preview-container');
+                if (htmlPreviewContainer) {
+                    const rawHtml = htmlPreviewContainer.dataset.vcpHtmlContent;
+                    if (rawHtml) {
+                        await takeHtmlScreenshot(htmlPreviewContainer, rawHtml, electronAPI, uiHelper);
+                        return;
+                    }
+                }
+
+                // Strategy 2: right-clicked on inline HTML rendered inside .md-content
+                // Find the topmost block-level div that is a direct child of .md-content
+                const mdContent = messageItem.querySelector('.md-content');
+                if (!mdContent) {
+                    uiHelper.showToastNotification("此消息没有可截图的内容。", "warning");
+                    return;
+                }
+
+                // Walk up from rightClickTarget until we find a direct child of mdContent
+                let targetBlock = rightClickTarget;
+                while (targetBlock && targetBlock.parentElement !== mdContent) {
+                    targetBlock = targetBlock.parentElement;
+                }
+
+                if (!targetBlock || targetBlock === mdContent) {
+                    uiHelper.showToastNotification("无法定位到可截图的气泡块。", "warning");
+                    return;
+                }
+
+                // Only screenshot if it's actually an HTML element with content (not a text node boundary)
+                if (targetBlock.nodeType !== Node.ELEMENT_NODE) {
+                    uiHelper.showToastNotification("无法定位到可截图的气泡块。", "warning");
+                    return;
+                }
+
+                await takeHtmlScreenshot(targetBlock, targetBlock.outerHTML, electronAPI, uiHelper);
+            };
+            menu.appendChild(screenshotOption);
+        }
+
         const readModeOption = document.createElement('div');
         readModeOption.classList.add('context-menu-item', 'info-item');
         readModeOption.innerHTML = `<i class="fas fa-book-reader"></i> 阅读模式`;
@@ -458,6 +510,138 @@ function showContextMenu(event, messageItem, message) {
     menu.style.top = `${top}px`;
     menu.style.left = `${left}px`;
     menu.style.visibility = 'visible';
+}
+
+async function takeHtmlScreenshot(container, rawHtml, electronAPI, uiHelper) {
+    try {
+        const isDark = !document.body.classList.contains('light-theme');
+        const bgColor = isDark ? '#1e1e2e' : '#ffffff';
+
+        // Use the live DOM element directly to preserve all inherited styles/CSS variables.
+        // Temporarily make it overflow-visible so html2canvas captures the full content.
+        const originalOverflow = container.style.overflow;
+        const originalMaxHeight = container.style.maxHeight;
+        container.style.overflow = 'visible';
+        container.style.maxHeight = 'none';
+
+        const canvas = await window.html2canvas(container, {
+            backgroundColor: bgColor,
+            useCORS: true,
+            allowTaint: true,
+            scale: window.devicePixelRatio || 1,
+            width: container.scrollWidth,
+            height: container.scrollHeight,
+            windowWidth: document.documentElement.scrollWidth,
+            windowHeight: document.documentElement.scrollHeight,
+            scrollX: -window.scrollX,
+            scrollY: -window.scrollY,
+            logging: false,
+            // 🟢 关键修复：在克隆 DOM 时修复文字样式，避免重叠
+            onclone: (clonedDoc, clonedElement) => {
+                // 获取原容器的计算样式
+                const originalStyle = window.getComputedStyle(container);
+                const clonedStyle = clonedDoc.defaultView.getComputedStyle(clonedElement);
+                
+                // 🟢 修复背景色：优先使用原容器的实际背景色
+                const originalBg = originalStyle.backgroundColor;
+                const originalBgImage = originalStyle.backgroundImage;
+                
+                if (originalBg && originalBg !== 'rgba(0, 0, 0, 0)' && originalBg !== 'transparent') {
+                    clonedElement.style.backgroundColor = originalBg;
+                } else {
+                    clonedElement.style.backgroundColor = bgColor;
+                }
+                
+                // 保留背景图片和其他背景属性
+                if (originalBgImage && originalBgImage !== 'none') {
+                    clonedElement.style.backgroundImage = originalBgImage;
+                    clonedElement.style.backgroundSize = originalStyle.backgroundSize;
+                    clonedElement.style.backgroundPosition = originalStyle.backgroundPosition;
+                    clonedElement.style.backgroundRepeat = originalStyle.backgroundRepeat;
+                }
+                
+                // 🟢 修复文字重叠：更细致地处理行高和间距
+                const textElements = clonedElement.querySelectorAll('p, span, div, h1, h2, h3, h4, h5, h6, li, td, th, label, a');
+                
+                textElements.forEach(el => {
+                    // 跳过 pre 和 code，单独处理
+                    if (el.tagName === 'PRE' || el.tagName === 'CODE') return;
+                    
+                    const computedStyle = clonedDoc.defaultView.getComputedStyle(el);
+                    
+                    // 只处理包含直接文本内容的元素
+                    const hasDirectText = Array.from(el.childNodes).some(node => 
+                        node.nodeType === Node.TEXT_NODE && node.textContent.trim().length > 0
+                    );
+                    
+                    if (hasDirectText) {
+                        // 获取当前行高
+                        const lineHeight = computedStyle.lineHeight;
+                        const fontSize = parseFloat(computedStyle.fontSize);
+                        
+                        // 如果行高是 normal 或太小，设置为固定值
+                        if (lineHeight === 'normal') {
+                            el.style.lineHeight = '1.6';
+                        } else if (parseFloat(lineHeight) < fontSize * 1.2) {
+                            // 如果行高小于字体大小的 1.2 倍，增加行高
+                            el.style.lineHeight = (fontSize * 1.6) + 'px';
+                        }
+                        
+                        // 确保垂直对齐正确
+                        el.style.verticalAlign = 'baseline';
+                    }
+                    
+                    // 防止水平溢出
+                    if (computedStyle.display !== 'inline') {
+                        el.style.maxWidth = '100%';
+                        el.style.boxSizing = 'border-box';
+                    }
+                });
+                
+                // 🟢 特别处理 pre 元素
+                const preElements = clonedElement.querySelectorAll('pre');
+                preElements.forEach(pre => {
+                    pre.style.whiteSpace = 'pre-wrap';
+                    pre.style.wordWrap = 'break-word';
+                    pre.style.overflowWrap = 'break-word';
+                    pre.style.maxWidth = '100%';
+                    pre.style.boxSizing = 'border-box';
+                    // 保持 pre 的行高
+                    pre.style.lineHeight = '1.5';
+                });
+                
+                // 🟢 处理 code 元素
+                const codeElements = clonedElement.querySelectorAll('code');
+                codeElements.forEach(code => {
+                    code.style.whiteSpace = 'pre-wrap';
+                    code.style.wordBreak = 'break-all';
+                    code.style.maxWidth = '100%';
+                    code.style.display = 'inline';
+                });
+                
+                // 🟢 处理图片，防止溢出
+                const images = clonedElement.querySelectorAll('img');
+                images.forEach(img => {
+                    img.style.maxWidth = '100%';
+                    img.style.height = 'auto';
+                });
+            }
+        });
+
+        container.style.overflow = originalOverflow;
+        container.style.maxHeight = originalMaxHeight;
+
+        const dataUrl = canvas.toDataURL('image/png');
+        const result = await electronAPI.copyImageToClipboard(dataUrl);
+        if (result && result.success) {
+            uiHelper.showToastNotification("截图已复制到剪贴板。", "success");
+        } else {
+            uiHelper.showToastNotification("截图写入剪贴板失败。", "error");
+        }
+    } catch (err) {
+        console.error('[ContextMenu] Screenshot failed:', err);
+        uiHelper.showToastNotification("截图失败：" + err.message, "error");
+    }
 }
 
 function toggleEditMode(messageItem, message) {
