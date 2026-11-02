@@ -122,6 +122,7 @@ const desktopRemoteHandlers = require('./modules/ipc/desktopRemoteHandlers'); //
 const tavernHandlers = require('./modules/ipc/tavernHandlers'); // Import VCPChatTarven (advanced reply) handlers
 const { ScriptoriumAgentControlService } = require('./modules/services/scriptoriumAgentControlService');
 const { GlobalJevService } = require('./modules/services/globalJevService');
+const { AndroidSystemAuthorization } = require('./modules/services/androidSystemAuthorization');
 // docxHandlers 依赖链较重（mammoth/cheerio/marked/jszip 等），冷启动不加载。
 // 仅在首次真正使用文坊时（IPC 打开、V 桌面图标、Agent 调用）按需加载。
 const windowService = require('./modules/services/windowService');
@@ -355,6 +356,7 @@ let chartService = null;
 let gameService = null;
 let appSettingsManager = null;
 let globalJevService = null;
+let androidSystemAuthorization = null;
 let loomManager = null;
 let scriptoriumAgentControl = null;
 let networkNotesTreeCache = null; // In-memory cache for the network notes
@@ -557,6 +559,8 @@ function startDistributedServerAfterRenderer() {
                 gameService,
                 // 工作区只读门面：direct 插件据此动态获取写入白名单
                 workspaceService: workspaceHandlers.workspaceService,
+                jevService: globalJevService,
+                systemAuthorization: androidSystemAuthorization,
                 // 工具调用成功后通知挂钩的功能（例如播报闹钟、新话题）
                 onToolResult: (...args) => hostHooks.emit('tools:result', ...args)
             });
@@ -1245,6 +1249,7 @@ if (!gotTheLock) {
         const AppSettingsManager = require('./modules/utils/appSettingsManager');
         const AgentConfigManager = require('./modules/utils/agentConfigManager');
         appSettingsManager = new AppSettingsManager(SETTINGS_FILE);
+        androidSystemAuthorization = new AndroidSystemAuthorization({ settingsManager: appSettingsManager });
         globalJevService = new GlobalJevService({
             settingsManager: appSettingsManager,
             logger: console

@@ -438,6 +438,11 @@ class SettingsManager extends EventEmitter {
         return settings;
     }
 
+    // Authorization must never recover an earlier grant from backups or caches.
+    async readSettingsStrict() {
+        return this.parseSettings(await fs.readFile(this.settingsPath, 'utf8'));
+    }
+
     // Any parseable backup is a real earlier config; always better than defaults.
     async readBackup() {
         try { return this.parseSettings(await fs.readFile(this.backupPath, 'utf8')); }

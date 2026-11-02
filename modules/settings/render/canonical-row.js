@@ -35,7 +35,9 @@ function composeCanonicalRowSlots(row) {
     const titles = children.filter(node => node.matches('label, span, strong, h4, h5') && !controls.includes(node));
     const helpers = children.filter(node => node.matches('small, p'));
     if (!controls.length || !titles.length) return;
-    const copy = document.createElement('div');
+    // 行节点可能尚未挂进任何 document（渲染器直出后再挂载），因此取节点
+    // 自身的 ownerDocument，而不是假定存在全局 document。
+    const copy = row.ownerDocument.createElement('div');
     copy.className = 'vcp-uiux-row-copy';
     copy.dataset.settingPrimitive = 'row-copy';
     [...titles, ...helpers].forEach(node => copy.append(node));

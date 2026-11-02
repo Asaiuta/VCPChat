@@ -11,6 +11,11 @@ import { schemaSurfaceSections } from '../modules/settings/schema-surface.js';
 import { renderSchemaSection } from '../modules/settings/render/field-renderer.js';
 import { collectSettings, clampBubbleWidthPercent } from '../modules/settings/value-semantics.js';
 
+// 心流锁续写提示词的运行时兜底值：quick-actions.js 的 save.falsy 逐字对齐。
+// 旧链此处曾写死 '请继续'，8ef1f6db 把默认值换成整段系统提示后未同步，
+// 金测此前只靠随机灌值恰好没把输入框灌空而侥幸通过。
+const CONTINUE_WRITING_DEFAULT = '[系统提示:] 请继续。若当前已无值得继续推进的任务或话题，请输出 [[Flowlock::Stop]] 关闭心流锁心跳。';
+
 // —— 黄金参照：旧保存链载荷构造（逐行转写，勿"顺手修正"任何怪癖） —//
 function legacyCollect({ doc, currentSettings, settingsManager, getAppearance, normalizeChatPresentationMode }) {
     const getElementById = id => doc.getElementById(id);
@@ -64,7 +69,7 @@ function legacyCollect({ doc, currentSettings, settingsManager, getAppearance, n
         userAvatarBorderColor: getElementById('userAvatarBorderColor')?.value || '#3d5a80',
         userNameTextColor: getElementById('userNameTextColor')?.value || '#ffffff',
         userUseThemeColorsInChat: getElementById('userUseThemeColorsInChat')?.checked || false,
-        continueWritingPrompt: getElementById('continueWritingPrompt').value.trim() || '请继续',
+        continueWritingPrompt: getElementById('continueWritingPrompt').value.trim() || CONTINUE_WRITING_DEFAULT,
         flowlockContinueDelay: parseInt(getElementById('flowlockContinueDelay').value, 10) || 5,
         enableMiddleClickQuickAction: getElementById('enableMiddleClickQuickAction').checked,
         middleClickQuickAction: getElementById('middleClickQuickAction').value,
@@ -317,7 +322,8 @@ function historicalPayload(payload) {
     delete profile.toolExpansion;
     delete profile.toolBubbleMotion;
     const historical = {...payload, appearanceProfile: profile};
-    for (const key of ['enableContextCompaction', 'contextCompactionModel', 'contextCompactionPrompt', 'contextCompactionSendPrompt', 'contextCompactionMainPrompt']) {
+    // Android grants are a new field; their fail-closed roundtrip has its own contract suite.
+    for (const key of ['androidSystemAuthorizations', 'enableContextCompaction', 'contextCompactionModel', 'contextCompactionPrompt', 'contextCompactionSendPrompt', 'contextCompactionMainPrompt']) {
         delete historical[key];
     }
     return historical;

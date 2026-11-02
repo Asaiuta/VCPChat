@@ -178,7 +178,9 @@ export function applySettings(sections, form, settings) {
     if (!form || !settings) return 0;
     let writes = 0;
     const write = (control, id, save) => {
-        const value = resolvePath(settings, save?.valuePath || id);
+        const storedValue = resolvePath(settings, save?.valuePath || id);
+        if (storedValue === undefined || storedValue === null) return;
+        const value = save?.serialize ? save.serialize(storedValue) : storedValue;
         if (value === undefined || value === null) return;
         if (control.type === 'radio') {
             const expected = save?.checkedValue !== undefined ? save.checkedValue : control.value;
