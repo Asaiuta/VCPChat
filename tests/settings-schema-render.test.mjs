@@ -42,9 +42,9 @@ function renderIntoForm(sectionDescriptor) {
     return { form, host };
 }
 
-test('九分区全部登记且 schema 编译无异常', () => {
+test('核心分区全部登记且 schema 编译无异常', () => {
     const keys = schemaSurfaceSections().map(s => s.key);
-    assert.deepEqual(keys, ['user-identity', 'server-connection', 'jev-service', 'appearance-settings', 'render-settings',
+    assert.deepEqual(keys, ['user-identity', 'server-connection', 'jev-service', 'android-system', 'appearance-settings', 'render-settings',
         'selection-assistant', 'voice-settings', 'advanced-features', 'workspace-management', 'quick-actions']);
     for (const sectionDescriptor of schemaSurfaceSections()) {
         const nodes = renderSchemaSection(sectionDescriptor, doc);
