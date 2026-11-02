@@ -20,6 +20,10 @@ node_modules/
 .env
 !audio_engine/.env
 
+# AndroidController 的 config.env 记录本机 adb 绝对路径与已配对设备序列号，
+# 只提交 config.env.example 模板。
+VCPDistributedServer/Plugin/AndroidController/config.env
+
 /public/assets
 
 **/.DS_Store

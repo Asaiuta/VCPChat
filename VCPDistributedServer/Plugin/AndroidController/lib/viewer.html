@@ -1,0 +1,1227 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Android 显示屏</title>
+<!-- 内联图标：避免浏览器自动请求 /favicon.ico 造成 404 -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%234ea8de'/%3E%3Crect x='9' y='6' width='14' height='20' rx='2.5' fill='%230b0d10'/%3E%3C/svg%3E">
+<style>
+    :root {
+        --bg: #0b0d10;
+        --panel: #14181d;
+        --panel-2: #1a1f26;
+        --line: #262c33;
+        --text: #e8ecef;
+        --muted: #8b959e;
+        --accent: #4ea8de;
+        --ok: #4ade80;
+        --warn: #fbbf24;
+        --bad: #f87171;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+        margin: 0; height: 100%;
+        background: var(--bg); color: var(--text);
+        font: 13px/1.5 "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
+        overflow: hidden;
+    }
+    #app { display: grid; grid-template-rows: auto 1fr auto; height: 100%; }
+    header {
+        display: flex; align-items: center; gap: 10px;
+        padding: 8px 12px;
+        border-bottom: 1px solid var(--line);
+        background: var(--panel);
+        flex-wrap: wrap;
+    }
+    .title { font-weight: 650; font-size: 12px; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+    .dot.online { background: var(--ok); box-shadow: 0 0 8px color-mix(in srgb, var(--ok) 60%, transparent); }
+    .dot.warn { background: var(--warn); }
+    .dot.error { background: var(--bad); }
+    .stat { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+    .spacer { flex: 1; }
+    button {
+        background: transparent; color: var(--muted);
+        border: 1px solid var(--line); border-radius: 6px;
+        padding: 4px 10px; font-size: 11px; cursor: pointer;
+        font-family: inherit; transition: border-color .12s, color .12s;
+    }
+    button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+    button.active { border-color: var(--accent); color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+    button:disabled { opacity: .45; cursor: default; }
+    button.primary {
+        background: var(--accent); border-color: var(--accent); color: #06121a;
+        font-weight: 600;
+    }
+    button.primary:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 85%, white); color: #06121a; }
+
+    #stage {
+        position: relative;
+        display: flex; align-items: center; justify-content: center;
+        overflow: hidden; padding: 12px; min-height: 0;
+        background: radial-gradient(circle at 50% 40%, #161b21 0%, #0b0d10 70%);
+    }
+    #screen {
+        max-width: 100%; max-height: 100%;
+        object-fit: contain; border-radius: 10px;
+        box-shadow: 0 12px 40px rgba(0,0,0,.55), 0 0 0 1px var(--line);
+        display: block;
+    }
+    #screen.fit-width { width: 100%; height: auto; max-height: none; }
+
+    /* H.264 硬解走 canvas，尺寸规则与 img 保持一致 */
+    #h264 {
+        max-width: 100%; max-height: 100%;
+        object-fit: contain; border-radius: 10px;
+        box-shadow: 0 12px 40px rgba(0,0,0,.55), 0 0 0 1px var(--line);
+        display: block;
+        image-rendering: auto;
+    }
+    #h264.fit-width { width: 100%; height: auto; max-height: none; }
+
+    /* ---------- 连接向导 ---------- */
+    #wizard {
+        position: absolute; inset: 0;
+        display: flex; align-items: center; justify-content: center;
+        padding: 20px; overflow-y: auto;
+    }
+    #wizard.hidden { display: none; }
+    .card {
+        width: 100%; max-width: 440px;
+        background: var(--panel); border: 1px solid var(--line);
+        border-radius: 12px; padding: 18px 18px 16px;
+        box-shadow: 0 18px 50px rgba(0,0,0,.5);
+    }
+    .card h2 {
+        margin: 0 0 4px; font-size: 15px; font-weight: 650;
+        display: flex; align-items: center; gap: 8px;
+    }
+    .card .lead { color: var(--muted); font-size: 12px; margin: 0 0 16px; }
+    .step {
+        border-top: 1px solid var(--line);
+        padding: 14px 0 0; margin-top: 14px;
+    }
+    .step:first-of-type { border-top: none; padding-top: 0; margin-top: 0; }
+    .step-head {
+        display: flex; align-items: baseline; gap: 8px;
+        font-size: 12px; font-weight: 600; margin-bottom: 3px;
+    }
+    .step-no {
+        flex: none; width: 17px; height: 17px; border-radius: 50%;
+        border: 1px solid var(--line); color: var(--muted);
+        font-size: 10px; line-height: 15px; text-align: center; font-weight: 500;
+    }
+    .step.done .step-no { border-color: var(--ok); color: var(--ok); }
+    .step-body { color: var(--muted); font-size: 12px; margin-left: 25px; }
+    .step-body p { margin: 4px 0; }
+    .fields { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+    input {
+        flex: 1; min-width: 0;
+        background: var(--panel-2); color: var(--text);
+        border: 1px solid var(--line); border-radius: 6px;
+        padding: 7px 9px; font-size: 12px; font-family: inherit;
+    }
+    input:focus { outline: none; border-color: var(--accent); }
+    input::placeholder { color: #5e6a73; }
+    input.code-input { flex: none; width: 92px; letter-spacing: 2px; text-align: center; }
+    .btn-row { display: flex; gap: 6px; margin-top: 8px; }
+    .msg { margin-top: 8px; font-size: 11.5px; white-space: pre-wrap; word-break: break-word; }
+    .msg.ok { color: var(--ok); }
+    .msg.err { color: var(--bad); }
+    .msg.info { color: var(--muted); }
+    .device-line {
+        display: flex; align-items: center; gap: 8px;
+        padding: 6px 9px; border-radius: 6px; background: var(--panel-2);
+        border: 1px solid var(--line); margin-top: 6px; font-size: 12px;
+    }
+    .device-line .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .badge {
+        font-size: 10px; padding: 1px 6px; border-radius: 999px;
+        border: 1px solid var(--line); color: var(--muted); flex: none;
+    }
+    .badge.ok { border-color: color-mix(in srgb, var(--ok) 50%, transparent); color: var(--ok); }
+    .badge.warn { border-color: color-mix(in srgb, var(--warn) 50%, transparent); color: var(--warn); }
+    .tip {
+        background: color-mix(in srgb, var(--accent) 10%, transparent);
+        border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+        border-radius: 7px; padding: 8px 10px; font-size: 11.5px;
+        color: #b8d9ee; margin-top: 12px;
+    }
+    .tip code {
+        font-family: "Cascadia Code", Consolas, monospace;
+        color: var(--accent); font-size: 11px;
+    }
+
+    footer {
+        display: flex; align-items: center; gap: 14px;
+        padding: 6px 12px; border-top: 1px solid var(--line);
+        background: var(--panel); font-size: 11px; color: var(--muted);
+        font-variant-numeric: tabular-nums;
+    }
+    footer .key { color: var(--text); }
+    .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div id="app">
+    <header>
+        <span class="dot" id="dot"></span>
+        <span class="title">Android 显示屏</span>
+        <span class="stat" id="conn">未连接</span>
+        <span class="spacer"></span>
+        <span class="stat" id="res">--</span>
+        <span class="stat" id="fps">-- fps</span>
+        <span class="stat" id="lat">-- ms</span>
+        <button id="fit" title="在原始尺寸与适合宽度间切换">适合宽度</button>
+        <button id="reconnect" title="重新建立连接">重连</button>
+        <button id="setup" title="连接或切换手机">连接手机</button>
+    </header>
+
+    <main id="stage">
+        <canvas id="h264" class="hidden"></canvas>
+        <img id="screen" alt="手机屏幕实时画面" class="hidden">
+
+        <div id="wizard">
+            <div class="card">
+                <h2>连接你的手机</h2>
+                <p class="lead">全程点按，不需要敲命令行。手机和电脑要在同一个 WiFi。</p>
+
+                <!-- 步骤 1 -->
+                <div class="step" id="step1">
+                    <div class="step-head"><span class="step-no">1</span>在手机上打开无线调试</div>
+                    <div class="step-body">
+                        <p>设置 → 关于手机 → 连点「版本号」7 次，回到设置进「开发者选项」，打开<strong>无线调试</strong>。</p>
+                        <p>手机和电脑要在同一个 WiFi。</p>
+                    </div>
+                </div>
+
+                <!-- 步骤 2：自动扫描为主 -->
+                <div class="step" id="step2">
+                    <div class="step-head"><span class="step-no">2</span>扫描并配对（只需一次）</div>
+                    <div class="step-body">
+                        <p>点下面按钮自动找手机。找到后手机上会显示 <strong>6 位配对码</strong>，<strong>只需要填这 6 位</strong>，不用管 IP 和端口。</p>
+                        <div class="btn-row">
+                            <button class="primary" id="doScan">扫描附近的手机</button>
+                        </div>
+                        <div class="msg" id="scanMsg"></div>
+                        <div id="scanList"></div>
+
+                        <!-- 只有需要配对码时才出现的输入区 -->
+                        <div id="pairBox" class="hidden">
+                            <p style="margin-top:10px">输入手机上显示的 6 位配对码：</p>
+                            <div class="fields">
+                                <input id="pairCode" class="code-input" placeholder="6 位码" inputmode="numeric" maxlength="6" autocomplete="off">
+                                <button class="primary" id="doPair">配对</button>
+                            </div>
+                            <div class="msg" id="pairMsg"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 步骤 3：连接（全自动） -->
+                <div class="step" id="step3">
+                    <div class="step-head"><span class="step-no">3</span>连接</div>
+                    <div class="step-body">
+                        <p>配对后点这里，自动连上已配对的手机。</p>
+                        <div class="btn-row">
+                            <button class="primary" id="doConnect">连接</button>
+                            <button id="refresh">刷新设备</button>
+                        </div>
+                        <div class="msg" id="connMsg"></div>
+                        <div id="deviceList"></div>
+
+                        <details id="manualBox" style="margin-top:10px">
+                            <summary style="cursor:pointer;font-size:11.5px">自动发现失败？手动填地址</summary>
+                            <p style="margin:8px 0 4px">只填手机 IP 就行，<strong>端口会自动扫</strong>（无线调试的端口每次随机，猜不出来）。</p>
+                            <div class="fields">
+                                <input id="connAddr" placeholder="192.168.137.178" autocomplete="off" spellcheck="false">
+                                <input id="connPort" class="code-input" placeholder="自动" inputmode="numeric" maxlength="5">
+                            </div>
+                            <div class="fields">
+                                <input id="pairAddr" placeholder="配对用 IP:端口（可选，手机上显示的）" autocomplete="off" spellcheck="false">
+                            </div>
+                        </details>
+                    </div>
+                </div>
+
+                <div class="tip" id="tipBox"></div>
+            </div>
+        </div>
+
+        <div id="error-box" class="hidden"></div>
+    </main>
+
+    <footer>
+        <span>帧序号 <span class="key" id="seq">--</span></span>
+        <span>尺寸 <span class="key" id="bytes">--</span></span>
+        <span>间隔 <span class="key" id="interval">--</span></span>
+        <span class="spacer"></span>
+        <span id="hint">画面为只读镜像，操作请通过 AndroidController 工具</span>
+    </footer>
+</div>
+
+<script>
+(() => {
+    'use strict';
+
+    const $ = (id) => document.getElementById(id);
+    const els = {
+        dot: $('dot'), conn: $('conn'), res: $('res'), fps: $('fps'), lat: $('lat'),
+        screen: $('screen'), h264: $('h264'), wizard: $('wizard'), errorBox: $('error-box'),
+        seq: $('seq'), bytes: $('bytes'), interval: $('interval'),
+        fit: $('fit'), reconnect: $('reconnect'), setup: $('setup'),
+        pairAddr: $('pairAddr'), pairCode: $('pairCode'), doPair: $('doPair'), pairMsg: $('pairMsg'),
+        doScan: $('doScan'), scanMsg: $('scanMsg'), scanList: $('scanList'), pairBox: $('pairBox'),
+        connAddr: $('connAddr'), connPort: $('connPort'), doConnect: $('doConnect'),
+        refresh: $('refresh'), connMsg: $('connMsg'), deviceList: $('deviceList'),
+        tipBox: $('tipBox'), step1: $('step1'), step2: $('step2'), step3: $('step3'),
+        manualBox: $('manualBox'),
+    };
+
+    const FRAME_MAGIC = 0x56434d31;
+    const H264_MAGIC = 0x56434831;
+    const H264_FLAG_KEY = 1;
+    const H264_FLAG_CONFIG = 2;
+    const H264_FLAG_SESSION = 4;
+    const HEADER_BYTES = 16;
+    const RECONNECT_DELAYS = [400, 800, 1500, 3000, 5000];
+    const STALE_MS = 4000;
+    const LATENCY_WINDOW = 20;
+
+    let socket = null;
+    let retryIndex = 0;
+    let retryTimer = null;
+    let closedByUs = false;
+    let pendingBlob = null;
+    let decodedSeq = -1;
+    let frameTimes = [];
+    let latencySamples = [];
+    let lastFrameAt = 0;
+    let staleTimer = null;
+    let resyncing = false;     // 防止停滞自愈反复触发
+    let lastPacketAt = 0;      // 最后收到任何二进制画面数据的时间
+    let lastResyncAt = 0;      // 上次重同步时间，用于退避
+    let objectUrl = null;
+    let fitWidth = false;
+    let devices = [];
+    let hasPaired = false;
+
+    // 自动接管：启动后无需点击，轮询直到连上或放弃
+    const AUTO_CONNECT_ROUNDS = 4;
+    const AUTO_CONNECT_DELAY_MS = 2500;
+    let autoConnecting = false;
+    let autoConnectingStopped = false;
+    let autoAttempts = 0;
+
+    // H.264 通道状态
+    let useH264 = false;
+    let decoder = null;
+    let h264Info = null;        // { codec, codecString, width, height }
+    let h264Pending = null;     // 尺寸已知但 codecString 未就绪
+    let h264ConfigBytes = null; // avcC description
+    let h264Bytes = 0;
+    let h264Seq = -1;
+    let h264Interrupted = false;   // 断过流：下个 ready 必须重建解码器
+    let pendingPts = 0;
+
+    // ---------- 通用 ----------
+    function setDot(state, text) {
+        els.dot.className = `dot ${state || ''}`.trim();
+        els.conn.textContent = text;
+    }
+    function say(el, text, kind = 'info') {
+        el.textContent = text || '';
+        el.className = `msg ${kind}`;
+    }
+    function api(path, body) {
+        const options = body === undefined
+            ? { method: 'GET' }
+            : {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            };
+        // HttpOnly 会话由同源 viewer 响应签发，脚本不读取或持有凭据。
+        return fetch(path, { ...options, credentials: 'same-origin' }).then(async (res) => {
+            const data = await res.json().catch(() => ({ ok: false, error: `HTTP ${res.status}` }));
+            return data;
+        }).catch((error) => ({ ok: false, error: `连不上服务：${error.message}` }));
+    }
+    async function withBusy(button, task) {
+        const label = button.textContent;
+        button.disabled = true;
+        button.textContent = '处理中…';
+        try { return await task(); }
+        finally { button.disabled = false; button.textContent = label; }
+    }
+
+    // ---------- 设备 ----------
+    function renderDevices() {
+        els.deviceList.innerHTML = '';
+        if (!devices.length) return;
+        for (const device of devices) {
+            const row = document.createElement('div');
+            row.className = 'device-line';
+
+            const name = document.createElement('span');
+            name.className = 'name';
+            name.textContent = device.model ? `${device.model} · ${device.serial}` : device.serial;
+            name.title = device.serial;
+
+            const badge = document.createElement('span');
+            const state = device.state || 'unknown';
+            badge.className = `badge ${state === 'device' ? 'ok' : state === 'unauthorized' ? 'warn' : ''}`;
+            badge.textContent = state === 'device' ? '已连接'
+                : state === 'unauthorized' ? '待授权'
+                : state === 'offline' ? '离线' : state;
+
+            row.append(name, badge);
+
+            if (state === 'device') {
+                const use = document.createElement('button');
+                use.textContent = '看画面';
+                use.addEventListener('click', () => startStreaming());
+                row.append(use);
+            }
+            els.deviceList.append(row);
+        }
+    }
+
+    async function refreshDevices({ quiet = false } = {}) {
+        const result = await api('/api/devices');
+        if (!result.ok) {
+            if (!quiet) say(els.connMsg, result.error || '读取设备失败', 'err');
+            return;
+        }
+        devices = Array.isArray(result.devices) ? result.devices : [];
+        renderDevices();
+
+        const ready = devices.filter((d) => d.state === 'device');
+        if (ready.length) {
+            // 有可用设备就自动切到画面，用户不需要再点一次
+            hideWizard();
+            startStreaming();
+            const first = ready[0];
+            els.connAddr.value = first.serial.replace(/:\d+$/, '');
+            if (!quiet) say(els.connMsg, `已连接 ${first.model || first.serial}`, 'ok');
+        } else if (!quiet) {
+            const unauthorized = devices.find((d) => d.state === 'unauthorized');
+            if (unauthorized) {
+                say(els.connMsg, '手机弹出了「允许调试吗？」，去手机上点「允许」', 'err');
+            } else if (devices.length) {
+                say(els.connMsg, '检测到未就绪的设备，试试重新连接', 'err');
+            } else {
+                say(els.connMsg, '还没有设备。按上面三步操作，或点「刷新设备」', 'info');
+            }
+        }
+    }
+
+    // ---------- 扫描 / 配对 / 连接 ----------
+    els.doScan.addEventListener('click', () => withBusy(els.doScan, async () => {
+        stopAutoConnect();   // 用户手动扫描，接管自动循环
+        say(els.scanMsg, '正在扫描…（手机上如果开着配对框，这时能被发现）', 'info');
+        els.scanList.innerHTML = '';
+
+        const result = await api('/api/discover', { waitMs: 6000 });
+        if (!result.ok) {
+            say(els.scanMsg, result.error || '扫描失败', 'err');
+            return;
+        }
+
+        // 已配对、可直接连的设备
+        if (result.connect?.length) {
+            for (const item of result.connect) {
+                const row = document.createElement('div');
+                row.className = 'device-line';
+                const name = document.createElement('span');
+                name.className = 'name';
+                name.textContent = item.address;
+                const badge = document.createElement('span');
+                badge.className = `badge ${item.connected ? 'ok' : ''}`;
+                badge.textContent = item.connected ? '已连接' : '连接中';
+                row.append(name, badge);
+                els.scanList.append(row);
+            }
+        }
+
+        // 正在配对中的设备 —— 这时只需要用户输 6 位码
+        if (result.pairing?.length) {
+            const item = result.pairing[0];
+            say(els.scanMsg, `发现配对中的手机（${item.address}）。看手机屏幕，输入 6 位配对码。`, 'ok');
+            els.pairBox.classList.remove('hidden');
+            els.pairCode.focus();
+            return;
+        }
+
+        els.pairBox.classList.add('hidden');
+
+        if (result.connect?.length) {
+            // 扫到就连，不再让用户点第二次
+            say(els.scanMsg, '发现了手机，正在连接…', 'ok');
+            const connected = await autoConnect();
+            if (connected) {
+                els.scanMsg.textContent = '';
+                hideWizard();
+            }
+            return;
+        }
+
+        say(els.scanMsg,
+            '没发现手机。确认：①无线调试已打开 ②手机和电脑同一 WiFi'
+            + ' ③如果还没配对过，先在手机上点「使用配对码配对设备」再扫描。',
+            'err');
+    }));
+
+    /**
+     * 自动连接。服务端无参数时走自动接管：
+     * 已连着就直接用，否则自己发现并连接。
+     */
+    async function autoConnect() {
+        say(els.connMsg, '正在连接…', 'info');
+        const result = await api('/api/connect', {});
+        if (!result.ok) {
+            const detail = [result.error, result.hint].filter(Boolean).join('\n');
+            say(els.connMsg, detail, 'err');
+            return false;
+        }
+        els.step3.classList.add('done');
+        say(els.connMsg, result.message || '已连接', 'ok');
+
+        const list = await api('/api/devices').catch(() => null);
+        if (list?.ok) {
+            devices = Array.isArray(list.devices) ? list.devices : [];
+            renderDevices();
+        }
+        if (devices.some((d) => d.state === 'device')) {
+            hideWizard();
+            startStreaming();
+        }
+        return true;
+    }
+
+    els.doPair.addEventListener('click', () => withBusy(els.doPair, async () => {
+        const code = els.pairCode.value.trim();
+        const manualAddr = els.pairAddr.value.trim();
+        if (!/^\d{6}$/.test(code)) { say(els.pairMsg, '配对码是 6 位数字', 'err'); return; }
+
+        say(els.pairMsg, '正在配对…', 'info');
+        // 不带地址时服务端会用 mDNS 自动发现配对端口
+        const payload = manualAddr ? { address: manualAddr, code } : { code };
+        const result = await api('/api/pair', payload);
+        if (!result.ok) {
+            const detail = [result.error, result.hint].filter(Boolean).join('\n');
+            say(els.pairMsg, detail || '配对失败', 'err');
+            return;
+        }
+        hasPaired = true;
+        els.step2.classList.add('done');
+        say(els.pairMsg, '配对成功，正在自动连接…', 'ok');
+
+        // 配对成功后一般能直接连上，不用再点
+        const connected = await autoConnect();
+        if (!connected) say(els.pairMsg, '配对成功。点下面的「连接」再试一次。', 'ok');
+    }));
+
+    els.doConnect.addEventListener('click', () => withBusy(els.doConnect, async () => {
+        const host = els.connAddr.value.trim();
+        const port = els.connPort.value.trim();
+
+        // 端口留空 = 让服务端扫；填了才指定
+        const address = host
+            ? (port ? `${host}:${port}` : host)
+            : undefined;
+
+        say(els.connMsg, address && !port ? '正在扫描端口（约 8 秒）…' : '正在连接…', 'info');
+        const result = await api('/api/connect', address ? { address } : {});
+        if (!result.ok) {
+            const detail = [result.error, result.hint].filter(Boolean).join('\n');
+            say(els.connMsg, detail || '连接失败', 'err');
+            if (!host && els.manualBox) els.manualBox.open = true;
+            return;
+        }
+        els.step3.classList.add('done');
+        say(els.connMsg, result.message || '已连接', 'ok');
+        await refreshDevices({ quiet: true });
+    }));
+
+    els.refresh.addEventListener('click', () => withBusy(els.refresh, () => refreshDevices()));
+
+    els.setup.addEventListener('click', () => {
+        els.wizard.classList.remove('hidden');
+        els.screen.classList.add('hidden');
+        refreshDevices({ quiet: true });
+    });
+
+    function hideWizard() {
+        els.wizard.classList.add('hidden');
+    }
+
+    // ---------- 画面流 ----------
+    function toWsUrl() {
+        const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        return `${scheme}//${location.host}/stream`;
+    }
+
+    function startStreaming() {
+        hideWizard();
+        els.screen.classList.remove('hidden');
+        connect();
+    }
+
+    function connect() {
+        cleanupSocket();
+        setDot('warn', '连接中…');
+
+        let ws;
+        try {
+            ws = new WebSocket(toWsUrl());
+        } catch (error) {
+            setDot('error', '无法连接');
+            return;
+        }
+        ws.binaryType = 'arraybuffer';
+        socket = ws;
+
+        ws.onopen = () => {
+            retryIndex = 0;
+            setDot('online', '已连接');
+            els.errorBox.classList.add('hidden');
+            startStaleWatch();
+            ws.send(JSON.stringify({ type: 'hello', at: Date.now() }));
+        };
+
+        ws.onmessage = (event) => {
+            if (typeof event.data === 'string') { handleText(event.data); return; }
+            handleBinary(event.data);
+        };
+
+        ws.onclose = (event) => {
+            stopStaleWatch();
+            if (closedByUs) return;
+            setDot(event.code === 1000 ? '' : 'error', `已断开 (${event.code})`);
+            scheduleReconnect();
+        };
+
+        ws.onerror = () => {
+            els.errorBox.textContent = 'WebSocket 连接失败，请确认 AndroidController 插件仍在运行。';
+            els.errorBox.classList.remove('hidden');
+        };
+    }
+
+    /** 给服务端发控制消息（连不上时静默忽略，别把 UI 弄崩） */
+    function sendToServer(payload) {
+        try {
+            if (socket && socket.readyState === 1) {
+                socket.send(JSON.stringify({ ...payload, at: Date.now() }));
+            }
+        } catch { /* 忽略 */ }
+    }
+
+    function scheduleReconnect() {
+        if (closedByUs || retryTimer) return;
+        const delay = RECONNECT_DELAYS[Math.min(retryIndex, RECONNECT_DELAYS.length - 1)];
+        retryIndex += 1;
+        setDot('warn', `${Math.round(delay / 100) / 10}s 后重试`);
+        retryTimer = setTimeout(() => { retryTimer = null; connect(); }, delay);
+    }
+
+    function handleText(raw) {
+        let payload;
+        try { payload = JSON.parse(raw); } catch { return; }
+
+        if (payload?.type === 'scrcpy-ready') {
+            setupH264(payload);
+            return;
+        }
+        if (payload?.type === 'scrcpy-closed') {
+            // 服务端正在自动重建通道。这里不能自己切 <img> 干等 ——
+            // 那正是「提示已回退兼容模式、却再也没画面」的原因：
+            // 服务端还没订阅 JPEG，img 永远等不到帧。
+            h264Interrupted = true;
+            setDot('warn', '画面重连中…');
+            // 解码器状态留着，重启后会收到新的 ready 再重建
+            return;
+        }
+        if (payload?.type === 'scrcpy-fallback') {
+            // 服务端确认放弃 H.264 并已开始推 JPEG，这时切过去才有帧
+            fallbackToJpeg(payload.reason || 'H.264 通道不可用', { temporary: true });
+            return;
+        }
+
+        if (payload?.type === 'status') {
+            const state = payload.state || payload.scrcpy || payload.frame;
+            if (!state) return;
+            if (state.lastError?.message) {
+                els.errorBox.textContent = state.lastError.message;
+                els.errorBox.classList.remove('hidden');
+            } else if (state.streaming || state.state === 'streaming') {
+                els.errorBox.classList.add('hidden');
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // H.264 硬解通道（WebCodecs）
+    //
+    // scrcpy 发的是 Annex-B 字节流（NAL 前带 00 00 01 起始码），
+    // 而 WebCodecs 的 avc1 要求 AVCC 格式（NAL 前带 4 字节长度）。
+    // 所以要做两件事：
+    //   1) 从 SPS/PPS 拼出 avcC description
+    //   2) 每帧把起始码替换成长度前缀
+    // ---------------------------------------------------------------------
+
+    function setupH264(info) {
+        if (!window.VideoDecoder) {
+            fallbackToJpeg('浏览器不支持 WebCodecs');
+            return;
+        }
+
+        // 首连时 ready 可能晚于 config 包到达，这种情况不该重置已建好的解码器。
+        // 但重连必须重建：新流会带新的 SPS/PPS 和序号。
+        // 两种重连都要处理：断流后恢复（h264Interrupted）、以及从 JPEG 切回（!useH264）。
+        const isReconnect = h264Interrupted || !useH264;
+        if (useH264 && h264Info?.codecString && !isReconnect) {
+            h264Info = { ...h264Info, ...info, codecString: h264Info.codecString };
+            return;
+        }
+
+        if (isReconnect) {
+            // 新会话：旧的解码器、配置、序号全部作废
+            closeDecoder();
+            h264ConfigBytes = null;
+            h264Seq = -1;
+            h264Interrupted = false;
+            decodedSeq = -1;
+            frameTimes = [];
+            h264Info = null;
+            h264Pending = null;
+        }
+
+        useH264 = true;
+        els.screen.classList.add('hidden');
+        els.h264.classList.remove('hidden');
+
+        if (!info?.codecString) {
+            // codecString 依赖 SPS，通常要等第一个 config 包。
+            // 先记住尺寸，config 到了会自己补全并初始化解码器。
+            h264Pending = { ...(h264Pending || {}), ...info };
+            if (!h264Info) h264Info = { ...h264Pending };
+            setDot('warn', '等待 SPS/PPS…');
+            return;
+        }
+        h264Info = { ...(h264Info || {}), ...info };
+        h264Pending = null;
+        if (!h264ConfigBytes) {
+            // 有 codecString 但还没 SPS/PPS，同样等 config
+            setDot('warn', '等待 SPS/PPS…');
+            return;
+        }
+        if (!decoder || decoder.state === 'closed') initDecoder();
+        configureDecoder(h264ConfigBytes);
+        setDot('online', '已连接');
+    }
+
+    function fallbackToJpeg(reason, { temporary = false } = {}) {
+        // 切到 <img> 只是改本地显示；不告诉服务端订阅 JPEG 的话，
+        // img 永远等不到新帧 —— 那就成了「提示已回退、画面却不动」。
+        const wasH264 = useH264;
+        useH264 = false;
+        h264Interrupted = false;
+        els.h264.classList.add('hidden');
+        els.screen.classList.remove('hidden');
+        closeDecoder();
+        decodedSeq = -1;
+        // 服务端临时降级已订阅 JPEG，不能回发永久客户端模式选择。
+        if (!temporary) sendToServer({ type: 'request-jpeg', reason });
+        if (!wasH264) return;
+        els.errorBox.textContent = `${reason}，已切到兼容模式。画面会自己恢复，不用刷新。`;
+        els.errorBox.classList.remove('hidden');
+        setTimeout(() => els.errorBox.classList.add('hidden'), 4000);
+    }
+
+    /** 重建解码器：让后续关键帧能重新对上，不清 canvas（画面先留住） */
+    function resetDecoderForResync() {
+        h264ConfigBytes = null;
+        closeDecoder();
+        h264Seq = -1;
+        setDot('warn', '解码器重同步…');
+        // 等服务端补发 config（重连或恢复时都会补发）
+        sendToServer({ type: 'request-keyframe' });
+    }
+
+    function initDecoder() {
+        closeDecoder();
+        const info = h264Info;
+        if (!info?.codecString) return;
+        try {
+            decoder = new VideoDecoder({
+                output: (frame) => {
+                    renderFrame(frame);
+                    frame.close();
+                },
+                error: (error) => {
+                    els.errorBox.textContent = `解码失败：${error.message}`;
+                    els.errorBox.classList.remove('hidden');
+                    fallbackToJpeg('H.264 解码出错');
+                },
+            });
+        } catch (error) {
+            fallbackToJpeg(`无法创建解码器：${error.message}`);
+        }
+    }
+
+    function configureDecoder(description) {
+        const info = h264Info;
+        if (!decoder || !info) return false;
+        try {
+            decoder.configure({
+                codec: info.codecString,
+                codedWidth: info.width || 540,
+                codedHeight: info.height || 1200,
+                description,
+                optimizeForLatency: true,
+                hardwareAcceleration: 'prefer-hardware',
+            });
+            return true;
+        } catch (error) {
+            // 硬解不支持时退回软解
+            try {
+                decoder.configure({
+                    codec: info.codecString,
+                    codedWidth: info.width || 540,
+                    codedHeight: info.height || 1200,
+                    description,
+                    optimizeForLatency: true,
+                });
+                return true;
+            } catch (inner) {
+                els.errorBox.textContent = `解码器配置失败：${inner.message}`;
+                els.errorBox.classList.remove('hidden');
+                return false;
+            }
+        }
+    }
+
+    /** 从 Annex-B 里拆出 NAL 单元 */
+    function splitNals(bytes) {
+        const nals = [];
+        let i = 0;
+        let start = -1;
+        while (i + 2 < bytes.length) {
+            if (bytes[i] === 0 && bytes[i + 1] === 0 && bytes[i + 2] === 1) {
+                if (start >= 0) nals.push(bytes.subarray(start, i));
+                i += 3;
+                start = i;
+            } else if (i + 3 < bytes.length && bytes[i] === 0 && bytes[i + 1] === 0
+                && bytes[i + 2] === 0 && bytes[i + 3] === 1) {
+                if (start >= 0) nals.push(bytes.subarray(start, i));
+                i += 4;
+                start = i;
+            } else {
+                i += 1;
+            }
+        }
+        if (start >= 0 && start < bytes.length) nals.push(bytes.subarray(start));
+        return nals;
+    }
+
+    /** 用 SPS/PPS 构造 avcC（AVCDecoderConfigurationRecord） */
+    function buildAvcC(sps, pps) {
+        const parts = [];
+        const head = new Uint8Array([
+            1,                    // configurationVersion
+            sps[1],               // AVCProfileIndication
+            sps[2],               // profile_compatibility
+            sps[3],               // AVCLevelIndication
+            0xff,                 // 6 bits reserved + lengthSizeMinusOne=3（4 字节长度）
+            0xe1,                 // 3 bits reserved + numOfSPS=1
+        ]);
+        parts.push(head);
+        parts.push(new Uint8Array([(sps.length >> 8) & 0xff, sps.length & 0xff]));
+        parts.push(sps);
+        parts.push(new Uint8Array([1]));   // numOfPPS=1
+        parts.push(new Uint8Array([(pps.length >> 8) & 0xff, pps.length & 0xff]));
+        parts.push(pps);
+        let total = 0;
+        for (const p of parts) total += p.length;
+        const out = new Uint8Array(total);
+        let offset = 0;
+        for (const p of parts) { out.set(p, offset); offset += p.length; }
+        return out.buffer;
+    }
+
+    /** Annex-B → AVCC（每个 NAL 前加 4 字节大端长度） */
+    function annexBToAvcc(bytes) {
+        const nals = splitNals(bytes);
+        let total = 0;
+        for (const n of nals) total += 4 + n.length;
+        const out = new Uint8Array(total);
+        let offset = 0;
+        for (const n of nals) {
+            out[offset] = (n.length >>> 24) & 0xff;
+            out[offset + 1] = (n.length >>> 16) & 0xff;
+            out[offset + 2] = (n.length >>> 8) & 0xff;
+            out[offset + 3] = n.length & 0xff;
+            out.set(n, offset + 4);
+            offset += 4 + n.length;
+        }
+        return out;
+    }
+
+    function handleH264Packet(buffer) {
+        if (!useH264) return;
+        const header = new DataView(buffer, 0, HEADER_BYTES);
+        if (header.getUint32(0, true) !== H264_MAGIC) return;
+
+        const seq = header.getUint32(4, true);
+        const pts = header.getUint32(8, true);
+        const flags = header.getUint32(12, true);
+        const payload = new Uint8Array(buffer, HEADER_BYTES);
+
+        if (flags & H264_FLAG_SESSION) {
+            // 会话变更：尺寸变了。记录新尺寸，等随后的 config 包重建解码器。
+            const width = payload.length >= 12 ? new DataView(buffer, HEADER_BYTES, 12).getUint32(4) : 0;
+            const height = payload.length >= 12 ? new DataView(buffer, HEADER_BYTES, 12).getUint32(8) : 0;
+            h264Info = { ...(h264Info || {}), ...(width ? { width, height } : {}) };
+            h264Seq = -1;
+            h264ConfigBytes = null;
+            closeDecoder();
+            return;
+        }
+
+        if (flags & H264_FLAG_CONFIG) {
+
+            const nals = splitNals(payload);
+            const sps = nals.find((n) => (n[0] & 0x1f) === 7);
+            const pps = nals.find((n) => (n[0] & 0x1f) === 8);
+            if (!sps || !pps) return;
+
+            // codecString 直接从 SPS 推导，不依赖服务端是否来得及解析
+            const hex = (b) => b.toString(16).padStart(2, '0');
+            const derived = `avc1.${hex(sps[1])}${hex(sps[2])}${hex(sps[3])}`;
+            h264Info = { ...(h264Pending || {}), ...(h264Info || {}) };
+            h264Info.codecString = derived;
+            h264Pending = null;
+            h264ConfigBytes = buildAvcC(sps, pps);
+
+            if (!decoder || decoder.state === 'closed') {
+                initDecoder();
+            }
+            if (decoder && decoder.state === 'configured') {
+                try { decoder.configure(decoderConfig()); } catch { /* 忽略 */ }
+            } else {
+                configureDecoder(h264ConfigBytes);
+            }
+            setDot('online', '已连接');
+            return;
+        }
+
+        if (!decoder || decoder.state !== 'configured') {
+            // config 还没到，关键帧前的帧本来也解不了
+            return;
+        }
+
+        // delta 帧有引用依赖；积压时重建并请求完整初始化，不能丢一帧后继续解码。
+        if (decoder.decodeQueueSize > 8) {
+            resetDecoderForResync();
+            return;
+        }
+        // H.264 和 JPEG 各自独立计数，不能共用 decodedSeq
+        if (h264Seq >= 0 && seq <= h264Seq) return;
+        h264Seq = seq;
+
+        try {
+            const avcc = annexBToAvcc(payload);
+            decoder.decode(new EncodedVideoChunk({
+                type: (flags & H264_FLAG_KEY) ? 'key' : 'delta',
+                timestamp: pts * 1000,   // 微秒
+                data: avcc,
+            }));
+            pendingPts = pts;
+        } catch (error) {
+            els.errorBox.textContent = `送帧失败：${error.message}`;
+            els.errorBox.classList.remove('hidden');
+        }
+    }
+
+    function decoderConfig() {
+        return {
+            codec: h264Info.codecString,
+            codedWidth: h264Info.width || 540,
+            codedHeight: h264Info.height || 1200,
+            description: h264ConfigBytes,
+            optimizeForLatency: true,
+        };
+    }
+
+    function renderFrame(frame) {
+        const canvas = els.h264;
+        if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
+            canvas.width = frame.displayWidth;
+            canvas.height = frame.displayHeight;
+        }
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(frame, 0, 0);
+
+        els.res.textContent = `${frame.displayWidth}×${frame.displayHeight}`;
+        els.bytes.textContent = formatBytes(h264Bytes);
+        els.seq.textContent = String(h264Seq);
+        recordFrame(Date.now());
+    }
+
+    function closeDecoder() {
+        if (!decoder) return;
+        try { if (decoder.state !== 'closed') decoder.close(); } catch { /* 忽略 */ }
+        decoder = null;
+    }
+
+    function handleBinary(buffer) {
+        if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < HEADER_BYTES) return;
+        const magic = new DataView(buffer, 0, 4).getUint32(0, true);
+
+        // 记录「最后收到任何画面数据的时间」。
+        // 这是区分两种停滞的唯一证据：
+        //   有包但不出画 → 解码器失步，该重置
+        //   完全没包     → 手机画面静止（或用的是静止占用的相机），不该乱动
+        lastPacketAt = Date.now();
+
+        if (magic === H264_MAGIC) {
+            h264Bytes = buffer.byteLength - HEADER_BYTES;
+            handleH264Packet(buffer);
+            return;
+        }
+        if (magic !== FRAME_MAGIC) return;
+        if (useH264) return;   // H.264 通道正常时忽略 JPEG
+
+        const header = new DataView(buffer, 0, HEADER_BYTES);
+        const seq = header.getUint32(4, true);
+        const capturedAt = Number(header.getBigUint64(8, true));
+        if (decodedSeq >= 0 && seq <= decodedSeq) return;
+        decodedSeq = seq;
+
+        const now = Date.now();
+        if (capturedAt > 0) {
+            latencySamples.push(now - capturedAt);
+            if (latencySamples.length > LATENCY_WINDOW) latencySamples.shift();
+        }
+
+        if (pendingBlob) return;
+        const blob = new Blob([new Uint8Array(buffer, HEADER_BYTES)], { type: detectMime(buffer) });
+        pendingBlob = blob;
+
+        const url = URL.createObjectURL(blob);
+        const img = new Image();
+        img.onload = () => {
+            const previous = objectUrl;
+            els.screen.src = url;
+            objectUrl = url;
+            if (previous) URL.revokeObjectURL(previous);
+            els.res.textContent = `${img.naturalWidth}×${img.naturalHeight}`;
+            els.seq.textContent = String(seq);
+            els.bytes.textContent = formatBytes(blob.size);
+            pendingBlob = null;
+            recordFrame(now);
+        };
+        img.onerror = () => { URL.revokeObjectURL(url); pendingBlob = null; };
+        img.src = url;
+    }
+
+    function detectMime(buffer) {
+        const bytes = new Uint8Array(buffer, HEADER_BYTES, 4);
+        if (bytes[0] === 0xff && bytes[1] === 0xd8) return 'image/jpeg';
+        if (bytes[0] === 0x89 && bytes[1] === 0x50) return 'image/png';
+        return 'image/jpeg';
+    }
+
+    function recordFrame(now) {
+        // 连接瞬间服务端会把积压帧一口气推过来，间隔只有几毫秒，
+        // 直接算会得出 600+ fps 的假数字。低于 500ms 的窗口不更新读数。
+        if (lastFrameAt) els.interval.textContent = `${now - lastFrameAt} ms`;
+        lastFrameAt = now;
+        frameTimes.push(now);
+        if (frameTimes.length > 30) frameTimes.shift();
+        if (frameTimes.length >= 2) {
+            const span = frameTimes[frameTimes.length - 1] - frameTimes[0];
+            if (span >= 500) {
+                els.fps.textContent = `${((frameTimes.length - 1) * 1000 / span).toFixed(1)} fps`;
+            }
+        }
+        if (latencySamples.length) {
+            const avg = latencySamples.reduce((a, b) => a + b, 0) / latencySamples.length;
+            els.lat.textContent = `${Math.round(avg)} ms`;
+        }
+    }
+
+    function startStaleWatch() {
+        stopStaleWatch();
+        staleTimer = setInterval(() => {
+            if (!lastFrameAt) return;
+            const now = Date.now();
+            const age = now - lastFrameAt;
+            if (age <= STALE_MS) return;
+
+            setDot('warn', `画面停滞 ${(age / 1000).toFixed(1)}s`);
+
+            // 关键：先判断"停滞"是哪一种。
+            //
+            // 真机实测：手机停在静态界面时，scrcpy 最长可达 34 秒不发任何帧，
+            // 但流是好的。把这种超时当故障去重建解码器，会变成
+            // 「重建 → 还是没帧 → 再重建」的空转，白白消耗主机。
+            //
+            // 有区分力的信号是：数据还在不在进来。
+            //   有包进来、但不渲染  → 解码器失步（漏了关键帧/队列被清空），该救
+            //   完全没有包进来      → 画面静止，交给服务端看门狗判断链路
+            const packetAge = lastPacketAt ? now - lastPacketAt : Number.MAX_SAFE_INTEGER;
+            const packetsFlowing = packetAge < 2000;   // 2 秒内还有包，链路活着
+
+            if (!useH264) return;
+            if (!packetsFlowing) {
+                // 静止画面。不要动解码器，也别去打扰服务端。
+                return;
+            }
+            // 有包却不渲染 = 解码器卡住。退避后重建，避免每轮都重建。
+            if (resyncing || now - lastResyncAt < 10000) return;
+            resyncing = true;
+            lastResyncAt = now;
+            resetDecoderForResync();
+            setTimeout(() => { resyncing = false; }, 5000);
+        }, 1000);
+    }
+    function stopStaleWatch() {
+        if (staleTimer) { clearInterval(staleTimer); staleTimer = null; }
+    }
+    function formatBytes(size) {
+        if (size < 1024) return `${size} B`;
+        if (size < 1024 * 1024) return `${(size / 1024).toFixed(0)} KB`;
+        return `${(size / 1024 / 1024).toFixed(1)} MB`;
+    }
+    function cleanupSocket() {
+        if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+        if (socket) {
+            try { socket.onclose = null; socket.onerror = null; socket.close(); } catch { /* 忽略 */ }
+            socket = null;
+        }
+        pendingBlob = null;
+        // 换连接时解码器必须重建：新的流会带新的 SPS/PPS
+        closeDecoder();
+        useH264 = false;
+        h264Info = null;
+        h264Pending = null;
+        h264ConfigBytes = null;
+        h264Seq = -1;
+        decodedSeq = -1;
+    }
+
+    els.fit.addEventListener('click', () => {
+        fitWidth = !fitWidth;
+        els.screen.classList.toggle('fit-width', fitWidth);
+        els.h264.classList.toggle('fit-width', fitWidth);
+        els.fit.classList.toggle('active', fitWidth);
+    });
+
+    els.reconnect.addEventListener('click', () => {
+        retryIndex = 0; closedByUs = false; decodedSeq = -1;
+        lastFrameAt = 0; frameTimes = []; latencySamples = [];
+        startStreaming();
+    });
+
+    // ---------- 启动 ----------
+    (async function boot() {
+        const status = await api('/api/adb');
+        if (!status.available) {
+            els.tipBox.innerHTML = '找不到 adb。请确认已安装 Android platform-tools，'
+                + '或在插件 <code>config.env</code> 里设置 <code>ADB_PATH</code>。';
+            els.tipBox.style.borderColor = 'color-mix(in srgb, var(--bad) 40%, transparent)';
+            say(els.connMsg, status.error || 'adb 不可用', 'err');
+            setDot('error', 'adb 不可用');
+            return;
+        }
+        // addresses 现在是 [{address, interface}]，只有网卡地址才是手机能连的
+        const list = Array.isArray(status.addresses) ? status.addresses : [];
+        const addrs = list
+            .map((item) => (typeof item === 'string' ? item : item.address))
+            .filter(Boolean);
+        const primary = addrs[0] || '未知';
+        const rest = addrs.slice(1);
+
+        els.tipBox.innerHTML = `本机 IP：<code>${primary}</code>`
+            + (rest.length ? `（另有 ${rest.length} 个虚拟网卡地址已忽略）` : '')
+            + `<br>手机要和电脑连同一个 WiFi。IP 不用手填 —— 点「扫描」会自动发现。`;
+
+        // 已有设备就直接看画面，不打扰用户
+        await refreshDevices({ quiet: true });
+        if (devices.some((d) => d.state === 'device')) return;
+
+        els.wizard.classList.remove('hidden');
+        setDot('warn', '正在找手机…');
+        startAutoConnect();
+    })();
+
+    /**
+     * 启动后的自动接管。
+     *
+     * 目标：用户什么都不点就能进画面。轮询几轮，期间保持扫描状态提示；
+     * 全都失败才显示向导让用户手动操作。用户点「扫描」会中断这个循环。
+     */
+    async function startAutoConnect() {
+        if (autoConnecting) return;
+        autoConnecting = true;
+        autoAttempts = 0;
+
+        try {
+            while (!autoConnectingStopped && autoAttempts < AUTO_CONNECT_ROUNDS) {
+                autoAttempts += 1;
+                const suffix = autoAttempts > 1 ? `（第 ${autoAttempts} 次）` : '';
+                say(els.scanMsg, `正在自动搜索手机…${suffix}`, 'info');
+                setDot('warn', '正在找手机…');
+
+                try {
+                    const result = await api('/api/connect', {});
+                    if (result.ok) {
+                        say(els.scanMsg, result.message || '已连接', 'ok');
+                        setDot('online', '已连接');
+                        const list = await api('/api/devices').catch(() => null);
+                        if (list?.ok) {
+                            devices = Array.isArray(list.devices) ? list.devices : [];
+                            renderDevices();
+                        }
+                        if (devices.some((d) => d.state === 'device')) {
+                            hideWizard();
+                            startStreaming();
+                            return;
+                        }
+                    }
+                } catch { /* 单轮失败继续重试 */ }
+
+                if (autoAttempts < AUTO_CONNECT_ROUNDS && !autoConnectingStopped) {
+                    await new Promise((r) => setTimeout(r, AUTO_CONNECT_DELAY_MS));
+                }
+            }
+
+            if (!autoConnectingStopped) {
+                setDot('', '等待连接手机');
+                say(els.scanMsg,
+                    '还没找到手机。确认无线调试已打开、手机和电脑同一 WiFi，'
+                    + '然后点「扫描附近的手机」，或手动填写地址。',
+                    'err');
+            }
+        } finally {
+            autoConnecting = false;
+        }
+    }
+
+    function stopAutoConnect() {
+        autoConnectingStopped = true;
+    }
+
+    window.addEventListener('beforeunload', () => {
+        closedByUs = true;
+        cleanupSocket();
+        stopStaleWatch();
+        if (objectUrl) URL.revokeObjectURL(objectUrl);
+    });
+})();
+</script>
+</body>
+</html>

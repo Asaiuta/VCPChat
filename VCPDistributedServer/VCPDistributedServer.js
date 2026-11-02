@@ -42,6 +42,27 @@ function isLoopbackAddress(address) {
         || normalized === '::ffff:127.0.0.1';
 }
 
+/**
+ * 插件的 Error 可能挂着机器可读字段：AndroidController 的 failure() 挂 code，
+ * 单步运行时挂 execution(outcome/timings/verification)。
+ * 只转发 message 会让上层丢掉这些字段，无法区分「已派发但未证实」与「参数非法」。
+ * 透传前先做一次 JSON 往返：execution 里若有循环引用，宁可丢弃也不能让
+ * sendMessage 的 JSON.stringify 抛错，否则整条响应都发不出去。
+ */
+function describeToolError(error) {
+    const details = {};
+    if (!error || typeof error !== 'object') return details;
+    if (typeof error.code === 'string' && error.code) details.code = error.code;
+    if (error.execution && typeof error.execution === 'object') {
+        try {
+            details.execution = JSON.parse(JSON.stringify(error.execution));
+        } catch {
+            // 循环引用或不可序列化，丢弃该字段
+        }
+    }
+    return details;
+}
+
 class DistributedServer {
     constructor(config = {}) {
         this.mainServerUrl = config.mainServerUrl;
@@ -62,6 +83,8 @@ class DistributedServer {
         this.chartService = config.chartService || null;
         this.gameService = config.gameService || null;
         this.workspaceService = config.workspaceService || null; // 工作区只读门面（白名单来源）
+        this.jevService = config.jevService || null;
+        this.systemAuthorization = config.systemAuthorization || null;
         this.onToolResult = typeof config.onToolResult === 'function' ? config.onToolResult : null; // 工具调用成功后的旁路通知，不影响返回结果
         this.ws = null;
         this.app = express(); // 创建 Express 应用
@@ -164,6 +187,8 @@ class DistributedServer {
             chartService: this.chartService,
             gameService: this.gameService,
             workspaceService: this.workspaceService,
+            jevService: this.jevService,
+            systemAuthorization: this.systemAuthorization,
         }, startupOptions);
         if (this.stopped) return;
         this.registerDiagnosticRoutes();
@@ -886,7 +911,9 @@ class DistributedServer {
                 data: {
                     requestId,
                     status: 'error',
-                    error: error.message || 'An unknown error occurred.'
+                    error: error.message || 'An unknown error occurred.',
+                    // 透传 code / execution，让上层能按契约判断而不是靠中文措辞
+                    ...describeToolError(error),
                 }
             };
         }

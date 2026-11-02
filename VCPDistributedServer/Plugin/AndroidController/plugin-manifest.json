@@ -1,0 +1,98 @@
+{
+    "manifestVersion": "1.0.0",
+    "name": "AndroidController",
+    "version": "1.0.0",
+    "displayName": "Android 手机操控",
+    "description": "通过 adb 让 Agent 感知与操作 Android 设备。感知优先使用 UI Automator 控件树（压缩为索引表，含精确坐标与可点击属性），截图仅作兜底；动作支持点击、滑动、长按、文本输入、按键、启停应用。附带一个只监听 127.0.0.1 的实时显示屏，可在 Loom 中作为独立应用打开观看手机画面。支持无线调试（Android 11+ 配对）与 USB 调试两种接入方式。",
+    "author": "绫织",
+    "pluginType": "hybridservice",
+    "entryPoint": {
+        "type": "nodejs",
+        "script": "AndroidControllerService.js"
+    },
+    "communication": {
+        "protocol": "direct",
+        "timeout": 120000
+    },
+    "configSchema": {
+        "ADB_PATH": {
+            "type": "string",
+            "description": "adb 可执行文件路径。留空则使用 PATH 中的 adb。Windows 通常为 platform-tools 目录下的 adb.exe。",
+            "default": "adb"
+        },
+        "DEVICE_SERIAL": {
+            "type": "string",
+            "description": "默认设备序列号或 无线地址(ip:5555)。留空则自动选用第一台已授权设备。",
+            "default": ""
+        },
+        "ADB_TIMEOUT_MS": {
+            "type": "integer",
+            "description": "单次 adb 命令超时（毫秒）。",
+            "default": 20000
+        },
+        "DISPLAY_PORT": {
+            "type": "integer",
+            "description": "显示屏服务监听端口（仅 127.0.0.1）。0 表示随机分配。",
+            "default": 5977
+        },
+        "STREAM_FORMAT": {
+            "type": "string",
+            "description": "推流编码格式：jpeg（体积小，推荐）或 png。",
+            "default": "jpeg"
+        },
+        "STREAM_QUALITY": {
+            "type": "integer",
+            "description": "JPEG 质量（10-95）。",
+            "default": 70
+        },
+        "STREAM_INTERVAL_MS": {
+            "type": "integer",
+            "description": "推流间隔（毫秒）。数值越小越流畅，但手机发热与带宽占用上升。",
+            "default": 400
+        },
+        "STREAM_MAX_WIDTH": {
+            "type": "integer",
+            "description": "推流最大宽度（像素）。超过后等比缩小，显著降低带宽。",
+            "default": 540
+        },
+        "SCRCPY_MAX_SIZE": {
+            "type": "integer",
+            "description": "H.264 通道的画面最长边（像素）。帧率与画质的主要权衡点，540 在手机上已足够看清。",
+            "default": 540
+        },
+        "SCRCPY_BIT_RATE": {
+            "type": "integer",
+            "description": "H.264 码率（bps）。2000000 约 2Mbps，看界面绰绰有余。",
+            "default": 2000000
+        },
+        "SCRCPY_MAX_FPS": {
+            "type": "integer",
+            "description": "H.264 最大帧率。设备只在画面变化时出帧，设高不会浪费带宽。",
+            "default": 30
+        }
+    },
+    "capabilities": {
+        "invocationCommands": [
+            {
+                "command": "Describe",
+                "description": "按需读取安卓操作契约。topic=overview(默认，无设备访问)|devices(连接状态)|packages(应用包名，可serial/filter)|system(系统白名单声明，不等于机型支持)|api(只读业务API)。初次使用先读overview，操作设备前查devices。",
+                "example": "command=Describe, topic=overview"
+            },
+            {
+                "command": "Observe",
+                "description": "感知入口。mode=ui(默认，语义控件表与snapshotId)|image(仅截图、frameId和设备坐标映射)|arbitrate(显式arbitration对象，复用共享Jev，只建议不执行)|api(已声明只读API)。ui可limit=60、screenshot=true、stable=true；wake=never禁止唤醒，默认ifAllowed沿用配置。截图可region、target=canvas、maxWidth、format、grid。index/像素动作凭据15秒过期，动作后失效。详细参数先Describe。",
+                "example": "command=Observe, serial=设备ID, mode=ui"
+            },
+            {
+                "command": "ExecuteStep",
+                "description": "执行受控动作或有界短序列。steps=[{action,expect?,waitTimeoutMs?}]最多8步GUI，中间步必须验证通过，未知/异常立即停，禁System与后续旧凭据；与action二选一，详见Describe。action对象或JSON对象字符串，command=Wait|Tap|Swipe|Scroll|LongPress|InputText|KeyEvent|LaunchApp|KillApp|System；Wait必须expect且不派发输入、不唤醒。id/text/selector实时定位；index携带snapshotId，设备像素坐标携带frameId。expect可{type:visible|absent,selector}或{type:foreground,package}。afterObserve=true按需返回新快照，或对象配置局部图像；默认false。timeoutMs=60000覆盖整步，waitTimeoutMs=5000仅限制验证。正文execution区分observed/dispatched/verified/unknown/failed；unknown禁止直接重试，verified不等于业务成功。System必须外层显式serial并通过现有分设备授权；不支持任意shell。参数与边界先Describe。",
+                "example": "command=ExecuteStep, serial=设备ID, action={\"command\":\"Tap\",\"id\":\"com.demo:id/open\"}, expect={\"type\":\"visible\",\"selector\":\"text=详情\"}, afterObserve=true"
+            },
+            {
+                "command": "Manage",
+                "description": "设备及显示管理。operation=connect|reconnect|disconnect|startDisplay|stopDisplay|displayStatus。connect可mode=auto|wireless|usb及address/serial；首次配对优先使用显示屏向导。startDisplay open=true复用Loom侧栏。连接管理不打断正在运行的设备动作。",
+                "example": "command=Manage, operation=startDisplay, open=true"
+            }
+        ]
+    }
+}
