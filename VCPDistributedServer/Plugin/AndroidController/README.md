@@ -46,13 +46,14 @@
 }
 ```
 
-`action/expect` 接受对象或 JSON 对象字符串。动作仅允许 Wait、Tap、Swipe、Scroll、LongPress、InputText、KeyEvent、LaunchApp、KillApp、System；Click/Type/PressKey 别名已删除；不允许递归、连接管理或覆盖外层设备。
+`action/expect` 接受对象或 JSON 对象字符串。动作仅允许 Wait、Tap、Swipe、Scroll、LongPress、InputText、Fill、KeyEvent、LaunchApp、KillApp、System；Click/Type/PressKey 别名已删除；不允许递归、连接管理或覆盖外层设备。
 
 - `id/text/selector`：动作前重新采样定位；显式 selector 的字面量 `%/#` 编码为 `%25/%23`，直接 id/text 无需编码。
 - `index`：必须携带同设备 `snapshotId`，15秒过期，执行前复核内容、布局和尺寸。
 - 像素坐标：必须携带同设备 `frameId`，15秒过期；使用设备坐标，不是图片坐标。凭据证明来源和年龄，不保证截图后页面未变化。坐标、索引及动作时长只接受安全整数或十进制整数字符串，不取整、不把布尔值转换为数字、不接受十六进制或科学计数法字符串；Swipe 时长1–10000ms，LongPress 时长300–10000ms。
-- 所有输入动作使旧 UI/图像凭据失效。非ASCII输入依赖设备已安装且当前启用 ADBKeyboard；每次广播前读取当前输入法，不匹配或无法确认时返回 ADB_KEYBOARD_NOT_ACTIVE，未派发文本、不自动切换。InputText 只输入当前焦点，不自动清空或定位字段。
-- Fill 尚不支持：当前 UIAutomator 只有 dump/解析，没有按节点 setText 执行通道。解析后的语义表也没有保留焦点及完整原始输入值，不可拿它推断可靠替换。不能用全选删除、删除键循环或仅安装输入法来冒充此能力。增加设备端执行基础设施前不公开 Fill。
+- 所有输入动作使旧 UI/图像凭据失效。InputText 只向当前焦点的光标/选区输入，不自动清空或定位字段。非 ASCII 优先通过设备 RPC 设置系统剪贴板并粘贴，不依赖当前 IME；这会替换系统剪贴板，**不自动恢复**，派发成功不代表粘贴结果已验证。仅 RPC 明确未执行时才尝试 ADBKeyboard 回退；每次广播前读取当前输入法，不匹配或无法确认时返回 ADB_KEYBOARD_NOT_ACTIVE，不自动切换输入法。
+- Fill 是目标文本字段的替换操作：`text` 必填且支持空字符串；用 `id`、`selector=id=…` 或 `index+snapshotId` 寻址，目标必须是当前可见、enabled 的 textfield，且原始树中设备 RPC 身份唯一。非空文本通过设备 RPC `setText` 替换，空字符串调用 `clearTextField`；非密码字段用 `getText` 精确读回，匹配才是 `verified`，不匹配或无法验证为 `unknown`。密码字段不读回，只有 `dispatched`，外层 `expect` 也不会将其洗成字段值 `verified`，不回显字段值。RPC 不可用时拒绝，不用 shell 全选/删除模拟替换。
+- Tap、LongPress、Swipe（包括 Scroll 的受限手势）优先 RPC，只有明确未执行时才回退 shell。RPC 超时、断连、取消或其他未知执行结果均不重放，防止一次触摸变双击；最终通道与结果以动作回执为准。
 
 `expect` 支持 `{type:visible|absent,selector}`、`{type:foreground,package}`。截断或锁屏不能证明 absent；UI条件不能证明自绘画布中不存在目标。前台包名只证明前台状态，不证明业务提交。
 
@@ -154,7 +155,7 @@ steps接受数组或JSON数组文本，1–8步；每步只允许action/expect/w
 
 ## 范围与回归
 
-尚未实现：自主规划、持久化长任务、语义fill、通用deep link、手机文件传输、写业务API、自动GUI回退、Jev图片/Box、常驻无障碍服务、H.264模型共享帧。VCP异步结果保存/通知不等于自动续跑Agent，不另造并行执行框架。历史真机与API证据见[P2验证记录](../../../docs/android-p2-validation.md)，不作为本轮真机验收。
+尚未实现：自主规划、持久化长任务、通用deep link、手机文件传输、写业务API、自动GUI回退、Jev图片/Box、常驻无障碍服务、H.264模型共享帧。VCP异步结果保存/通知不等于自动续跑Agent，不另造并行执行框架。历史真机与API证据见[P2验证记录](../../../docs/android-p2-validation.md)，不作为本轮真机验收。
 
 仓库根目录运行隔离测试，不运行 live 脚本，不执行真实设备动作：
 
@@ -162,6 +163,8 @@ steps接受数组或JSON数组文本，1–8步；每步只允许action/expect/w
 node --test tests/android-*.test.js tests/android-*.test.mjs tests/adb-*.test.js tests/frame-hub-contract.test.js tests/scrcpy-*.test.js tests/stream-recovery.test.js tests/subscriber-init.test.js tests/ui-graph.test.js tests/vision*.test.js tests/launch-app.test.js tests/focus-parse.test.js tests/auto-connect*.test.js tests/device-reconnect.test.js tests/*jev*.test.js tests/distributed-*.test.js
 ```
 
+
+本轮 M1 主代理按上列命令独立回归：**852 tests / 852 pass / 0 fail / 0 skipped，13.200s**，包含 RPC 客户端、Fill、触摸/Unicode 输入和租约取消等边界契约。真机仅验证只读 Observe 与 RPC 服务连通：不存在节点的 `getText` 返回 `rpcCode=-32001`、`dispatched=true`，随后 stop 清理 ready/port；未执行 Fill、触摸或粘贴，不作为动作真机验收。
 
 ## 真机烟测
 

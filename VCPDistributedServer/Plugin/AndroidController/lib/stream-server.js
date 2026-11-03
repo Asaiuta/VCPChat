@@ -124,6 +124,39 @@ class StreamServer {
         this.watchdogTimer = null;
         this.watchdogIntervalMs = options.watchdogIntervalMs ?? 2000;
         this.stallLogged = false;   // 一轮停滞只报一次日志
+
+        // ---- 性能基线计数 ----
+        // 只增不改：任何分支都不得据此改变丢帧/断连决策，否则基线测的就不是产品行为。
+        this.counters = {
+            h264PacketsSent: 0,
+            h264BytesSent: 0,
+            jpegFramesSent: 0,
+            jpegBytesSent: 0,
+            jpegDroppedByBackpressure: 0,   // JPEG 通道溢出：丢帧继续
+            textDroppedByBackpressure: 0,   // 文本回执溢出：丢弃
+            slowSubscribersClosed: 0,       // H.264 通道溢出：断开慢订阅者
+            recoveryAttempts: 0,
+            recoverySuccesses: 0,
+        };
+    }
+
+    /** 显示链路计数快照。性能基线用，不含副作用。 */
+    metrics() {
+        return {
+            ...this.counters,
+            h264Viewers: this.scrcpyStreamers.size,
+            jpegViewers: this.unsubscribers.size,
+            bufferedBytes: [...this.scrcpyStreamers.keys(), ...this.unsubscribers.keys()]
+                .reduce((sum, socket) => sum + (socket.bufferedAmount || 0), 0),
+            maxBufferedBytes: this.maxBufferedBytes,
+            recovering: this.recovering,
+            consecutiveFailures: this.failures,
+            watchdogRunning: Boolean(this.watchdogTimer),
+        };
+    }
+
+    resetMetrics() {
+        for (const key of Object.keys(this.counters)) this.counters[key] = 0;
     }
 
     /**
@@ -280,11 +313,14 @@ class StreamServer {
                     await this.startScrcpy();
                     if (!this.recoveryIsCurrent(token)) return;
                     this.failures = 0;
+                    this.counters.recoveryAttempts += attempt;
+                    this.counters.recoverySuccesses += 1;
                     this.logger.log?.(`[AndroidController] scrcpy 已恢复（第 ${attempt} 次尝试）`);
                     await this.reattachScrcpy();
                     return;
                 } catch (error) {
                     if (!this.recoveryIsCurrent(token)) return;
+                    this.counters.recoveryAttempts += 1;
                     this.failures += 1;
                     this.logger.warn?.(`[AndroidController] scrcpy 重启失败 ${attempt}/${this.maxRecoveryAttempts}：${error.message}`);
 
@@ -299,6 +335,7 @@ class StreamServer {
                             await this.startScrcpy();
                             if (!this.recoveryIsCurrent(token)) return;
                             this.failures = 0;
+                            this.counters.recoverySuccesses += 1;
                             await this.reattachScrcpy();
                             return;
                         } catch { /* 继续下一轮 */ }
@@ -1068,8 +1105,11 @@ class StreamServer {
         if (!socket || socket.readyState !== 1 || this.disposedSockets.has(socket)) return;
         if ((socket.bufferedAmount || 0) + Buffer.byteLength(text) > this.maxBufferedBytes) {
             if (this.scrcpyStreamers.has(socket)) {
+                this.counters.slowSubscribersClosed += 1;
                 this.disposeSocket(socket);
                 try { socket.close(1013, 'H264 send queue exceeded'); } catch { /* 已关闭 */ }
+            } else {
+                this.counters.textDroppedByBackpressure += 1;
             }
             return;
         }
@@ -1086,12 +1126,15 @@ class StreamServer {
         } else if (!data?.length) return;
 
         if ((socket.bufferedAmount || 0) + 16 + data.length > this.maxBufferedBytes) {
+            this.counters.slowSubscribersClosed += 1;
             this.disposeSocket(socket);
             try { socket.close(1013, 'H264 send queue exceeded'); } catch { /* 已关闭 */ }
             return;
         }
         try {
             socket.send(Buffer.concat([encodeH264Header(packet), data]), { binary: true });
+            this.counters.h264PacketsSent += 1;
+            this.counters.h264BytesSent += data.length;
         } catch {
             this.disposeSocket(socket);
         }
@@ -1100,9 +1143,14 @@ class StreamServer {
     sendFrame(socket, frame) {
         if (!socket || socket.readyState !== 1) return;
         if (!frame?.buffer?.length) return;
-        if ((socket.bufferedAmount || 0) + 16 + frame.buffer.length > this.maxBufferedBytes) return;
+        if ((socket.bufferedAmount || 0) + 16 + frame.buffer.length > this.maxBufferedBytes) {
+            this.counters.jpegDroppedByBackpressure += 1;
+            return;
+        }
         try {
             socket.send(Buffer.concat([encodeFrameHeader(frame), frame.buffer]), { binary: true });
+            this.counters.jpegFramesSent += 1;
+            this.counters.jpegBytesSent += frame.buffer.length;
         } catch {
             // 发送失败通常是 socket 已关闭，交给 close 事件清理
         }

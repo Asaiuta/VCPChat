@@ -1,0 +1,42 @@
+{
+  "adbPath": "D:\\AI\\tools\\platform-tools\\adb.exe",
+  "serial": "192.168.137.178:37109",
+  "displayUrl": null,
+  "frame": {
+    "streaming": false,
+    "subscribers": 0,
+    "seq": 1,
+    "latestAgeMs": 8866,
+    "lastDurationMs": 1019,
+    "byteLength": 12032,
+    "format": "jpeg",
+    "quality": 70,
+    "intervalMs": 100,
+    "captureMode": "raw",
+    "configuredMode": "auto",
+    "fallbackCount": 0,
+    "lastReadRetries": 0,
+    "effectiveFps": 0,
+    "consecutiveFailures": 0,
+    "lastError": null
+  },
+  "scrcpy": {
+    "state": "stopped",
+    "serial": "192.168.137.178:37109",
+    "codec": null,
+    "codecString": null,
+    "width": null,
+    "height": null,
+    "subscribers": 0,
+    "packetsReceived": 0,
+    "bytesReceived": 0,
+    "seq": 0,
+    "effectiveFps": 0,
+    "lastPacketAgeMs": null,
+    "maxSize": 540,
+    "bitRate": 2000000,
+    "maxFps": 30,
+    "lastError": null,
+    "uptimeMs": 0
+  }
+}

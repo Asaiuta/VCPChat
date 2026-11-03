@@ -97,6 +97,19 @@ class ScrcpyHub {
         this.bitRate = clampInt(options.bitRate, 2000000, 100000, 50000000);
         this.maxFps = clampInt(options.maxFps, 30, 1, 120);
 
+        // 就绪等待。旧实现是 `setTimeout(resolve, 1800)` 盲等，无出处。
+        // 真机实测（PJZ110，2026-11-02，3 轮）：
+        //   adb forward 后本地 TCP 在 145–209ms 就能连上，但那是 forward 的
+        //   监听 socket；此时连接会在 93–108ms 被立即 reset，收到 0 字节。
+        //   设备端 abstract socket（/proc/net/unix 的 scrcpy_<scid>）在
+        //   482–733ms 出现，握手字节在 923–1056ms 到达。
+        // 所以判据改成「设备端 socket 是否出现」，用轮询替代盲等。
+        this.readyPollMs = clampInt(options.readyPollMs, 100, 10, 1000);
+        // 0 表示显式关闭轮询（单测用），只做一次查询后直接进入连接。
+        this.readyDeadlineMs = Number.isFinite(options.readyDeadlineMs)
+            ? Math.max(0, options.readyDeadlineMs) : 4000;
+        this.readyPolls = 0;   // 观测用：本轮启动查询了几次
+
         this.state = STATE_IDLE;
         this.serverProc = null;
         this.socket = null;
@@ -262,7 +275,7 @@ class ScrcpyHub {
             if (!fwd.ok) throw new Error(`建立端口转发失败：${fwd.stderr.trim()}`);
 
             this._spawnServer();
-            await new Promise((resolve) => setTimeout(resolve, 1800));
+            await this._waitForRemoteSocket(generation);
             this._checkGeneration(generation);
             await this._connect();
             this._checkGeneration(generation);
@@ -319,6 +332,37 @@ class ScrcpyHub {
             this.lastError = { message: error.message, at: Date.now() };
             this.emit_('closed');
         });
+    }
+
+    /**
+     * 等设备端 abstract socket 出现。
+     *
+     * 为什么不能只等本地 TCP 可连：`adb forward` 的本地监听在服务起来之前
+     * 就已经能 accept，连接会在 ~100ms 内被 reset。那条路径不是就绪信号。
+     *
+     * 查询只是加速手段，不是正确性的必要条件：查不到就把预算耗完，交给
+     * 后续 _connect 的握手超时兜底。早期设备或权限受限时 cat 可能失败，
+     * 此时降级为「按预算等待」，行为不比旧的盲等更差。
+     */
+    async _waitForRemoteSocket(generation) {
+        this.readyPolls = 0;
+        const scid = this._serverSession?.scid;
+        if (!scid || this.readyDeadlineMs <= 0) return;
+
+        const deadline = Date.now() + this.readyDeadlineMs;
+        const pattern = `scrcpy_${scid}`;
+        do {
+            this._checkGeneration(generation);
+            this.readyPolls += 1;
+            // grep -c 只回一个数字，避免把整个 /proc/net/unix 拖回来。
+            const probe = await this._adb(
+                ['shell', `cat /proc/net/unix 2>/dev/null | grep -c ${pattern}`],
+                8000,
+            ).catch(() => null);
+            if (probe?.ok && Number(String(probe.stdout).trim()) > 0) return;
+            if (Date.now() >= deadline) return;
+            await new Promise((resolve) => setTimeout(resolve, this.readyPollMs));
+        } while (Date.now() < deadline);
     }
 
     _connect() {

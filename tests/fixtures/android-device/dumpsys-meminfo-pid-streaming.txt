@@ -1,0 +1,34 @@
+Applications Memory Usage (in Kilobytes):
+Uptime: 292054799 Realtime: 412568608
+                   Pss  Private  Private     Swap      Rss     Heap     Heap     Heap
+                 Total    Dirty    Clean    Dirty    Total     Size    Alloc     Free
+                ------   ------   ------   ------   ------   ------   ------   ------
+  Native Heap     3608     3608        0        0     3608        0        0        0
+  Dalvik Heap     3392     3392        0        0     3392        0        0        0
+ Dalvik Other     1376     1360        0        0     1392                           
+        Stack      416      416        0        0      416                           
+       Ashmem        2        0        0        0       20                           
+    Other dev       58       40       12        0      840                           
+     .so mmap    54367     7308    40868        0    88484                           
+    .jar mmap    12705        0     8336        0    52648                           
+    .apk mmap     1567        0     1000        0     2816                           
+    .dex mmap     2636     2252      372        0     3556                           
+    .oat mmap     1556       32      760        0    14268                           
+    .art mmap    28919    28872       36        0    29136                           
+   Other mmap      916       64      768        0     2188                           
+      Unknown     2356     2356        0        0     2356                           
+        TOTAL   113874    49700    52152        0   205120        0        0        0
+ 
+ App Summary
+                       Pss(KB)                        Rss(KB)
+                        ------                         ------
+           Java Heap:    32300                          32528
+         Native Heap:     3608                           3608
+                Code:    60928                         161804
+               Stack:      416                            416
+            Graphics:        0                              0
+       Private Other:     4600
+              System:    12022
+             Unknown:                                    6764
+ 
+           TOTAL PSS:   113874            TOTAL RSS:   205120      TOTAL SWAP (KB):        0

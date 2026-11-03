@@ -94,13 +94,14 @@ async function run({ serial, timeoutMs = 60000, signal, client, outcome = 'dispa
         return await Promise.race([boundary, operation]);
     } catch (error) {
         state.timings.totalMs = performance.now() - started;
-        if (controller.signal.reason?.code === 'STEP_DEADLINE') error = controller.signal.reason;
+        if (state.inputReceipt) error.details = state.inputReceipt;
+        if (controller.signal.reason?.code === 'STEP_DEADLINE') error = Object.assign(controller.signal.reason, { details: error.details });
         error.execution = {
             requestId: state.requestId, serial: state.activeSerial || serial, outcome: state.dispatched ? 'unknown' : 'failed', retryable: false,
             verification: state.verification, timings: { ...state.timings },
             ...(state.sequence ? { sequence: sequenceReceipt(state, true) } : {}),
         };
-        error.message += `\n${JSON.stringify({ code: error.code || 'STEP_FAILED', execution: { requestId: state.requestId, serial: state.activeSerial || serial, outcome: error.execution.outcome, retryable: false, ...(error.execution.sequence ? { sequence: error.execution.sequence } : {}) } })}`;
+        error.message += `\n${JSON.stringify({ ...(state.inputReceipt ? { details: state.inputReceipt } : {}), code: error.code || 'STEP_FAILED', execution: { requestId: state.requestId, serial: state.activeSerial || serial, outcome: error.execution.outcome, retryable: false, ...(error.execution.sequence ? { sequence: error.execution.sequence } : {}) } })}`;
         throw error;
     } finally {
         clearTimeout(timer);
@@ -143,6 +144,11 @@ function markDispatched() {
     if (state) { state.dispatched = true; state.itemDispatched = true; }
 }
 
+function inputReceipt(details) { const state = context.getStore(); if (state) state.inputReceipt = { ...state.inputReceipt, ...details }; }
+function dispatchState() { const state = context.getStore(); return { dispatched: state?.dispatched || false, itemDispatched: state?.itemDispatched || false }; }
+function restoreDispatch(saved) { const state = context.getStore(); if (state) Object.assign(state, saved); }
+function remainingMs() { check(); return Math.max(1, Math.min(120000, (context.getStore()?.deadlineMs ?? Date.now() + 20000) - Date.now())); }
+
 function verified(matched, evidence) {
     const state = context.getStore();
     if (state) {
@@ -168,13 +174,14 @@ function beginItem(command) {
     state.sequence.steps.push({ index: state.sequence.steps.length, command, outcome: 'running' });
 }
 
-function finishItem() {
+function finishItem(requireVerified = false) {
     const state = context.getStore();
     const step = state.sequence.steps.at(-1);
     step.outcome = state.outcome;
     step.verification = state.verification;
-    state.sequence.status = state.outcome === 'unknown' ? 'stopped' : 'completed';
+    const stopped = state.outcome === 'unknown' || (requireVerified && state.outcome !== 'verified');
+    state.sequence.status = stopped ? 'stopped' : 'completed';
     return { ...step };
 }
 
-module.exports = { beginSequence, beginItem, finishItem, run, stage, pause, check, failure, markDispatched, verified, bindDevice, activeDevice, executionSignal, assertManagementIdle, runManagement };
+module.exports = { inputReceipt, dispatchState, restoreDispatch, remainingMs, beginSequence, beginItem, finishItem, run, stage, pause, check, failure, markDispatched, verified, bindDevice, activeDevice, executionSignal, assertManagementIdle, runManagement };

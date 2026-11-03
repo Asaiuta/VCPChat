@@ -30,6 +30,16 @@
             "description": "单次 adb 命令超时（毫秒）。",
             "default": 20000
         },
+        "UI_SERVER": {
+            "type": "boolean",
+            "description": "控件树优先走设备端常驻服务（u2 JSON-RPC）；关闭后回退每次冷启的 uiautomator dump，感知延迟显著上升，仅在排查兼容性问题时关闭。",
+            "default": true
+        },
+        "AUTO_WAKE": {
+            "type": "boolean",
+            "description": "感知时屏幕已灭则发送一次唤醒键；不自动解锁。关闭后息屏状态下感知只会返回空控件表。",
+            "default": true
+        },
         "DISPLAY_PORT": {
             "type": "integer",
             "description": "显示屏服务监听端口（仅 127.0.0.1）。0 表示随机分配。",
@@ -39,6 +49,11 @@
             "type": "string",
             "description": "推流编码格式：jpeg（体积小，推荐）或 png。",
             "default": "jpeg"
+        },
+        "STREAM_CAPTURE_MODE": {
+            "type": "string",
+            "description": "JPEG 回退通道的采集方式：auto（先试 raw，失败降级 PNG）或 png（强制老路径，排查兼容性用）。",
+            "default": "auto"
         },
         "STREAM_QUALITY": {
             "type": "integer",
@@ -69,6 +84,11 @@
             "type": "integer",
             "description": "H.264 最大帧率。设备只在画面变化时出帧，设高不会浪费带宽。",
             "default": 30
+        },
+        "LOOM_APP_ID": {
+            "type": "string",
+            "description": "显示屏在 Loom 侧栏中的应用标识；同一标识复用同一个侧栏应用。",
+            "default": "android-mirror"
         }
     },
     "capabilities": {
@@ -85,7 +105,7 @@
             },
             {
                 "command": "ExecuteStep",
-                "description": "执行受控动作或有界短序列。steps=[{action,expect?,waitTimeoutMs?}]最多8步GUI，中间步必须验证通过，未知/异常立即停，禁System与后续旧凭据；与action二选一，详见Describe。action对象或JSON对象字符串，command=Wait|Tap|Swipe|Scroll|LongPress|InputText|KeyEvent|LaunchApp|KillApp|System；Wait必须expect且不派发输入、不唤醒。id/text/selector实时定位；index携带snapshotId，设备像素坐标携带frameId。expect可{type:visible|absent,selector}或{type:foreground,package}。afterObserve=true按需返回新快照，或对象配置局部图像；默认false。timeoutMs=60000覆盖整步，waitTimeoutMs=5000仅限制验证。正文execution区分observed/dispatched/verified/unknown/failed；unknown禁止直接重试，verified不等于业务成功。System必须外层显式serial并通过现有分设备授权；不支持任意shell。参数与边界先Describe。",
+                "description": "执行受控动作或有界短序列。steps=[{action,expect?,waitTimeoutMs?}]最多8步GUI，中间步必须验证通过，未知/异常立即停，禁System与后续旧凭据；与action二选一，详见Describe。action对象或JSON对象字符串，command=Wait|Tap|Swipe|Scroll|LongPress|InputText|Fill|KeyEvent|LaunchApp|KillApp|System；Wait必须expect且不派发输入、不唤醒。id/text/selector实时定位；index携带snapshotId，设备像素坐标携带frameId。expect可{type:visible|absent,selector}或{type:foreground,package}。afterObserve=true按需返回新快照，或对象配置局部图像；默认false。timeoutMs=60000覆盖整步，waitTimeoutMs=5000仅限制验证。正文execution区分observed/dispatched/verified/unknown/failed；unknown禁止直接重试，verified不等于业务成功。System必须外层显式serial并通过现有分设备授权；不支持任意shell。参数与边界先Describe。",
                 "example": "command=ExecuteStep, serial=设备ID, action={\"command\":\"Tap\",\"id\":\"com.demo:id/open\"}, expect={\"type\":\"visible\",\"selector\":\"text=详情\"}, afterObserve=true"
             },
             {

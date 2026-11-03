@@ -1,0 +1,83 @@
+MemTotal:       15477908 kB
+MemFree:          413412 kB
+MemAvailable:    2529952 kB
+Buffers:            1876 kB
+Cached:          2296628 kB
+SwapCached:        13540 kB
+Active:          3489976 kB
+Inactive:        2436536 kB
+Active(anon):    2408320 kB
+Inactive(anon):  1444476 kB
+Active(file):    1081656 kB
+Inactive(file):   992060 kB
+Unevictable:       98036 kB
+Mlocked:           96664 kB
+SwapTotal:      12582908 kB
+SwapFree:        1645288 kB
+Dirty:               604 kB
+Writeback:             0 kB
+AnonPages:       3718688 kB
+Mapped:          1451284 kB
+Shmem:            140496 kB
+KReclaimable:     410264 kB
+Slab:            1208428 kB
+SReclaimable:     324864 kB
+SUnreclaim:       883564 kB
+KernelStack:      236768 kB
+ShadowCallStack:       0 kB
+PageTables:       342988 kB
+SecPageTables:         0 kB
+NFS_Unstable:          0 kB
+Bounce:                0 kB
+WritebackTmp:          0 kB
+CommitLimit:    20321860 kB
+Committed_AS:   507873748 kB
+VmallocTotal:   257687552 kB
+VmallocUsed:      503288 kB
+VmallocChunk:          0 kB
+Percpu:            15808 kB
+AnonHugePages:         0 kB
+ShmemHugePages:        0 kB
+ShmemPmdMapped:        0 kB
+FileHugePages:         0 kB
+FilePmdMapped:         0 kB
+CmaTotal:         655360 kB
+CmaFree:               0 kB
+IonTotalCache:     44276 kB
+IonTotalUsed:    1072448 kB
+RsvPool:          577540 kB
+GPUTotalUsed:     985952 kB
+ZramCompr:       3753876 kB
+ShmemSwapped:     417004 kB
+UxPool:            96892 kB
+---
+Applications Memory Usage (in Kilobytes):
+Uptime: 291960492 Realtime: 412474301
+
+
+Total RSS by process:
+    786,432K: com.tencent.mobileqq (pid 25563 / activities)
+    600,428K: system (pid 3936)
+    514,048K: com.android.systemui (pid 8625)
+    461,196K: com.tencent.mm (pid 9317 / activities)
+    430,684K: tv.danmaku.bili (pid 22213 / activities)
+    348,272K: com.jingdong.app.mall (pid 30921 / activities)
+    316,216K: surfaceflinger (pid 2418)
+    267,164K: com.eg.android.AlipayGphone (pid 10443)
+    262,330K: com.android.launcher (pid 8726 / activities)
+    219,592K: com.heytap.colorfulengine (pid 8576)
+    212,892K: com.google.android.gms (pid 10662)
+    208,816K: com.ss.android.ugc.aweme (pid 10441 / activities)
+    207,556K: com.tencent.wetype:hld (pid 16856)
+    204,160K: com.oplus.claw (pid 16109)
+    184,684K: tv.danmaku.bili:web (pid 32327)
+    170,420K: com.tencent.mobileqq:MSF (pid 15220)
+    169,152K: com.jingdong.app.mall:privileged_dong_process2 (pid 4892)
+    166,076K: com.oplus.subsys (pid 8993)
+    164,340K: com.tencent.mm:push (pid 9567)
+    158,132K: com.android.contacts (pid 29370)
+    151,940K: com.eg.android.AlipayGphone:widgetProvider (pid 28995)
+    151,040K: com.android.vending (pid 28512)
+    146,392K: com.eg.android.AlipayGphone:push (pid 18578)
+    143,716K: nu.gpu.nagram (pid 11289 / activities)
+    142,904K: com.google.android.gms (pid 22651) (user 999)

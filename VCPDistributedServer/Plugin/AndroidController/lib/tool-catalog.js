@@ -2,14 +2,15 @@
 
 module.exports = {
     topics: ['overview', 'devices', 'packages', 'system', 'api'],
-    limitations: { fill: '尚不支持：现有uiautomator仅dump，无按节点setText通道；不以焦点猜测、全选删除或重复删除键模拟可靠替换。' },
+    limitations: { fill: 'Fill 仅 RPC 按实时节点替换；无可靠 shell 替换回退，不模拟全选删除。' },
     actions: [
+        { command: 'Fill', required: 'text(0–2000字符),id|id=selector 或 index+snapshotId', note: 'text是替换内容，空字符串清空；不用text寻址，仅可见启用textfield。setText后getText一致才verified，读失败/不一致unknown；密码框不读不回显仅dispatched。RPC绑定原始class/package/resourceId及instance，不以变化文本绑定；无shell替换回退。' },
         { command: 'Wait', required: '外层或步骤expect', note: '只读条件等待，action只接受命令标识。复用visible/absent/foreground轮询，waitTimeoutMs默认5000、最多30000且不超过整段预算；不输入、不唤醒、不固定sleep。满足verified，未证实unknown并停止序列；unknown在此不表示派发过输入。可afterObserve返回成功采样。' },
         { command: 'Tap', required: 'id|text|selector 或 index+snapshotId 或 x+y+frameId', note: '语义目标实时重定位；index/像素凭据15秒过期，动作后失效。selector字面量%/#编码为%25/%23。' },
         { command: 'LongPress', required: '同Tap', optional: 'duration=800(ms，300–10000整数)' },
         { command: 'Swipe', required: 'x1,y1,x2,y2,frameId', optional: 'duration=300(ms，1–10000整数)', note: '使用设备坐标，不是缩放图片坐标。坐标/索引/时长仅接受安全整数或十进制整数字符串；不取整、不转换布尔值。' },
         { command: 'Scroll', required: 'id|text|selector 或 index+snapshotId，direction=up|down|left|right', optional: 'distance=0.6(可见容器轴长比例，0.1–0.9),duration=300(ms，1–10000)', note: '目标必须是当前可见启用的scroll容器，实时定位并按屏幕裁剪。方向表示浏览方向：down手指向上，right手指向左。只派发一次，不猜边界、不自动寻找目标；可afterObserve=true或expect确认结果。不需截图，不接受像素坐标。' },
-        { command: 'InputText', required: 'text(1–2000字符)', optional: 'enter=false', note: '输入当前焦点，不自动清空、不定位字段，不等于Fill。非ASCII依赖已安装且当前启用的ADBKeyboard；每次检查当前输入法，不匹配时未派发即失败，不自动切换。' },
+        { command: 'InputText', required: 'text(1–2000字符)', optional: 'enter=false', note: '输入当前焦点，不自动清空、不定位字段，不等于Fill。非ASCII优先setClipboard(AndroidController,text)→pasteClipboard，在当前光标/选区插入，不移动光标、不读写整个字段、不依赖IME；clipboard=replaced是显式副作用，不读取旧剪贴板、不立即恢复以免粘贴竞态。无ack仅dispatched；未知不重放。RPC明确未执行才回退已安装且当前启用的ADBKeyboard，不自动切换。' },
         { command: 'KeyEvent', required: 'key', note: 'back/home/recents/enter/delete/tab/escape/方向键/音量键/power/wakeup/sleep，或KEYCODE_*、数字。' },
         { command: 'LaunchApp', required: 'package', optional: 'activity,stop=false；或url=http/https地址', note: 'url模式不接受activity/stop=true、账号密码、控制字符或非http/https协议；解析指定包的唯一处理组件后只派发一次，不回退其他应用。URL不回显；仅验证前台包名，pageLoaded=null，不证明网页加载/路径到达。普通启动保持原行为。' },
         { command: 'KillApp', required: 'package', note: '强制停止应用。' },

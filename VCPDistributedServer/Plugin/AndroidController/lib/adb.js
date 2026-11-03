@@ -18,6 +18,9 @@ const DEFAULT_MAX_QUEUE_SIZE = 64;
 const DEFAULT_MAX_BUFFER = 16 * 1024 * 1024;
 const MAX_TEXT_BYTES = 4 * 1024 * 1024;
 
+// 队列边界拒绝码。执行期失败（ADB_FAILED/ADB_EXIT 等）不计入 rejected。
+const REJECTION_CODES = new Set(['ADB_QUEUE_FULL', 'ADB_TIMEOUT', 'ADB_ABORTED']);
+
 class AdbError extends Error {
     constructor(code, message, details = {}) {
         super(message);
@@ -30,6 +33,20 @@ class AdbError extends Error {
 function normalizeAdbPath(value) {
     const configured = String(value ?? '').trim();
     return configured || 'adb';
+}
+
+function createQueueStats() {
+    return {
+        peakDepth: 0,
+        completed: 0,
+        failed: 0,
+        rejected: { ADB_QUEUE_FULL: 0, ADB_TIMEOUT: 0, ADB_ABORTED: 0 },
+        failedByCode: {},
+    };
+}
+
+function countRejection(stats, code) {
+    stats.rejected[code] = (stats.rejected[code] || 0) + 1;
 }
 
 /**
@@ -46,18 +63,30 @@ class SerialQueue {
         this.depth = 0;
         this.pending = [];
         this.running = false;
+        // 计数仅用于性能基线观测，不参与调度决策。丢弃后不可恢复，resetStats() 显式清零。
+        this.stats = createQueueStats();
+    }
+
+    resetStats() {
+        this.stats = createQueueStats();
     }
 
     push(task, deadlineMs, signal) {
-        if (signal?.aborted) return Promise.reject(new AdbError('ADB_ABORTED', 'adb 调用已取消。'));
+        if (signal?.aborted) {
+            countRejection(this.stats, 'ADB_ABORTED');
+            return Promise.reject(new AdbError('ADB_ABORTED', 'adb 调用已取消。'));
+        }
         if (deadlineMs !== undefined && Date.now() >= deadlineMs) {
+            countRejection(this.stats, 'ADB_TIMEOUT');
             return Promise.reject(new AdbError('ADB_TIMEOUT', 'adb 调用在队列中已超时。'));
         }
         if (this.depth >= this.maxQueueSize) {
+            countRejection(this.stats, 'ADB_QUEUE_FULL');
             return Promise.reject(new AdbError('ADB_QUEUE_FULL', 'adb 调用队列已满。'));
         }
         if (this.depth === 0) this.tail = new Promise((resolve) => { this.resolveIdle = resolve; });
         this.depth += 1;
+        if (this.depth > this.stats.peakDepth) this.stats.peakDepth = this.depth;
         return new Promise((resolve, reject) => {
             const entry = { task, resolve, reject, deadlineMs, signal };
             const cancel = (error) => {
@@ -85,8 +114,17 @@ class SerialQueue {
     finish(entry, error, result, failed = true) {
         this.cleanup(entry);
         this.depth -= 1;
-        if (failed) entry.reject(error);
-        else entry.resolve(result);
+        if (failed) {
+            this.stats.failed += 1;
+            const code = error?.code || 'UNKNOWN';
+            // 队列拒绝与执行失败分开计数：前者说明入口压力，后者说明设备/命令问题。
+            if (REJECTION_CODES.has(code)) countRejection(this.stats, code);
+            this.stats.failedByCode[code] = (this.stats.failedByCode[code] || 0) + 1;
+            entry.reject(error);
+        } else {
+            this.stats.completed += 1;
+            entry.resolve(result);
+        }
         if (this.depth === 0) this.resolveIdle();
     }
 
@@ -126,6 +164,36 @@ class AdbClient {
         // 分辨率在一次会话里不会变（除非手动改过）。按 serial 缓存，避免每次感知
         // 都跑一遍 `wm size`。probeScreen 的合并命令也靠它决定要不要带尺寸查询。
         this.sizeCache = new Map();
+    }
+
+    /**
+     * 队列观测快照。性能基线用，不含任何调度副作用。
+     *
+     * 计数语义（刻意不重叠，避免同一个失败被数两次）：
+     *   completed / failed —— 只统计真正入队并被执行的任务。
+     *   rejected            —— 在 push 入口即被拒的任务（满/超时/取消），根本不入队。
+     *   failedByCode        —— 入队后失败的分类，入口拒绝不在此列。
+     * 所以「队列被挤爆」表现为 rejected.ADB_QUEUE_FULL 上涨而 failed 不变；
+     * 「设备/命令有问题」表现为 failed 与 failedByCode 上涨。两者混在一起
+     * 就无法从基线判断到底是入口压力还是设备故障。
+     */
+    queueStats() {
+        const stats = this.queue.stats;
+        return {
+            depth: this.queue.depth,
+            pending: this.queue.pending.length,
+            running: this.queue.running,
+            maxQueueSize: this.queue.maxQueueSize,
+            peakDepth: stats.peakDepth,
+            completed: stats.completed,
+            failed: stats.failed,
+            rejected: { ...stats.rejected },
+            failedByCode: { ...stats.failedByCode },
+        };
+    }
+
+    resetQueueStats() {
+        this.queue.resetStats();
     }
 
     configure(options = {}) {

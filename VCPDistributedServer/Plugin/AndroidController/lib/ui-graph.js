@@ -328,7 +328,8 @@ function makeSignature(pkg, controls) {
 /**
  * @param {string} xml
  * @param {{screen?: {width:number,height:number}, limit?: number, textLength?: number,
- *          includeDisabled?: boolean, includeSystem?: boolean, includeOffscreen?: boolean}} [options]
+ *          includeDisabled?: boolean, includeSystem?: boolean, includeOffscreen?: boolean,
+ *          rpcTarget?: boolean}} [options]
  */
 function parseUiGraph(xml, options = {}) {
     const limit = Number.isFinite(options.limit) && options.limit > 0
@@ -541,7 +542,7 @@ function parseUiGraph(xml, options = {}) {
         mixed: canvasCoverage >= CANVAS_DOMINANT_RATIO && labeled > 3,
     };
 
-    return {
+    const graph = {
         package: pkg,
         signature: makeSignature(pkg, controls),
         screen,
@@ -554,6 +555,11 @@ function parseUiGraph(xml, options = {}) {
         canvas,
         stats,
     };
+    if (options.rpcTarget === true) {
+        // Retain unfiltered identity evidence without serializing raw field values.
+        Object.defineProperty(graph, 'rawRoot', { value: rawRoot });
+    }
+    return graph;
 }
 
 // ---------------------------------------------------------------------------

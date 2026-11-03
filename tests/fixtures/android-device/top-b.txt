@@ -1,0 +1,13 @@
+Tasks: 991 total,   3 running, 987 sleeping,   0 stopped,   1 zombie
+  Mem:    15115M total,    14708M used,      406M free,        1M buffers
+ Swap:    12287M total,    10681M used,     1606M free,     2242M cached
+800%cpu 114%user   0%nice  24%sys 652%idle   0%iow   7%irq   3%sirq   0%host
+  PID USER         PR  NI VIRT  RES  SHR S[%CPU] %MEM     TIME+ ARGS
+25563 u0_a351      10 -10  21G 731M 291M R  113   4.8 702:06.83 com.tencent.mobileqq
+ 1378 shell        20   0 2.0G 5.6M 4.8M R 13.7   0.0   0:00.01 top -b -n 1 -m 8
+15220 u0_a351      20   0  13G 165M  86M S  3.4   1.0  74:36.35 com.tencent.mobileqq:MSF
+14797 u0_a98       20   0  10G 114M  60M S  3.4   0.7   9:37.37 com.heytap.accessory
+ 3936 system       18  -2  18G 581M 219M S  3.4   3.8 525:53.62 system_server
+ 2418 system       -3  -8 4.6G  55M  29M R  3.4   0.3 339:43.73 surfaceflinger
+ 2269 system       -3  -9 3.4G  35M  13M S  3.4   0.2 213:34.08 vendor.qti.hardware.display.composer-service
+ 1878 root         20   0    0    0    0 D  3.4   0.0   7:20.07 [usbtemp_kthread]

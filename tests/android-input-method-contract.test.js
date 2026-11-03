@@ -62,10 +62,10 @@ test('Unicode input without ADBKeyboard installation fails before input', async 
 });
 
 
-test('unsupported Fill is declared and never silently falls back to InputText', async () => {
+test('Fill is declared separately and rejects missing target without InputText fallback', async () => {
     const h = await harness();
     const catalog = await h.service.processToolCall({ command: 'Describe' });
-    assert.equal(typeof catalog.details.catalog.limitations.fill, 'string');
-    await assert.rejects(h.service.processToolCall({ command: 'ExecuteStep', action: { command: 'Fill', id: 'com.example:id/editor', text: 'replacement' } }), { code: 'INVALID_ARGUMENT' });
+    assert.equal(catalog.details.catalog.actions.some(action => action.command === 'Fill'), true);
+    await assert.rejects(h.service.processToolCall({ command: 'ExecuteStep', action: { command: 'Fill', text: 'replacement' } }), { code: 'INVALID_ARGUMENT' });
     assert.equal(h.calls.some(([kind]) => kind === 'adb'), false);
 });

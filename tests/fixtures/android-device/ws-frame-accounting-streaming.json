@@ -1,0 +1,42 @@
+{
+  "frames": 9,
+  "bytes": 29531,
+  "statusBefore": {
+    "state": "streaming",
+    "serial": "192.168.137.178:37109",
+    "codec": "0x68323634",
+    "codecString": "avc1.64001e",
+    "width": 244,
+    "height": 540,
+    "subscribers": 1,
+    "packetsReceived": 5,
+    "bytesReceived": 17101,
+    "seq": 4,
+    "effectiveFps": 26.09,
+    "lastPacketAgeMs": 8,
+    "maxSize": 540,
+    "bitRate": 2000000,
+    "maxFps": 30,
+    "lastError": null,
+    "uptimeMs": 2501
+  },
+  "statusAfter": {
+    "state": "streaming",
+    "serial": "192.168.137.178:37109",
+    "codec": "0x68323634",
+    "codecString": "avc1.64001e",
+    "width": 244,
+    "height": 540,
+    "subscribers": 1,
+    "packetsReceived": 5,
+    "bytesReceived": 17101,
+    "seq": 4,
+    "effectiveFps": 26.09,
+    "lastPacketAgeMs": 1743,
+    "maxSize": 540,
+    "bitRate": 2000000,
+    "maxFps": 30,
+    "lastError": null,
+    "uptimeMs": 4236
+  }
+}

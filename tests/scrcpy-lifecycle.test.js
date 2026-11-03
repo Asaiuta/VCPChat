@@ -26,6 +26,12 @@ function setup(options = {}) {
     const childProcess = {
         execFile(_adb, args, _opts, callback) {
             calls.push(['adb', ...args]);
+            // 就绪轮询查询：固定返回「已出现」。这些用例各自验证生命周期主题，
+            // 不应被 4 秒就绪预算拖慢，也不该混入就绪语义。
+            if (args.join(' ').includes('/proc/net/unix')) {
+                queueMicrotask(() => callback(null, '1\n', ''));
+                return;
+            }
             queueMicrotask(() => callback(null, args[0] === 'devices'
                 ? 'List of devices attached\nUSB123 device\n10.0.0.2:5555 device\n'
                 : 'PRESENT', ''));
@@ -57,11 +63,7 @@ function setup(options = {}) {
     vm.runInNewContext(source, {
         require(name) { return name === 'child_process' ? childProcess : name === 'net' ? net : require(name); },
         module, exports: module.exports, __dirname: path.dirname(filename), Buffer, console,
-        setTimeout(callback, ms) {
-            if (ms !== 1800) return setTimeout(callback, ms);
-            if (options.holdDelay) { timers.push(callback); return null; }
-            return setImmediate(callback);
-        },
+        setTimeout,
         clearTimeout,
     }, { filename });
     const { ScrcpyHub } = module.exports;
@@ -219,9 +221,9 @@ test('concurrent starts share the same failure and cleanup once', async () => {
     assert.equal(cleanups, 1);
 });
 
-for (const phase of ['resolve', 'jar', 'port', 'forward', 'delay', 'connect']) {
+for (const phase of ['resolve', 'jar', 'port', 'forward', 'ready', 'connect']) {
     test(`stop during ${phase} drains startup and prevents resurrection`, async () => {
-        const env = setup({ holdConnect: phase === 'connect', holdDelay: phase === 'delay' });
+        const env = setup({ holdConnect: phase === 'connect' });
         const { hub, calls, ScrcpyHub } = env;
         const gate = deferred();
         const entered = deferred();
@@ -229,14 +231,17 @@ for (const phase of ['resolve', 'jar', 'port', 'forward', 'delay', 'connect']) {
         if (phase === 'resolve') hub._resolveSerial = hold;
         if (phase === 'jar') hub._ensureJar = hold;
         if (phase === 'port') ScrcpyHub.findFreePort = hold;
+        // 旧实现里这里是 1800ms 盲等。盲等已删除，改用设备端 socket 轮询；
+        // 这条用例的意图（启动期取消不留残骸）原样保留，只是钩住新阶段。
+        if (phase === 'ready') hub._waitForRemoteSocket = hold;
         if (phase === 'forward') {
             const adb = hub._adb.bind(hub);
             hub._adb = (args, ...rest) => args[0] === 'forward' && args[1] !== '--remove'
                 ? hold() : adb(args, ...rest);
         }
         const startResult = hub.start().then((value) => ({ value }), (error) => ({ error }));
-        if (phase === 'delay' || phase === 'connect') {
-            while (phase === 'delay' ? !env.timers.length : !env.sockets.length) await tick();
+        if (phase === 'connect') {
+            while (!env.sockets.length) await tick();
         } else await entered.promise;
         let stopped = false;
         const stop = hub.stop().then(() => { stopped = true; });

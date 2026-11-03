@@ -1,0 +1,18 @@
+Applications Memory Usage (in Kilobytes):
+Uptime: 292054936 Realtime: 412568745
+
+** MEMINFO in pid 4473 [main] **
+ 
+ App Summary
+                       Pss(KB)                        Rss(KB)
+                        ------                         ------
+           Java Heap:    32300                          32528
+         Native Heap:     3616                           3616
+                Code:    60892                         161804
+               Stack:      416                            416
+            Graphics:        0                              0
+       Private Other:     4600
+              System:    12038
+             Unknown:                                    6764
+ 
+           TOTAL PSS:   113862            TOTAL RSS:   205128      TOTAL SWAP (KB):        0

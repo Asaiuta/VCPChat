@@ -17,9 +17,11 @@ const {
     resolveSelector,
     samePage,
 } = require('./lib/ui-graph');
+
 const { FrameHub } = require('./lib/frame-hub');
 const vision = require('./lib/vision');
 const { ScrcpyHub } = require('./lib/scrcpy-hub');
+const { UiServer } = require('./lib/ui-server');
 const { StreamServer } = require('./lib/stream-server');
 const fs = require('node:fs');
 const { parseHostPort, parsePairCode, localAddresses, probePort, diagnoseEndpoint, scanSubnets, scanLocalNetwork } = require('./lib/device-network');
@@ -417,25 +419,116 @@ function extractHierarchy(xml) {
     return empty ? empty[0] : '';
 }
 
+// ---------------------------------------------------------------------------
+// 常驻 UI 采集服务（u2 JSON-RPC）
+// ---------------------------------------------------------------------------
+// 走 CLI 的 uiautomator dump 每次都要冷启 VM + 等 waitForIdle，实测 p50 2300ms，
+// 动画页面上还会卡到 11s 后失败。改用 app_process 常驻的 JSON-RPC 服务后
+// 同一页面 p50 61ms / p95 122ms。这里只做「优先尝试 + 静默回退」：
+// 服务没起来、设备没权限、apk 缺失，任何一步失败都落回原 CLI 路径，
+// 行为与接入前完全一致。
+
+/** serial -> UiServer。按设备复用，避免每轮 Observe 都重推 3.7MB 与重启进程。 */
+const uiServers = new Map();
+
+function uiServerEnabled() {
+    const raw = String(runtime.config?.UI_SERVER ?? process.env.ANDROID_UI_SERVER ?? 'true')
+        .trim().toLowerCase();
+    return raw !== 'false' && raw !== '0' && raw !== 'off';
+}
+
+function uiServerFor(serial) {
+    const key = String(serial || '');
+    let entry = uiServers.get(key);
+    if (!entry) {
+        entry = new UiServer({
+            adbPath: adb?.adbPath || 'adb',
+            serial: key,
+            logger: runtime.logger,
+        });
+        uiServers.set(key, entry);
+    }
+    return entry;
+}
+
+/** 关停所有常驻服务。插件停止/重连设备时调用，避免泄漏 app_process 与 forward。 */
+async function shutdownUiServers() {
+    const all = [...uiServers.values()];
+    uiServers.clear();
+    await Promise.all(all.map((server) => server.stop().catch(() => null)));
+}
+
+/**
+ * 通过常驻服务取控件树。任何失败都返回 null，由调用方回退 CLI。
+ * 不抛异常是刻意的：这条路径只负责加速，不负责正确性兜底。
+ */
+async function dumpViaUiServer(serial) {
+    if (!uiServerEnabled()) return null;
+    const server = uiServerFor(serial);
+    try {
+        const started = await server.start();
+        if (!started.ok) {
+            runtime.logger?.warn?.(`[AndroidController] UI 服务未就绪，回退 CLI：${started.reason}`);
+            return null;
+        }
+        const { xml } = await server.dump({ rootInActive: true, maxDepth: 0 });
+        const hierarchy = extractHierarchy(xml);
+        if (!hierarchy) return null;
+        return { xml: hierarchy, note: '' };
+    } catch (error) {
+        runtime.logger?.warn?.(`[AndroidController] UI 服务采集失败，回退 CLI：${error.message}`);
+        // 服务已不可用，下一轮重新拉起，别带着坏状态反复超时。
+        server.stop().catch(() => null);
+        return null;
+    }
+}
+
 async function dumpUi(serial) {
     const client = requireAdb();
+
+    // 快路径：常驻服务。失败静默落到下面原有的 CLI 逻辑。
+    const fast = await dumpViaUiServer(serial);
+    if (fast) return fast;
+
+    const viaTtyOnce = async () => {
+        const text = await client.runText(
+            ['exec-out', 'uiautomator', 'dump', '--compressed', '/dev/tty'],
+            { serial, timeoutMs: DEFAULT_DUMP_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024 },
+        ).catch(() => null);
+        if (!text) return { xml: null, idle: false, text: '' };
+        const xml = extractHierarchy(text);
+        return {
+            xml: xml || null,
+            // 动画密集页面（视频详情、长列表）会让 uiautomator 等 idle 直到超时，
+            // 实测 11.1–12.0s 后输出这一行。这是瞬态失败：界面一停就能成功。
+            idle: /could not get idle state/i.test(String(text)),
+            text: String(text),
+        };
+    };
 
     // 主路径：一次 adb 往返，直接把压缩后的树写到 /dev/tty。
     // 相比「dump 到文件再 cat」：省一次进程启动与一次往返（实测 81ms），
     // --compressed 又砍掉 38% 传输量（17395B → 10751B），内容完全等价
     // （同一屏 28 个节点，字节数逐次一致，连跑 10 次无失败）。
-    const viaTty = await client.runText(
-        ['exec-out', 'uiautomator', 'dump', '--compressed', '/dev/tty'],
-        { serial, timeoutMs: DEFAULT_DUMP_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024 },
-    ).catch(() => null);
-    if (viaTty) {
-        const xml = extractHierarchy(viaTty);
-        if (xml) {
-            return { xml, note: String(viaTty).replace(xml, '').trim() };
+    const first = await viaTtyOnce();
+    if (first.xml) return { xml: first.xml, note: first.text.replace(first.xml, '').trim() };
+
+    if (first.idle) {
+        // 关键：idle 超时不能退回 file 路径 —— 它走的是同一个 uiautomator，
+        // 会再卡一次同样的 11 秒。剖析日志里正是这样把 Observe 拖到 22.8s。
+        // 正确做法是重试主路径：动画一停就能成功，成本只有一次往返。
+        const retried = await viaTtyOnce();
+        if (retried.xml) {
+            return { xml: retried.xml, note: retried.text.replace(retried.xml, '').trim() };
         }
+        throw stepRuntime.failure('UI_IDLE_TIMEOUT',
+            '界面持续动画，uiautomator 无法等到 idle 状态（连续两次超时）。'
+            + '这通常发生在视频、弹幕、加载动画不停歇的页面。'
+            + '可尝试：先 KeyEvent back 回到静态页面，或在页面加载完成后再 Observe。');
     }
 
     // 回退：老设备不支持 --compressed，或 /dev/tty 不可写。
+    // 只在「主路径不可用」时走这里；idle 超时已在上面单独处理。
     const remote = '/data/local/tmp/vcp_ui_dump.xml';
     let dumpText = '';
     try {
@@ -444,6 +537,12 @@ async function dumpUi(serial) {
             { serial, timeoutMs: DEFAULT_DUMP_TIMEOUT_MS },
         );
     } catch (error) {
+        if (/could not get idle state/i.test(String(error?.message || ''))) {
+            throw stepRuntime.failure('UI_IDLE_TIMEOUT',
+                '界面持续动画，uiautomator 无法等到 idle 状态。'
+                + '这通常发生在视频、弹幕、加载动画不停歇的页面。'
+                + '可尝试：先 KeyEvent back 回到静态页面，或在页面加载完成后再 Observe。');
+        }
         throw withHint(error, 'uiautomator dump 未能执行。若设备是无线连接，先确认没有被息屏断开（ListDevices 看状态）。');
     }
     const xml = await client.runText(
@@ -480,6 +579,65 @@ function sleep(ms) {
 function autoWakeEnabled() {
     const raw = String(runtime.config?.AUTO_WAKE ?? 'true').trim().toLowerCase();
     return raw !== 'false' && raw !== '0' && raw !== 'off';
+}
+
+const WAKE_TIMEOUT_DEFAULT_MS = 2500;
+const WAKE_POLL_DEFAULT_MS = 150;
+const WAKE_DEADLINE_MAX_MS = 15000;
+
+/** 点亮等待预算。0 表示只做一次探测（单测用）。 */
+function wakeTimeoutOf(args = {}) {
+    const raw = args.wakeTimeoutMs;
+    if (raw === undefined || raw === null) return WAKE_TIMEOUT_DEFAULT_MS;
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value < 0 || value > WAKE_DEADLINE_MAX_MS) {
+        throw stepRuntime.failure('INVALID_ARGUMENT', `wakeTimeoutMs 必须是 0-${WAKE_DEADLINE_MAX_MS} 的数字。`);
+    }
+    return Math.round(value);
+}
+
+/**
+ * 点亮后轮询 probeScreen 直到「已唤醒且焦点不是锁屏」。
+ *
+ * 一次 probeScreen 就同时给出 wakefulness / focus / size，所以轮询它不会
+ * 比旧的「单独两次往返」更贵；典型一次就够（实测 160–241ms）。
+ *
+ * 「焦点不是锁屏」是必要判据：dumpsys power 会先一步报 Awake，但此时
+ * WindowManager 可能仍停在该死的 keyguard 上，直接 dump 会拿到锁屏树。
+ * 超时不让整次 Observe 失败 —— 交回 best-effort 数据，由调用方注明。
+ */
+async function awaitWake(serial, options = {}) {
+    const timeoutMs = Number.isFinite(options.timeoutMs) ? options.timeoutMs : WAKE_TIMEOUT_DEFAULT_MS;
+    const client = requireAdb();
+    const deadline = Date.now() + timeoutMs;
+    let last = { wakefulness: null, focus: null, size: null, ready: false };
+
+    const usable = (probe) => {
+        const state = probe?.wakefulness;
+        if (!state || state === 'Asleep' || state === 'Dozing') return false;
+        const pkg = String(probe?.focus?.package || '');
+        // 锁屏/下拉/系统对话框都不算「可用前台」
+        return pkg.length > 0 && !/systemui|keyguard/i.test(pkg);
+    };
+
+    do {
+        stepRuntime.check();
+        const probe = await client.probeScreen(serial).catch(() => null);
+        if (probe) {
+            last = {
+                wakefulness: probe.wakefulness ?? last.wakefulness,
+                focus: probe.focus || last.focus,
+                size: probe.size || last.size,
+                ready: usable(probe),
+            };
+            if (last.ready) return last;
+        }
+        if (Date.now() >= deadline) break;
+        await new Promise((resolve) => setTimeout(resolve, WAKE_POLL_DEFAULT_MS));
+        stepRuntime.check();
+    } while (Date.now() < deadline);
+
+    return last;
 }
 
 function validatePackage(pkg) {
@@ -552,13 +710,15 @@ async function prepareTarget(args, label) {
     const size = await client.screenSize(serial);
     const semantic = index !== null || firstString(args.selector, args.id, args.resourceId, args.resource_id, args.text);
     if (semantic) {
-        const graph = await captureGraph(serial, { limit: index !== null ? record.limit || DEFAULT_LIMIT : 500, screen: size });
+        const graph = await captureGraph(serial, { limit: index !== null ? record.limit || DEFAULT_LIMIT : 500, screen: size, rpcTarget: args.rpcTarget === true });
         if (index !== null) {
             if (JSON.stringify(size) !== JSON.stringify(record.size) || !samePage(record.graph, graph) || graphLayout(record.graph) !== graphLayout(graph)) {
                 lastObserve.delete(serial);
                 throw stepRuntime.failure('STALE_SNAPSHOT', '页面内容或布局已变化，请重新 Observe 获取快照。');
             }
-        } else storeSnapshot(serial, graph, size);
+        }
+        if (index !== null && args.rpcTarget === true) record.graph = graph;
+        if (index === null) storeSnapshot(serial, graph, size);
     }
     const target = resolveTarget(pinned, label);
     if (!size || target.x >= size.width || target.y >= size.height) throw stepRuntime.failure('INVALID_COORDINATES', '坐标超出当前屏幕或屏幕尺寸未知。');
@@ -575,11 +735,11 @@ function requireFrame(args, serial, size) {
     }
 }
 
-async function dispatchInput(serial, task) {
+async function dispatchInput(serial, task, mark = true) {
     stepRuntime.check();
     lastObserve.delete(serial);
     lastVision.delete(serial);
-    stepRuntime.markDispatched();
+    if (mark) stepRuntime.markDispatched();
     return stepRuntime.stage('actionMs', task);
 }
 
@@ -644,15 +804,27 @@ async function observe(args = {}, executionContext = {}) {
 
     // 息屏时 uiautomator 只会给一棵 systemui 锁屏树，过滤后是空表。
     // 与其让模型看空表自己猜，不如先点亮再抓。
+    //
+    // 旧实现固定等待后再单独调两次 wakefulness / currentFocus。
+    // 真机实测（PJZ110，4 轮）：keyevent 之后第一次 probeScreen 返回时
+    // wakefulness 已是 Awake、focus 已是前台应用，典型 160–241ms。
+    // 所以改成轮询 probeScreen —— 一次往返拿齐三项，典型 1 次就够。
     let wokeNote = '';
     const asleep = wakefulness === 'Asleep' || wakefulness === 'Dozing';
     if (asleep && args.wake !== 'never' && autoWakeEnabled()) {
         await dispatchInput(active, () => client.runText(['shell', 'input', 'keyevent', 'KEYCODE_WAKEUP'], { serial: active, timeoutMs: 10000 }))
             .catch(() => { stepRuntime.check(); });
-        await stepRuntime.pause(700);
-        wakefulness = await client.wakefulness(active).catch(() => null);
-        focus = await client.currentFocus(active).catch(() => focus);
-        wokeNote = '（原处于息屏，已自动点亮）';
+        const woke = await awaitWake(active, { timeoutMs: wakeTimeoutOf(args) });
+        wakefulness = woke.wakefulness;
+        focus = woke.focus || focus;
+        size = woke.size || size;
+        if (woke.ready) {
+            wokeNote = '（原处于息屏，已自动点亮）';
+        } else {
+            // 点亮没能在预算内确认成功。不抛错：至少给出当前树让模型判断，
+            // 但要明确说清「点了但没确认亮」，而不是假装成功。
+            wokeNote = `（原处于息屏，已派发点亮但 ${wakeTimeoutOf(args)}ms 内未确认唤醒，界面可能是锁屏）`;
+        }
     }
 
     // dump 一次就要 1-3 秒，默认只采一帧；要“等页面稳”就显式 stable:true，
@@ -766,18 +938,220 @@ function resolveTarget(args = {}, actionLabel = '操作') {
     return { serial, x, y, node: null, note: '' };
 }
 
+function channelReceipt(result, attempts, extra = {}) {
+    const receipt = { channels: attempts.map(item => item.channel), attempts, ...extra };
+    result.details = { ...result.details, ...receipt };
+    result.content.push({ type: 'text', text: JSON.stringify(receipt) });
+    return result;
+}
+
+const RPC_OPERATION = Object.freeze({ READ: 'read', WRITE: 'write' });
+
+function rpcActionTimeoutMs(method, params) {
+    let durationMs = 0;
+    if (method === 'swipe') durationMs = params[4] * 5;
+    if (method === 'click') durationMs = params[2] || 0;
+    const actionBudgetMs = Math.max(4000, durationMs + 1000);
+    return Math.min(stepRuntime.remainingMs(), actionBudgetMs);
+}
+
+async function rpcAction(serial, method, params, attempts, operation) {
+    stepRuntime.check();
+    const isWrite = operation === RPC_OPERATION.WRITE;
+    const attempt = { channel: 'rpc', method, status: 'starting' };
+    attempts.push(attempt);
+    stepRuntime.inputReceipt({ channels: attempts.map(item => item.channel), attempts });
+    const previousDispatch = isWrite ? stepRuntime.dispatchState() : null;
+    let invoking = false;
+    try {
+        if (!uiServerEnabled()) {
+            throw Object.assign(new Error(), { code: 'UI_SERVER_DISABLED', dispatched: false });
+        }
+        const server = uiServerFor(serial);
+        const ready = await server.start();
+        stepRuntime.check();
+        if (!ready.ok) {
+            throw Object.assign(new Error(), { code: 'UI_SERVER_NOT_READY', dispatched: false });
+        }
+        attempt.status = 'invoking';
+        invoking = true;
+        if (isWrite) stepRuntime.markDispatched();
+        const value = await server.invoke(method, params, {
+            signal: stepRuntime.executionSignal(),
+            timeoutMs: rpcActionTimeoutMs(method, params),
+        });
+        if (isWrite) stepRuntime.markDispatched();
+        attempt.status = 'dispatched';
+        if (value === false) {
+            throw Object.assign(new Error(), { code: 'UI_SERVER_ACTION_REJECTED', dispatched: true });
+        }
+        stepRuntime.check();
+        return value;
+    } catch (error) {
+        attempt.code = error.code || 'UI_SERVER_RPC_FAILED';
+        const notDispatched = !invoking || error.dispatched === false;
+        attempt.status = notDispatched ? 'not-dispatched' : 'unknown';
+        if (isWrite) {
+            if (notDispatched) stepRuntime.restoreDispatch(previousDispatch);
+            else stepRuntime.markDispatched();
+        }
+        const clean = stepRuntime.failure(attempt.code, 'RPC 动作未确认；已派发时不得重试。');
+        clean.dispatched = !notDispatched;
+        clean.details = { channels: attempts.map(item => item.channel), attempts };
+        throw clean;
+    }
+}
+
+async function gesture(serial, method, params, shell) {
+    const attempts = [];
+    stepRuntime.inputReceipt({ channels: attempts.map(item => item.channel), attempts });
+    await dispatchInput(serial, async () => {
+        try {
+            await rpcAction(serial, method, params, attempts, RPC_OPERATION.WRITE);
+            return;
+        } catch (error) {
+            stepRuntime.check();
+            if (error.dispatched) throw error;
+        }
+        stepRuntime.check();
+        const attempt = { channel: 'shell', status: 'dispatched' };
+        attempts.push(attempt);
+        stepRuntime.inputReceipt({ channels: attempts.map(item => item.channel), attempts });
+        stepRuntime.markDispatched();
+        try {
+            await shell();
+        } catch (error) {
+            attempt.status = 'unknown';
+            attempt.code = error.code || 'INPUT_FAILED';
+            const clean = stepRuntime.failure(attempt.code, 'Shell 动作未确认。');
+            clean.details = { channels: attempts.map(item => item.channel), attempts };
+            throw clean;
+        }
+    }, false);
+    return attempts;
+}
+
+function fieldSelector(serial, node) {
+    const attributes = [];
+    const stack = [lastObserve.get(serial)?.graph.rawRoot];
+    while (stack.length) {
+        const raw = stack.pop();
+        if (!raw) continue;
+        if (raw.tag === 'node') attributes.push(raw.attrs);
+        for (let index = raw.children.length - 1; index >= 0; index--) {
+            stack.push(raw.children[index]);
+        }
+    }
+
+    const { left, top, right, bottom } = node.bounds;
+    const bounds = `[${left},${top}][${right},${bottom}]`;
+    const matches = attributes.filter(attrs => (
+        attrs['resource-id'] === node.id
+        && attrs.package === node.package
+        && attrs.bounds === bounds
+    ));
+    if (matches.length !== 1) {
+        throw stepRuntime.failure('INVALID_FILL_TARGET', '无法唯一绑定实时输入框。');
+    }
+
+    const target = matches[0];
+    // RPC identity must remain unique across the unfiltered tree, not only visible controls.
+    const identityMatches = attributes.filter(attrs => (
+        attrs.class === target.class
+        && attrs.package === target.package
+        && (!node.id || attrs['resource-id'] === node.id)
+    ));
+    if (identityMatches.length !== 1) {
+        throw stepRuntime.failure('INVALID_FILL_TARGET', 'RPC 目标身份不唯一；拒绝重复字段。');
+    }
+
+    const selector = {
+        mask: 16 | 524288 | 16777216,
+        className: target.class,
+        packageName: target.package,
+        instance: identityMatches.indexOf(target),
+    };
+    if (node.id) {
+        selector.mask |= 2097152;
+        selector.resourceId = node.id;
+    }
+    return selector;
+}
+
+async function fill(args = {}) {
+    const attempts = [];
+    try {
+        if (typeof args.text !== 'string'
+            || args.text.length > MAX_TEXT_INPUT
+            || !(firstString(args.id, args.resourceId, args.resource_id, args.selector)
+                || args.index !== undefined)
+            || (args.selector && !args.selector.startsWith('id='))
+            || ['x', 'y', 'frameId', 'content'].some(key => args[key] !== undefined)) {
+            throw stepRuntime.failure('INVALID_ARGUMENT', 'Fill 需要 text 字符串及 id/selector 或 index+snapshotId；空字符串清空。');
+        }
+        const { serial, node } = await stepRuntime.stage('prepareMs', () => prepareTarget({
+            ...args,
+            text: undefined,
+            rpcTarget: true,
+        }, '填充'));
+        if (!node?.enabled || !node.inViewport || node.role !== 'textfield') {
+            throw stepRuntime.failure('INVALID_FILL_TARGET', 'Fill 目标必须是可见启用的输入框。');
+        }
+        const selector = fieldSelector(serial, node);
+        const method = args.text ? 'setText' : 'clearTextField';
+        const params = args.text ? [selector, args.text] : [selector];
+        await dispatchInput(serial, () => rpcAction(
+            serial, method, params, attempts, RPC_OPERATION.WRITE,
+        ), false);
+        if (!node.flags.includes('password')) {
+            let matched = false;
+            let code = null;
+            await stepRuntime.stage('verificationMs', async () => {
+                try {
+                    const value = await rpcAction(
+                        serial, 'getText', [selector], attempts, RPC_OPERATION.READ,
+                    );
+                    matched = value === args.text;
+                } catch (error) {
+                    stepRuntime.check();
+                    code = error.code;
+                }
+            });
+            stepRuntime.verified(matched, {
+                condition: { type: 'fill-readback' },
+                error: code || (matched ? null : 'FILL_READBACK_MISMATCH'),
+            });
+            return channelReceipt(textResult(
+                '字段替换已派发；读回' + (matched ? '一致。' : '未证实。'),
+                { serial, fillVerified: matched },
+            ), attempts);
+        }
+        return channelReceipt(textResult(
+            '密码字段替换已派发；不读取或证明字段值。',
+            { serial, password: true },
+        ), attempts);
+    } catch (error) {
+        const clean = stepRuntime.failure(
+            error.code || 'FILL_FAILED',
+            '字段替换失败；无可靠 shell 替换回退，不模拟全选删除。',
+        );
+        clean.details = { channels: attempts.map(item => item.channel), attempts };
+        throw clean;
+    }
+}
+
 async function tap(args = {}) {
     const client = requireAdb();
     const { serial, x, y, node, note } = await stepRuntime.stage('prepareMs', () => prepareTarget(args, '点击'));
-    await dispatchInput(serial, () => client.runText(['shell', 'input', 'tap', String(x), String(y)], { serial, timeoutMs: 15000 }));
+    const attempts = await gesture(serial, 'click', [x, y], () => client.runText(['shell', 'input', 'tap', String(x), String(y)], { serial, timeoutMs: 15000 }));
     const label = node ? `控件 [${node.index}]「${node.label || node.cls}」` : `坐标 (${x}, ${y})`;
-    return textResult(`已点击 ${label}${note}。`, {
+    return channelReceipt(textResult(`已点击 ${label}${note}。`, {
         serial,
         x,
         y,
         index: node ? node.index : null,
         selector: node ? node.selector : null,
-    });
+    }), attempts);
 }
 
 async function swipe(args = {}) {
@@ -796,11 +1170,11 @@ async function swipe(args = {}) {
         }
         requireFrame(args, serial, size);
     });
-    await dispatchInput(serial, () => client.runText(
+    const attempts = await gesture(serial, 'swipe', [x1, y1, x2, y2, Math.max(1, Math.round(duration / 5))], () => client.runText(
         ['shell', 'input', 'swipe', String(x1), String(y1), String(x2), String(y2), String(duration)],
         { serial, timeoutMs: 15000 },
     ));
-    return textResult(`已滑动 (${x1},${y1}) → (${x2},${y2})，历时 ${duration}ms。`, { serial, x1, y1, x2, y2, duration });
+    return channelReceipt(textResult(`已滑动 (${x1},${y1}) → (${x2},${y2})，历时 ${duration}ms。`, { serial, x1, y1, x2, y2, duration }), attempts);
 }
 
 async function scroll(args = {}) {
@@ -828,11 +1202,11 @@ async function scroll(args = {}) {
     const y1 = Math.round(cy + (horizontal ? 0 : sign * delta));
     const x2 = Math.round(cx - (horizontal ? sign * delta : 0));
     const y2 = Math.round(cy - (horizontal ? 0 : sign * delta));
-    await dispatchInput(serial, () => requireAdb().runText(
+    const attempts = await gesture(serial, 'swipe', [x1, y1, x2, y2, Math.max(1, Math.round(duration / 5))], () => requireAdb().runText(
         ['shell', 'input', 'swipe', String(x1), String(y1), String(x2), String(y2), String(duration)],
         { serial, timeoutMs: 15000 },
     ));
-    return textResult(`已派发一次 ${direction} 滚动；不证明页面移动或到达边界。`, { serial, direction, distance, duration, index: node.index, x1, y1, x2, y2 });
+    return channelReceipt(textResult(`已派发一次 ${direction} 滚动；不证明页面移动或到达边界。`, { serial, direction, distance, duration, index: node.index, x1, y1, x2, y2 }), attempts);
 }
 
 
@@ -842,19 +1216,19 @@ async function longPress(args = {}) {
     const duration = intOf(args.duration, 'duration', 800);
     if (duration < 300 || duration > 10000) throw stepRuntime.failure('INVALID_ARGUMENT', 'duration 必须在300–10000ms内。');
     // 起止同点 + duration = 长按
-    await dispatchInput(serial, () => client.runText(
+    const attempts = await gesture(serial, 'click', [x, y, duration], () => client.runText(
         ['shell', 'input', 'swipe', String(x), String(y), String(x), String(y), String(duration)],
         { serial, timeoutMs: 15000 },
     ));
     const label = node ? `控件 [${node.index}]「${node.label || node.cls}」` : `坐标 (${x}, ${y})`;
-    return textResult(`已长按 ${label}，${duration}ms${note}。`, {
+    return channelReceipt(textResult(`已长按 ${label}，${duration}ms${note}。`, {
         serial,
         x,
         y,
         duration,
         index: node ? node.index : null,
         selector: node ? node.selector : null,
-    });
+    }), attempts);
 }
 
 async function keyEvent(args = {}) {
@@ -911,37 +1285,88 @@ async function inputText(args = {}) {
             if (enter) await client.runText(['shell', 'input', 'keyevent', 'KEYCODE_ENTER'], { serial, timeoutMs: 10000 });
         });
         return textResult(`已输入 ASCII 文本（${text.length} 字符）${enter ? '并回车' : ''}。`, {
-            serial, text, method: 'input-text', ascii: true,
+            serial, method: 'input-text', ascii: true,
         });
     }
 
-    // 非 ASCII 必须走 ADBKeyboard 的 base64 广播，input text 处理不了中文
-    if (!(await hasAdbKeyboard(serial))) {
-        throw new Error(
-            '[AndroidController] 非 ASCII 文本（如中文）需要 ADBKeyboard 输入法。\n'
-            + '请先安装 https://github.com/senzhk/ADBKeyBoard 的 APK，并切换为当前输入法：\n'
-            + '  adb shell ime enable com.android.adbkeyboard/.AdbIME\n'
-            + '  adb shell ime set com.android.adbkeyboard/.AdbIME\n'
-            + '若只用英文输入可继续使用 input text。',
-        );
-    }
-
-    const currentIme = await client.runText(['shell', 'settings', 'get', 'secure', 'default_input_method'], { serial, timeoutMs: 10000 }).catch(() => { stepRuntime.check(); return ''; });
-    if (!['com.android.adbkeyboard/.AdbIME', 'com.android.adbkeyboard/com.android.adbkeyboard.AdbIME'].includes(currentIme.trim())) {
-        throw stepRuntime.failure('ADB_KEYBOARD_NOT_ACTIVE', 'ADBKeyboard 不是当前输入法或无法确认；未派发文本，不自动切换输入法。');
-    }
-    const base64 = Buffer.from(text, 'utf8').toString('base64');
-    await dispatchInput(serial, async () => {
-        await client.runText(
-            ['shell', 'am', 'broadcast', '-a', 'ADB_INPUT_B64', '--es', 'msg', shellQuote(base64)],
-            { serial, timeoutMs: 20000 },
-        );
+    const attempts = [];
+    let clipboard = null;
+    try {
+        await dispatchInput(serial, async () => {
+            await rpcAction(
+                serial, 'setClipboard', ['AndroidController', text], attempts, RPC_OPERATION.WRITE,
+            );
+            clipboard = 'replaced';
+            stepRuntime.inputReceipt({ channels: attempts.map(item => item.channel), attempts, clipboard });
+            stepRuntime.check();
+            await rpcAction(serial, 'pasteClipboard', [], attempts, RPC_OPERATION.WRITE);
+            stepRuntime.check();
+            if (enter) await client.runText(['shell', 'input', 'keyevent', 'KEYCODE_ENTER'], { serial, timeoutMs: 10000 });
+        }, false);
+        return channelReceipt(textResult('已派发当前光标/选区的 Unicode 粘贴；不证明字段值。', { serial, method: 'rpc-clipboard', ascii: false }), attempts, { clipboard });
+    } catch (error) {
+        error.details = { ...error.details, ...(clipboard ? { clipboard } : {}) };
         stepRuntime.check();
-        if (enter) await client.runText(['shell', 'input', 'keyevent', 'KEYCODE_ENTER'], { serial, timeoutMs: 10000 });
-    });
-    return textResult(`已通过 ADBKeyboard 输入文本（${text.length} 字符）${enter ? '并回车' : ''}。`, {
-        serial, text, method: 'adbkeyboard-b64', ascii: false,
-    });
+        if (error.dispatched !== false) throw error;
+    }
+    stepRuntime.check();
+    // 非 ASCII 必须走 ADBKeyboard 的 base64 广播，input text 处理不了中文
+    const fallback = { channel: 'adbkeyboard', status: 'not-dispatched' };
+    attempts.push(fallback);
+    stepRuntime.inputReceipt({ channels: attempts.map(item => item.channel), attempts, ...(clipboard ? { clipboard } : {}) });
+    try {
+        if (!(await hasAdbKeyboard(serial))) {
+            throw stepRuntime.failure('ADB_KEYBOARD_NOT_ACTIVE',
+                '[AndroidController] 非 ASCII 文本（如中文）需要 ADBKeyboard 输入法。\n'
+                + '请先安装 https://github.com/senzhk/ADBKeyBoard 的 APK，并切换为当前输入法：\n'
+                + '  adb shell ime enable com.android.adbkeyboard/.AdbIME\n'
+                + '  adb shell ime set com.android.adbkeyboard/.AdbIME\n'
+                + '若只用英文输入可继续使用 input text。',
+            );
+        }
+
+        stepRuntime.check();
+        const currentIme = await client.runText(
+            ['shell', 'settings', 'get', 'secure', 'default_input_method'],
+            { serial, timeoutMs: 10000 },
+        ).catch(() => {
+            stepRuntime.check();
+            return '';
+        });
+        stepRuntime.check();
+        const adbKeyboardComponents = [
+            'com.android.adbkeyboard/.AdbIME',
+            'com.android.adbkeyboard/com.android.adbkeyboard.AdbIME',
+        ];
+        if (!adbKeyboardComponents.includes(currentIme.trim())) {
+            throw stepRuntime.failure('ADB_KEYBOARD_NOT_ACTIVE', 'ADBKeyboard 不是当前输入法或无法确认；未派发文本，不自动切换输入法。');
+        }
+        fallback.status = 'dispatched';
+        const base64 = Buffer.from(text, 'utf8').toString('base64');
+        await dispatchInput(serial, async () => {
+            await client.runText(
+                ['shell', 'am', 'broadcast', '-a', 'ADB_INPUT_B64', '--es', 'msg', shellQuote(base64)],
+                { serial, timeoutMs: 20000 },
+            );
+            stepRuntime.check();
+            if (enter) {
+                await client.runText(
+                    ['shell', 'input', 'keyevent', 'KEYCODE_ENTER'],
+                    { serial, timeoutMs: 10000 },
+                );
+            }
+        });
+        return channelReceipt(textResult(
+            `已通过 ADBKeyboard 输入文本（${text.length} 字符）${enter ? '并回车' : ''}。`,
+            { serial, method: 'adbkeyboard-b64', ascii: false },
+        ), attempts, clipboard ? { clipboard } : {});
+    } catch (error) {
+        fallback.code = error.code || 'INPUT_FAILED';
+        if (fallback.status === 'dispatched') fallback.status = 'unknown';
+        const clean = stepRuntime.failure(error.code || 'INPUT_FAILED', 'Unicode 输入失败；不自动切换输入法或重放。');
+        clean.details = { channels: attempts.map(item => item.channel), attempts, ...(clipboard ? { clipboard } : {}) };
+        throw clean;
+    }
 }
 
 /**
@@ -1375,7 +1800,7 @@ function describeVisionShot(shot, { serial, size }) {
 // ---------------------------------------------------------------------------
 
 const ACTIONS = Object.freeze({
-    tap, swipe, scroll, longpress: longPress, inputtext: inputText,
+    tap, swipe, scroll, fill, longpress: longPress, inputtext: inputText,
     keyevent: keyEvent, launchapp: launchApp, killapp: killApp, system: systemOperation,
 });
 const STEP_ACTIONS = new Set([...Object.keys(ACTIONS), 'wait']);
@@ -1473,15 +1898,25 @@ async function executeSequence(args, executionContext) {
     stepRuntime.beginSequence(parsed.length);
     const receipts = [];
     let result;
+    let status = 'completed';
     for (const step of parsed) {
         stepRuntime.check();
+        const isIntermediate = step !== parsed.at(-1);
         stepRuntime.beginItem(step.command);
-        result = await executeStep({ serial, action: step.action, expect: step.expect, waitTimeoutMs: step.waitTimeoutMs, afterObserve: step === parsed.at(-1) ? args.afterObserve : undefined }, executionContext);
-        const receipt = stepRuntime.finishItem();
+        result = await executeStep({
+            serial,
+            action: step.action,
+            expect: step.expect,
+            waitTimeoutMs: step.waitTimeoutMs,
+            afterObserve: isIntermediate ? undefined : args.afterObserve,
+        }, executionContext);
+        const receipt = stepRuntime.finishItem(isIntermediate);
         receipts.push(receipt);
-        if (receipt.outcome === 'unknown') break;
+        if (receipt.outcome === 'unknown' || (isIntermediate && receipt.outcome !== 'verified')) {
+            status = 'stopped';
+            break;
+        }
     }
-    const status = receipts.at(-1).outcome === 'unknown' ? 'stopped' : 'completed';
     const sequence = { status, total: parsed.length, steps: receipts };
     result.details = { ...result.details, sequence };
     result.content.push({ type: 'text', text: JSON.stringify({ sequence }) });
@@ -1512,13 +1947,14 @@ async function executeStep(args, executionContext) {
             ? textResult('只读等待条件采样；不派发输入或唤醒。', { serial })
             : await ACTIONS[command]({ ...action, serial }, executionContext);
     } catch (error) {
-        if (command === 'inputtext') {
-            throw stepRuntime.failure(error.code || 'INPUT_FAILED', '文本输入失败；已派发时不得直接重试。');
+        if (command === 'inputtext' || command === 'fill') {
+            const clean = stepRuntime.failure(error.code || 'INPUT_FAILED', '文本输入失败；已派发时不得直接重试。');
+            clean.details = error.details; throw clean;
         }
         throw error;
     }
     let verifiedSample = null;
-    if (expected) await stepRuntime.stage('verificationMs', async () => {
+    if (expected && !(command === 'fill' && (result.details.fillVerified === false || result.details.password))) await stepRuntime.stage('verificationMs', async () => {
         const deadline = Date.now() + waitMs;
         let matched = false;
         let evidence = null;
@@ -2000,6 +2436,7 @@ async function cleanup() {
     frameHub?.stop();
     await scrcpyHub?.stop().catch(() => {});
     await streamServer?.stop().catch(() => {});
+    await shutdownUiServers();
     lastObserve.clear();
     lastVision.clear();
     adbKeyboardCache.clear();
@@ -2012,6 +2449,9 @@ function getRuntimeStatus() {
         displayUrl: streamServer?.url() || null,
         frame: frameHub?.status() || null,
         scrcpy: scrcpyHub?.status() || null,
+        // 性能基线观测面：队列压力与显示链路丢帧计数。只读快照，不改变调度行为。
+        adbQueue: adb?.queueStats?.() || null,
+        display: streamServer?.metrics?.() || null,
     };
 }
 
