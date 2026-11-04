@@ -19,8 +19,10 @@ for (const duration of [300, 5000]) {
                 duration,
             },
         });
+        // 原生 click 的第三参是毫秒；调用方显式声明时长，预算不能因原语变更丢失。
         const call = h.calls.find(([channel, method]) => channel === 'rpc' && method === 'click');
-        assert.ok(call, 'long press must use RPC');
+        assert.ok(call, 'long press must use native RPC click');
+        assert.equal(call[2][2], duration);
         assert.equal(call[3].timeoutMs, Math.max(4000, duration + 1000));
     });
 }

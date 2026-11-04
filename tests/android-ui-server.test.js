@@ -155,6 +155,9 @@ function setup(options = {}) {
             if (name === 'child_process') return childProcess;
             if (name === 'net') return net;
             if (name === 'http') return http;
+            // 库内相对依赖（如 ./rpc-methods）必须相对被测文件解析，
+            // 不能落到测试文件自己的目录下 —— 那样只会报 MODULE_NOT_FOUND。
+            if (name.startsWith('.')) return require(path.resolve(path.dirname(LIB), name));
             return require(name);
         },
         module, exports: module.exports, __dirname: path.dirname(LIB),
@@ -258,6 +261,33 @@ test('dump 返回的 XML 直接可用于 parseUiGraph', async () => {
     assert.ok(graph.total >= 1, `解析器必须能吃这份 XML，total=${graph.total}`);
     await server.stop();
 });
+
+test('dump 请求的 maxDepth 必须为正：0 或负数在 uiautomator2 下只返回根节点', async () => {
+    // 真机实测（PJZ110 / Android 17 / u2-server-0.5.0）：maxDepth=0 与 -1 都只回 1 个 <node>，
+    // 而同一屏 maxDepth>=60 返回完整树（130 节点）。传 0 会让 RPC 快路径拿到「成功但只有根」的树，
+    // 上层以为界面是空的，于是永远不回退 CLI —— Observe 的 controls 全为 0。
+    const api = setup();
+    const server = new api.UiServer({ adbPath: 'stub-adb', serial: 'USB123' });
+    await server.start();
+
+    await server.dump();
+    const defaults = api.calls.filter(call => call[1] === 'dumpWindowHierarchy').at(-1);
+    assert.ok(Number.isInteger(defaults[2][1]) && defaults[2][1] > 0,
+        `默认 maxDepth 必须是正整数，实际 ${JSON.stringify(defaults[2][1])}`);
+
+    for (const requested of [0, -1, 1.5, 'x']) {
+        await server.dump({ maxDepth: requested });
+        const call = api.calls.filter(item => item[1] === 'dumpWindowHierarchy').at(-1);
+        assert.ok(Number.isInteger(call[2][1]) && call[2][1] > 0,
+            `maxDepth=${JSON.stringify(requested)} 必须被校正为正整数，实际 ${JSON.stringify(call[2][1])}`);
+    }
+
+    await server.dump({ maxDepth: 75 });
+    const explicit = api.calls.filter(call => call[1] === 'dumpWindowHierarchy').at(-1);
+    assert.equal(explicit[2][1], 75, '显式正数必须原样透传');
+    await server.stop();
+});
+
 
 test('服务未就绪时 dump 失败而不是返回半截数据', async () => {
     const api = setup({ readyAfter: Infinity });

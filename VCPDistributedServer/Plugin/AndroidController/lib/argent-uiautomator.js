@@ -11,12 +11,16 @@
  * - 算法、判定顺序、注释要点逐条保留，不改成「更顺手」的写法。
  *   这份实现被上游的大量真机样本打磨过，改动前先确认是在修 bug 而不是改口味。
  * - TypeScript 类型擦除，`Map<T, U>` 直接映射到 `Map`。
- * - 唯一的结构性增补：DescribeNode 上多挂一个非契约字段 `pixel`（像素 bounds，
+ * - DescribeNode 增补非契约字段 `pixel`（像素 bounds，
  *   与归一化 `frame` 并存）。上游只给归一化坐标，而本项目的 Tap 动作需要像素点；
  *   由下游从 `pixel` 换算，不参与 prune 判定。
+ * - 本地标签语义保留密码脱敏、独立点击文本排除及首见几何；聚合在后序阶段
+ *   合并原始标签摘要，完整文本通过非枚举 FULL_LABEL 传递给图层。
  *
  * 对外只有 parseUiAutomatorDump 是稳定入口，其余导出供测试直接验证单条规则。
  */
+
+const FULL_LABEL = Symbol('fullLabel');
 
 // ---------------------------------------------------------------------------
 // XML
@@ -388,7 +392,72 @@ function descendantText(parsed, maxChars = 120, out = null) {
     if (out && boxes.length > 0) out.labelBox = unionPixelBounds(boxes);
 
     const s = parts.join(' / ');
+    if (out) out.fullLabel = s;
     return s.length > maxChars ? `${s.slice(0, maxChars)}…` : s;
+}
+
+/**
+ * Consume child summaries after their UiNode labels have been materialized.
+ * Each word retains its first raw preorder occurrence (including its bounds).
+ * Small-to-large merging avoids copying a growing map along unary chains;
+ * discarded child maps must not remain reachable through the summary index.
+ * Expected map work is O(n log n); materializing k distinct words additionally
+ * costs O(k log k + label length), not O(1) and not globally linear.
+ */
+function mergeLabelSummary(parsed, order, summaries, collect) {
+    let words = null;
+    const children = [];
+    for (const c of parsed.children) {
+        if (c.tag !== 'node') continue;
+        const child = summaries.get(c);
+        summaries.delete(c);
+        if (collect && child) children.push(child);
+    }
+    if (!collect) return null;
+    if (attrIsTrue(parsed.attrs, 'password')) {
+        return new Map([['[password]', { word: '[password]', order, box: null }]]);
+    }
+    for (const child of children) {
+        if (!words || child.size > words.size) words = child;
+    }
+    if (!words) words = new Map();
+    for (const child of children) {
+        if (child === words) continue;
+        for (const [word, entry] of child) {
+            const previous = words.get(word);
+            if (!previous || entry.order < previous.order) words.set(word, entry);
+        }
+    }
+    const attrs = parsed.attrs;
+    const text = String(attrs.text ?? '').trim();
+    const description = String(attrs['content-desc'] ?? '').trim();
+    if (!(text || description)
+        || (!attrIsTrue(attrs, 'clickable') && !attrIsTrue(attrs, 'long-clickable'))) {
+        let offset = 0;
+        for (const word of [text, description]) {
+            const position = order + offset++;
+            if (!word) continue;
+            const previous = words.get(word);
+            if (!previous || position < previous.order) {
+                words.set(word, { word, order: position, box: parseUiAutomatorBounds(attrs.bounds ?? '') });
+            }
+        }
+    }
+    return words;
+}
+
+function materializeLabelSummary(words, out) {
+    const entries = Array.from(words.values()).sort((a, b) => a.order - b.order);
+    const boxes = [];
+    const parts = [];
+    for (const entry of entries) {
+        parts.push(entry.word);
+        if (entry.box) boxes.push(entry.box);
+    }
+    if (boxes.length) out.labelBox = unionPixelBounds(boxes);
+    const full = parts.join(' / ');
+    out.fullLabel = full;
+    return full.length > 120 ? `${full.slice(0, 120)}…` : full;
 }
 
 /** 像素矩形的并集（本地增补，供 labelBox 使用）。 */
@@ -448,6 +517,8 @@ function pruneSubtree(root, opts) {
     // 于是过滤发生在「被裁剪节点的父节点」上。
     const stack = [{ parsed: root, scrollClip: null, inWebView: false, visited: false }];
     const outputs = new Map();
+    const summaries = new Map();
+    let order = 0;
 
     while (stack.length > 0) {
         const top = stack[stack.length - 1];
@@ -457,6 +528,12 @@ function pruneSubtree(root, opts) {
             const attrs = top.parsed.attrs;
             const myBounds = parseUiAutomatorBounds(attrs.bounds ?? '');
             const isScroll = isUiAutomatorScrollable(attrs, top.inWebView);
+            top.order = order;
+            order += 2;
+            // Only raw subtrees that may supply an aggregate need summaries.
+            top.collect = top.collect || (!isScroll
+                && (attrIsTrue(attrs, 'clickable') || attrIsTrue(attrs, 'long-clickable'))
+                && !attrIsTrue(attrs, 'password') && !labelOf(attrs));
 
             // 我滚动就把我的 bounds 作为子节点的裁剪窗口，否则继承我收到的那个。
             const childClip = isScroll && myBounds ? myBounds : top.scrollClip;
@@ -469,14 +546,17 @@ function pruneSubtree(root, opts) {
                         parsed: c,
                         scrollClip: childClip,
                         inWebView: childInWebView,
+                        collect: top.collect,
                         visited: false,
                     });
                 }
             }
         } else {
+            const summary = mergeLabelSummary(top.parsed, top.order, summaries, top.collect);
+            if (summary) summaries.set(top.parsed, summary);
             outputs.set(
                 top.parsed,
-                computeNodeOutput(top.parsed, top.scrollClip, top.inWebView, outputs, opts),
+                computeNodeOutput(top.parsed, top.scrollClip, top.inWebView, outputs, opts, summary),
             );
             stack.pop();
         }
@@ -485,7 +565,7 @@ function pruneSubtree(root, opts) {
     return outputs.get(root) ?? [];
 }
 
-function computeNodeOutput(parsed, scrollClip, inWebView, outputs, opts) {
+function computeNodeOutput(parsed, scrollClip, inWebView, outputs, opts, summary) {
     const attrs = parsed.attrs;
     const cls = attrs.class ?? '';
 
@@ -521,11 +601,15 @@ function computeNodeOutput(parsed, scrollClip, inWebView, outputs, opts) {
     if (WEBVIEW_CLASSES.has(cls)) {
         if (!visible) return keptChildren;
         let label = labelOf(attrs);
+        let fullLabel;
         let children = keptChildren;
         const inner = children.length === 1 && children[0].webHost ? children[0] : undefined;
         if (inner) {
             children = inner.children;
-            if (!label && inner.label) label = inner.label;
+            if (!label && inner.label) {
+                label = inner.label;
+                fullLabel = inner[FULL_LABEL];
+            }
         }
 
         // Chromium 在第一次请求时才构建树，所以底下空的 WebView 通常是页面还没读；
@@ -533,6 +617,7 @@ function computeNodeOutput(parsed, scrollClip, inWebView, outputs, opts) {
         if (!label && children.length === 0) label = '(no web content exposed)';
 
         const node = makeUiNode(attrs, 'WebView', bounds, label, children);
+        if (fullLabel !== undefined) Object.defineProperty(node, FULL_LABEL, { value: fullLabel });
         node.webHost = true;
         if (inner) {
             node.clickable = node.clickable || inner.clickable;
@@ -547,6 +632,7 @@ function computeNodeOutput(parsed, scrollClip, inWebView, outputs, opts) {
 
     const interactive = isInteractive(attrs);
     let label = labelOf(attrs);
+    let fullLabel;
     let labelBox = null;
 
     // 在派生 label 的地方脱敏，而不是在 makeUiNode：
@@ -580,8 +666,11 @@ function computeNodeOutput(parsed, scrollClip, inWebView, outputs, opts) {
         && !isUiAutomatorScrollable(attrs, inWebView)
         && !label && keptChildren.length > 0) {
         const aggOut = {};
-        const agg = descendantText(parsed, 120, aggOut);
-        if (agg) label = agg;
+        const agg = materializeLabelSummary(summary, aggOut);
+        if (agg) {
+            label = agg;
+            fullLabel = aggOut.fullLabel;
+        }
         labelBox = aggOut.labelBox || null;
     }
 
@@ -592,7 +681,10 @@ function computeNodeOutput(parsed, scrollClip, inWebView, outputs, opts) {
         if (c.clickable && c.pixelBounds && rectsEqual(c.pixelBounds, bounds)) {
             // 标签可能只活在外层包装上（RN 的 Pressable accessibilityLabel 套裸可点原生视图），
             // 这时回填外层的值而不是丢掉。
-            if (!c.label && label) c.label = label;
+            if (!c.label && label) {
+                c.label = label;
+                Object.defineProperty(c, FULL_LABEL, { value: fullLabel ?? label });
+            }
             const rid = attrs['resource-id'];
             if (!c.identifier && rid) c.identifier = rid;
             return [c];
@@ -623,6 +715,7 @@ function computeNodeOutput(parsed, scrollClip, inWebView, outputs, opts) {
         : deriveUiAutomatorRole(cls);
 
     const node = makeUiNode(attrs, role, bounds, label, keptChildren);
+    if (fullLabel !== undefined) Object.defineProperty(node, FULL_LABEL, { value: fullLabel });
     if (hiddenInScroll > 0) node.scrollHidden = hiddenInScroll;
     if (labelBox) node.labelBox = labelBox;
     return [node];
@@ -689,6 +782,7 @@ function finalizeUiNode(n, children, sw, sh) {
     const out = { role: n.role, frame, children };
     if (pixel) out.pixel = pixel;
     if (n.label) out.label = n.label;
+    if (n[FULL_LABEL] !== undefined) Object.defineProperty(out, FULL_LABEL, { value: n[FULL_LABEL] });
     if (n.identifier) out.identifier = n.identifier;
     if (n.value) out.value = n.value;
     if (n.clickable) out.clickable = true;
@@ -760,6 +854,7 @@ module.exports = {
     decodeXmlEntities,
     deriveUiAutomatorRole,
     deriveWebRole,
+    FULL_LABEL,
     descendantText,
     unionPixelBounds,
     isInteractive,
