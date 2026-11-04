@@ -3,7 +3,7 @@
     "name": "AndroidController",
     "version": "1.0.0",
     "displayName": "Android 手机操控",
-    "description": "通过 adb 让 Agent 感知与操作 Android 设备。感知优先使用 UI Automator 控件树（压缩为索引表，含精确坐标与可点击属性），截图仅作兜底；动作支持点击、滑动、长按、文本输入、按键、启停应用。附带一个只监听 127.0.0.1 的实时显示屏，可在 Loom 中作为独立应用打开观看手机画面。支持无线调试（Android 11+ 配对）与 USB 调试两种接入方式。",
+    "description": "通过 adb 让 Agent 感知与操作 Android 设备。感知优先使用 UI Automator 控件树；动作支持点击、滑动、原生长按、文本输入、按键、启停应用，以及显式实验双击、滚动寻目标、拖拽、缩放和键盘组合，可纯读脱敏动作历史。M2 扩展 selector、元素图与 idle 等待均为 experimental、device 未测，不外推 M1.5 历史真机验收。附带只监听 127.0.0.1 的实时显示屏，可在 Loom 打开。支持无线调试（Android 11+ 配对）与 USB 调试。",
     "author": "绫织",
     "pluginType": "hybridservice",
     "entryPoint": {
@@ -34,6 +34,11 @@
             "type": "boolean",
             "description": "控件树优先走设备端常驻服务（u2 JSON-RPC）；关闭后回退每次冷启的 uiautomator dump，感知延迟显著上升，仅在排查兼容性问题时关闭。",
             "default": true
+        },
+        "CLIPBOARD_PASTE": {
+            "type": "string",
+            "description": "非 ASCII 输入时，写入剪贴板后用哪个原语贴入光标：keyevent（默认，KEYCODE_PASTE，已在原生 EditText 与 WebView 上实测可用）、rpc（设备端 pasteClipboard，在 ColorOS / Android 17 上会抛 AssertionError）、off（不粘贴）。两种都只算已派发，不声称粘贴成功。",
+            "default": "keyevent"
         },
         "AUTO_WAKE": {
             "type": "boolean",
@@ -100,17 +105,17 @@
             },
             {
                 "command": "Observe",
-                "description": "感知入口。mode=ui(默认，语义控件表与snapshotId)|image(仅截图、frameId和设备坐标映射)|arbitrate(显式arbitration对象，复用共享Jev，只建议不执行)|api(已声明只读API)。ui可limit=60、screenshot=true、stable=true；wake=never禁止唤醒，默认ifAllowed沿用配置。截图可region、target=canvas、maxWidth、format、grid。index/像素动作凭据15秒过期，动作后失效。详细参数先Describe。",
+                "description": "感知入口。mode=ui(默认，语义表/snapshotId)|image(截图/frameId/设备坐标mapping)|arbitrate(显式arbitration，共享Jev，只建议不执行)|api(声明的只读API)。ui可limit=60/screenshot=true/stable=true；wake=never禁止唤醒，默认ifAllowed沿用配置。image可region或target=canvas；M2 experimental、device未测的target=element与region/canvas互斥，仅id或selector或index+snapshotId寻址，padding仅数字安全整数0–128默认0，拒frameId/像素。元素图返回原始elementBounds、visibleBounds、原始中心center及mapping，center不保证在可见范围；前后采样复核身份/可见布局/前台/尺寸，变化拒绝签发frameId，occlusion=unknown不证明无遮挡。仍全屏采集后主机裁剪，不降低ADB截图流量。maxWidth/format/quality/grid沿用。图像前后新鲜上下文与原始尺寸一致才签发可操作frameId；无法确认仍可查看图片但frameId=null、image.actionable=false并给reason。像素动作前复核前台/窗口/旋转/逻辑尺寸/唤醒/未锁定，未知或变化拒绝；不保证布局不变或原子派发。仅保守支持单默认显示器可解析格式，未知ROM不猜。index/像素凭据15秒过期，输入后失效；详细参数先Describe。",
                 "example": "command=Observe, serial=设备ID, mode=ui"
             },
             {
                 "command": "ExecuteStep",
-                "description": "执行受控动作或有界短序列。steps=[{action,expect?,waitTimeoutMs?}]最多8步GUI，中间步必须验证通过，未知/异常立即停，禁System与后续旧凭据；与action二选一，详见Describe。action对象或JSON对象字符串，command=Wait|Tap|Swipe|Scroll|LongPress|InputText|Fill|KeyEvent|LaunchApp|KillApp|System；Wait必须expect且不派发输入、不唤醒。id/text/selector实时定位；index携带snapshotId，设备像素坐标携带frameId。expect可{type:visible|absent,selector}或{type:foreground,package}。afterObserve=true按需返回新快照，或对象配置局部图像；默认false。timeoutMs=60000覆盖整步，waitTimeoutMs=5000仅限制验证。正文execution区分observed/dispatched/verified/unknown/failed；unknown禁止直接重试，verified不等于业务成功。System必须外层显式serial并通过现有分设备授权；不支持任意shell。参数与边界先Describe。",
+                "description": "执行受控动作或1–8步GUI短序列steps=[{action,expect?,waitTimeoutMs?}]，与action二选一；中间步必须expect且验证通过，未知/异常停，禁System及后续旧凭据。action为对象或JSON对象字符串，command=Wait|Tap|DoubleTap|Swipe|Scroll|ScrollUntil|Drag|Pinch|LongPress|InputText|Fill|ImeAction|EraseText|KeyCombo|KeyEvent|LaunchApp|KillApp|System。M2 selector字符串支持id/text及旧#N（一基XML顺序）、contains/regex/class/role；组合{id?,text?,contains?,regex?,class?,role?,nth?,within?}至少一个条件AND，nth为零基数字安全整数按top,left,bottom,right,index排序，裸多匹配拒绝，within一层祖先唯一；regex限安全线性语法/RE2，详见Describe。ScrollUntil仍仅精确id/text，Fill/EraseText严格不变，Drag/Pinch原始RPC身份仍唯一。普通Wait必须expect；M2 experimental、device未测的action.mode=idle单步/末步可无expect，与额外expect共用waitTimeoutMs默认5000上限30000。原生最多1500ms只调用一次best-effort hint，APK吞TimeoutException，void成功不能ui_automation_idle/verified；后续两次完整可见原始布局200ms间隔一致才layout_stable；传输未知不后备，idle失败不被expect洗绿，不输入/不唤醒/无固定sleep。expect={type:visible|absent,selector}或{type:foreground,package}。afterObserve默认false，true语义快照或对象{mode:ui|image,target?,id?,selector?,index?,snapshotId?,padding?,region?,maxWidth?,format?,quality?,grid?,limit?,screenshot?}；image+target=element沿用实验元素图参数与前后验证。timeoutMs=60000覆盖整步，等待不延长总预算。区分observed/dispatched/verified/unknown/failed，unknown不重试，verified非业务成功。新增动作仍实验，不因RPC成功声称系统识别；System须外层serial与既有授权，无任意shell。详细边界先Describe。",
                 "example": "command=ExecuteStep, serial=设备ID, action={\"command\":\"Tap\",\"id\":\"com.demo:id/open\"}, expect={\"type\":\"visible\",\"selector\":\"text=详情\"}, afterObserve=true"
             },
             {
                 "command": "Manage",
-                "description": "设备及显示管理。operation=connect|reconnect|disconnect|startDisplay|stopDisplay|displayStatus。connect可mode=auto|wireless|usb及address/serial；首次配对优先使用显示屏向导。startDisplay open=true复用Loom侧栏。连接管理不打断正在运行的设备动作。",
+                "description": "设备及显示管理。operation=connect|reconnect|disconnect|startDisplay|stopDisplay|displayStatus|actionHistory。actionHistory(serial,limit数字1–100)纯读内存脱敏元数据，不连接设备、不抢租约、不重放；connect可mode=auto|wireless|usb及address/serial；首次配对优先使用显示屏向导。startDisplay open=true复用Loom侧栏。连接管理不打断正在运行的设备动作。",
                 "example": "command=Manage, operation=startDisplay, open=true"
             }
         ]

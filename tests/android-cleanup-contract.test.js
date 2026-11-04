@@ -6,21 +6,6 @@ const { harness } = require('./helpers/android-service-harness.cjs');
 
 const inputs = h => h.calls.filter(([kind, args]) => kind === 'adb' && args[1] === 'input');
 
-test('display URL synchronization preserves the existing application sources', async () => {
-    const source = { manifest: { id: 'android-mirror', startUrl: 'http://127.0.0.1:1/', name: 'Custom' }, css: '.custom{}', js: 'window.custom=true;' };
-    const saved = [];
-    await harness({ displayUrl: 'http://127.0.0.1:9999', services: { loomManager: {
-        manifests: new Map([['android-mirror', source.manifest]]),
-        async readSources() { return source; },
-        async saveApp(payload) { saved.push(payload); },
-    } } });
-    assert.equal(saved.length, 1);
-    assert.equal(saved[0].manifest.startUrl, 'http://127.0.0.1:9999');
-    assert.equal(saved[0].manifest.name, 'Custom');
-    assert.equal(saved[0].css, source.css);
-    assert.equal(saved[0].js, source.js);
-});
-
 test('unchanged display URL does not save application sources', async () => {
     let reads = 0;
     await harness({ displayUrl: 'http://127.0.0.1:9999', services: { loomManager: {

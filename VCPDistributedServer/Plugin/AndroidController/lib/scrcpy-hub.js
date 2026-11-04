@@ -629,9 +629,9 @@ class StreamParser {
     }
 
     _drain() {
-        let guard = 0;
-        while (guard < 1000) {
-            guard += 1;
+        // Every successful iteration consumes bytes or advances the handshake.
+        // Leaving complete packets here would depend on a future TCP data event.
+        while (true) {
 
             if (this.stage === 'dummy') {
                 if (this.buffer.length < 1) return;

@@ -24,7 +24,7 @@ const fillRequest = text => ({
 });
 
 for (const boundary of ['abort', 'deadline']) {
-    test(`pending RPC ${boundary} holds lease and never falls back or enters`, async () => {
+    test(`卡住的剪贴板写 ${boundary} holds lease and never falls back or enters`, async () => {
         let release;
         let entered;
         const enteredRpc = new Promise(resolve => {
@@ -49,6 +49,8 @@ for (const boundary of ['abort', 'deadline']) {
         );
         const rejected = assert.rejects(work, error => {
             assert.equal(error.code, boundary === 'abort' ? 'STEP_ABORTED' : 'STEP_DEADLINE');
+            // 已经没有只读探针了：paste 没有无副作用的问法，所以第一步就是 setClipboard（写）。
+            // 在写动作里被中止，回执必须是 unknown（可能已执行），不能是 failed。
             assert.equal(error.execution.outcome, 'unknown');
             assert.ok(error.message.includes('channels'));
             assert.equal(error.message.includes('机密文本'), false);
@@ -75,19 +77,36 @@ for (const boundary of ['abort', 'deadline']) {
         await tick();
         await tick();
 
+        // 副作用断言必须放在轮询之前：轮询自己发的 KeyEvent 也是一次 adb input。
+        // 没有只读探针之后，第一步就是 setClipboard；它没返回就被边界拦住了，
+        // 所以后续的 paste 与 IME 广播一条都不得发出。
         assert.deepEqual(
             h.calls.filter(call => call[0] === 'rpc').map(call => call[1]),
-            ['setClipboard']
+            ['setClipboard'],
+            '被中止的那次写之后不得再往下走'
+        );
+        assert.equal(
+            h.calls.some(call => call[0] === 'rpc' && call[1] === 'pasteClipboard'),
+            false,
+            '写入未确认时不得继续粘贴'
         );
         assert.equal(
             h.calls.some(call => call[0] === 'adb'
                 && (call[1].includes('input') || call[1].includes('broadcast'))),
             false
         );
-        await h.service.processToolCall({
-            command: 'ExecuteStep',
-            action: { command: 'KeyEvent', key: 'back' }
-        });
+
+        // 收尾链路长度会随实现变化（例如新增了只读能力探针），固定 tick 次数只会变得
+        // 更脆。这里改成有界轮询，断言的是「租约最终释放」这个真正的不变量。
+        let released = false;
+        for (let attempt = 0; attempt < 50 && !released; attempt++) {
+            await tick();
+            released = await h.service.processToolCall({
+                command: 'ExecuteStep',
+                action: { command: 'KeyEvent', key: 'back' }
+            }).then(() => true, error => error.code !== 'DEVICE_BUSY');
+        }
+        assert.equal(released, true, '边界结束后租约必须释放');
     });
 }
 
@@ -229,6 +248,8 @@ test('Scroll converts milliseconds to u2 steps and never shells after RPC succes
 
 test('clipboard write then paste rejection and unavailable IME retains unknown side effect receipt', async () => {
     const h = await harness({
+        // 默认原语是 keyevent；这里要测的是 rpc 粘贴被拒时的回执，所以显式选 rpc。
+        config: { CLIPBOARD_PASTE: 'rpc' },
         uiServer: {
             ok: true,
             invoke: async method => {

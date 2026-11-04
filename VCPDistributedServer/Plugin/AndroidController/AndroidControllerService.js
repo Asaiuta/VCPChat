@@ -13,10 +13,16 @@ const { AdbClient, AdbError } = require('./lib/adb');
 const {
     DEFAULT_LIMIT,
     parseUiGraph,
+    parseBounds,
     renderView,
     resolveSelector,
     samePage,
 } = require('./lib/ui-graph');
+const { validateSelector: isValidSelector } = require('./lib/selector');
+const { waitForExpectation } = require('./lib/expectation-wait');
+const { waitForIdle } = require('./lib/idle-wait');
+const { screenContext, layoutEvidence } = require('./lib/layout-evidence');
+
 
 const { FrameHub } = require('./lib/frame-hub');
 const vision = require('./lib/vision');
@@ -27,12 +33,16 @@ const fs = require('node:fs');
 const { parseHostPort, parsePairCode, localAddresses, probePort, diagnoseEndpoint, scanSubnets, scanLocalNetwork } = require('./lib/device-network');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
+const { performance } = require('node:perf_hooks');
 const { URL } = require('node:url');
 const stepRuntime = require('./lib/step-runtime');
 const { arbitrate } = require('./lib/text-arbiter');
 const { queryGitHub, capability: githubCapability } = require('./lib/github-query');
 const { executeSystem, catalog: systemCatalog } = require('./lib/system-api');
 const toolCatalog = require('./lib/tool-catalog');
+const rpcMethods = require('./lib/rpc-methods');
+const elementShot = require('./lib/element-shot').createElementShot({ runtime: stepRuntime, vision,
+    prepareTarget, getRecord: serial => lastObserve.get(serial), captureGraph, resolveSelector, intOf, validateSelector, graphLayout });
 const { syncLoomAppUrl } = require('./lib/loom-display-url');
 
 const DEFAULT_DUMP_TIMEOUT_MS = 25000;
@@ -85,6 +95,25 @@ let displayStarting = null;
 // 每台设备的最近一次 Observe 结果，供 index 寻址使用
 const lastObserve = new Map();
 const lastVision = new Map();
+const uncertainDevices = new Set();
+
+async function withDeviceRpc(serial, task) {
+    assertDeviceCertain(serial);
+    try { return await task(); }
+    catch (error) {
+        // A local socket closing is not evidence that the remote request finished.
+        if (error.dispatched !== false && error.drained !== true) {
+            uncertainDevices.add(serial);
+            lastObserve.delete(serial);
+            lastVision.delete(serial);
+        }
+        throw error;
+    }
+}
+
+function assertDeviceCertain(serial) {
+    if (uncertainDevices.has(serial)) throw stepRuntime.failure('DEVICE_STATE_UNCERTAIN', '先前RPC传输结局未知，设备已隔离；人工确认旧设备服务终止后重启插件，不能靠重试或普通重连解除。');
+}
 // ADBKeyboard 可用性缓存（包名 → boolean）
 const adbKeyboardCache = new Map();
 
@@ -459,26 +488,33 @@ async function shutdownUiServers() {
 }
 
 /**
- * 通过常驻服务取控件树。任何失败都返回 null，由调用方回退 CLI。
- * 不抛异常是刻意的：这条路径只负责加速，不负责正确性兜底。
+ * 通过常驻服务取控件树；仅明确未派发或已排干的失败允许调用方回退 CLI。
+ * 未知传输结局隔离设备；取消和总截止继续抛出，不得启动新的采集。
  */
 async function dumpViaUiServer(serial) {
     if (!uiServerEnabled()) return null;
     const server = uiServerFor(serial);
     try {
         const started = await server.start();
+        stepRuntime.check();
         if (!started.ok) {
             runtime.logger?.warn?.(`[AndroidController] UI 服务未就绪，回退 CLI：${started.reason}`);
             return null;
         }
-        const { xml } = await server.dump({ rootInActive: true, maxDepth: 0 });
+        // 不传 maxDepth：UiServer 会用正深度默认值。传 0 在 uiautomator2 下只回根节点，
+        // 上层会拿到「成功但空树」并因此永不回退 CLI（真机实测，见 lib/ui-server.js）。
+        const { xml } = await withDeviceRpc(serial, () => server.dump({ rootInActive: true, signal: stepRuntime.executionSignal() }));
+        stepRuntime.check();
         const hierarchy = extractHierarchy(xml);
         if (!hierarchy) return null;
         return { xml: hierarchy, note: '' };
     } catch (error) {
+        stepRuntime.check();
+        if (uncertainDevices.has(serial)) throw error;
         runtime.logger?.warn?.(`[AndroidController] UI 服务采集失败，回退 CLI：${error.message}`);
         // 服务已不可用，下一轮重新拉起，别带着坏状态反复超时。
-        server.stop().catch(() => null);
+        await server.stop().catch(() => null);
+        stepRuntime.check();
         return null;
     }
 }
@@ -486,7 +522,7 @@ async function dumpViaUiServer(serial) {
 async function dumpUi(serial) {
     const client = requireAdb();
 
-    // 快路径：常驻服务。失败静默落到下面原有的 CLI 逻辑。
+    // 快路径：常驻服务。仅安全失败落到 CLI；传输未知直接抛错。
     const fast = await dumpViaUiServer(serial);
     if (fast) return fast;
 
@@ -558,9 +594,17 @@ async function dumpUi(serial) {
 
 async function captureGraph(serial, options = {}) {
     stepRuntime.check();
-    const { xml } = await dumpUi(serial);
+    assertDeviceCertain(serial);
+    let xml;
+    if (options.deadlineMs !== undefined) {
+        const budget = Math.floor(Math.min(options.deadlineMs - Date.now(), stepRuntime.remainingMs()));
+        if (budget < 1) throw stepRuntime.failure('VERIFICATION_TIMEOUT', '等待采样预算耗尽。');
+        const server = uiServerEnabled() ? uiServerFor(serial) : null;
+        if (server?.isReady() === true) ({ xml } = await withDeviceRpc(serial, () => server.dump({ rootInActive: true, timeoutMs: budget, signal: stepRuntime.executionSignal() })));
+        else xml = await requireAdb().runText(['exec-out', 'uiautomator', 'dump', '--compressed', '/dev/tty'],
+            { serial, timeoutMs: budget, maxBuffer: 8 * 1024 * 1024 });
+    } else ({ xml } = await dumpUi(serial));
     validateHierarchy(xml);
-
     stepRuntime.check();
     return parseUiGraph(xml, options);
 }
@@ -647,7 +691,10 @@ function validatePackage(pkg) {
 }
 
 function validateHierarchy(xml) {
-    const tags = String(xml).match(/<[^>"']*(?:"[^"]*"|'[^']*'|[^>"']*)*>/g) || [];
+    // CLI prints this exact carrier suffix after the XML, sometimes without a separator.
+    xml = String(xml).replace(/(?:\r?\n)?UI hierchary dumped to: \/dev\/tty(?:\r?\n)?$/, '');
+    xml = String(xml).replace(/^\uFEFF?\s*<\?xml\s+version\s*=\s*(["'])1\.[01]\1(?:\s+encoding\s*=\s*(["'])UTF-8\2)?(?:\s+standalone\s*=\s*(["'])(?:yes|no)\3)?\s*\?>/i, '');
+    const tags = xml.match(/<[^>"']*(?:"[^"]*"|'[^']*'|[^>"']*)*>/g) || [];
     const stack = [];
     let roots = 0;
     for (const tag of tags) {
@@ -696,9 +743,11 @@ function storeSnapshot(serial, graph, size, focus = null, limit = DEFAULT_LIMIT)
 
 async function prepareTarget(args, label) {
     const client = requireAdb();
+    const index = intOf(args.index, 'index', null);
+    const semantic = index !== null || args.selector !== undefined || firstString(args.id, args.resourceId, args.resource_id, args.text);
+    if (!semantic) checkFrame(args, resolveSerial(args));
     const { serial } = await ensureActiveDevice(client, resolveSerial(args));
     const pinned = { ...args, serial };
-    const index = intOf(args.index, 'index', null);
     const record = lastObserve.get(serial);
     if (index !== null) {
         if (!record) throw stepRuntime.failure('STALE_SNAPSHOT', '尚未在该设备上执行 Observe，快照不可用。');
@@ -707,10 +756,10 @@ async function prepareTarget(args, label) {
             throw stepRuntime.failure('STALE_SNAPSHOT', '快照不匹配或已过期，请重新 Observe。');
         }
     }
-    const size = await client.screenSize(serial);
-    const semantic = index !== null || firstString(args.selector, args.id, args.resourceId, args.resource_id, args.text);
+    const size = semantic ? await client.screenSize(serial) : await requireFrame(args, serial);
     if (semantic) {
-        const graph = await captureGraph(serial, { limit: index !== null ? record.limit || DEFAULT_LIMIT : 500, screen: size, rpcTarget: args.rpcTarget === true });
+        const graph = await captureGraph(serial, { limit: index !== null ? record.limit || DEFAULT_LIMIT : 500, screen: size, rpcTarget: args.rpcTarget === true,
+            ...(args.safeRead === true ? { deadlineMs: Date.now() + stepRuntime.remainingMs() } : {}) });
         if (index !== null) {
             if (JSON.stringify(size) !== JSON.stringify(record.size) || !samePage(record.graph, graph) || graphLayout(record.graph) !== graphLayout(graph)) {
                 lastObserve.delete(serial);
@@ -722,21 +771,144 @@ async function prepareTarget(args, label) {
     }
     const target = resolveTarget(pinned, label);
     if (!size || target.x >= size.width || target.y >= size.height) throw stepRuntime.failure('INVALID_COORDINATES', '坐标超出当前屏幕或屏幕尺寸未知。');
-    if (!semantic) requireFrame(args, serial, size);
+
     stepRuntime.check();
     return target;
 }
 
-function requireFrame(args, serial, size) {
-    const frame = lastVision.get(serial);
+function logicalSize(size) {
+    return size && Number.isSafeInteger(size.width) && size.width > 0
+        && Number.isSafeInteger(size.height) && size.height > 0 ? { width: size.width, height: size.height } : null;
+}
+
+function frameContext(probe) {
+    const size = logicalSize(probe?.size);
+    if (!size || ![0, 1, 2, 3].includes(probe.rotation) || probe.displayId !== 0
+        || probe.wakefulness !== 'Awake' || probe.keyguard?.showing !== false || probe.keyguard?.inputRestricted !== false
+        || /systemui|keyguard/i.test(probe.focus?.package || '')
+        || !['package', 'component', 'window'].every(key => typeof probe.focus?.[key] === 'string' && probe.focus[key].trim())) return null;
+    return { package: probe.focus.package, component: probe.focus.component, window: probe.focus.window,
+        size, rotation: probe.rotation };
+}
+
+function sameFrameContext(a, b) {
+    return Boolean(a && b && a.package === b.package && a.component === b.component && a.window === b.window
+        && a.rotation === b.rotation && a.size.width === b.size.width && a.size.height === b.size.height);
+}
+
+
+async function freshFrameProbe(client, serial) {
+    stepRuntime.check();
+    try {
+        const probe = await client.probeScreen(serial, { fresh: true, signal: stepRuntime.executionSignal(),
+            timeoutMs: Math.min(stepRuntime.remainingMs(), 10000) });
+        stepRuntime.check();
+        return probe;
+    } catch { stepRuntime.check(); return null; }
+}
+
+function checkFrame(args, serial) {
     if (!firstString(args.frameId)) throw stepRuntime.failure('FRAME_REQUIRED', '像素坐标动作必须携带 Screenshot 或 Observe screenshot 返回的 frameId。');
-    if (!frame || frame.frameId !== args.frameId || Date.now() - frame.at > STALE_SNAPSHOT_MS || JSON.stringify(frame.size) !== JSON.stringify(size)) {
-        throw stepRuntime.failure('STALE_FRAME', '截图 frameId 无效、过期或屏幕尺寸已变化，请重新截图。');
+    const frame = lastVision.get(serial);
+    if (!frame || frame.frameId !== args.frameId || Date.now() - frame.at > STALE_SNAPSHOT_MS) {
+        lastVision.delete(serial);
+        throw stepRuntime.failure('STALE_FRAME', '截图 frameId 无效或过期，请重新截图。');
     }
+    return frame;
+}
+
+async function requireFrame(args, serial) {
+    const entries = Array.isArray(args) ? args : [args];
+    const frames = entries.map(entry => checkFrame(entry, serial));
+    const probe = await freshFrameProbe(requireAdb(), serial);
+    const context = frameContext(probe);
+    if (frames.some(frame => !sameFrameContext(frame.context, context))) {
+        lastVision.delete(serial);
+        throw stepRuntime.failure('STALE_FRAME', '截图上下文已变化或无法确认，请重新截图。');
+    }
+    entries.forEach(entry => checkFrame(entry, serial));
+    stepRuntime.check();
+    return logicalSize(probe.size);
+}
+
+async function prepareTargets(entries) {
+    if (!Array.isArray(entries) || !entries.length || entries.length > 2) throw stepRuntime.failure('INVALID_ARGUMENT', '触摸目标数量无效。');
+    const client = requireAdb();
+    const semantic = args => args.index !== undefined || args.selector !== undefined || firstString(args.id, args.resourceId, args.resource_id, args.text);
+    const pixels = entries.filter(({ args }) => !semantic(args)).map(({ args }) => args);
+    const hasSemantic = pixels.length < entries.length;
+    const pixelFrames = pixels.map(args => checkFrame(args, resolveSerial(args)));
+    const { serial } = await ensureActiveDevice(client, resolveSerial(entries[0].args));
+    if (entries.some(({ args }) => resolveSerial(args) !== serial)) throw stepRuntime.failure('INVALID_ARGUMENT', '触摸目标不能跨设备。');
+    const record = lastObserve.get(serial);
+    let size = pixelFrames.length ? pixelFrames[0].context.size : await client.screenSize(serial);
+    const indexed = entries.some(({ args }) => args.index !== undefined);
+    for (const { args } of entries) {
+        if (args.index === undefined) continue;
+        requireInt(args.index, 'index');
+        if (!record || record.snapshotId !== args.snapshotId || Date.now() - record.at > STALE_SNAPSHOT_MS) throw stepRuntime.failure('STALE_SNAPSHOT', '触摸目标快照已过期或不匹配。');
+    }
+    if (hasSemantic) {
+        const graph = await captureGraph(serial, { limit: indexed ? record.limit || DEFAULT_LIMIT : 500, screen: size, rpcTarget: true });
+        if (graph.keyguard) {
+            if (pixelFrames.length) lastVision.delete(serial);
+            throw stepRuntime.failure(pixelFrames.length ? 'STALE_FRAME' : 'DEVICE_LOCKED', '锁屏时不执行触摸动作。');
+        }
+        if (pixelFrames.length) {
+            const context = pixelFrames[0].context;
+            const rotation = graph.rawRoot?.attrs?.rotation;
+            if (graph.package !== context.package || rotation !== String(context.rotation)) {
+                lastVision.delete(serial);
+                throw stepRuntime.failure('STALE_FRAME', '语义树与截图的前台或旋转证据不一致，请重新观察。');
+            }
+        }
+        if (indexed && (JSON.stringify(size) !== JSON.stringify(record.size) || !samePage(record.graph, graph) || graphLayout(record.graph) !== graphLayout(graph))) {
+            lastObserve.delete(serial);
+            throw stepRuntime.failure('STALE_SNAPSHOT', '页面或布局已变化，请重新 Observe。');
+        }
+        if (indexed) record.graph = graph;
+        else storeSnapshot(serial, graph, size);
+    }
+    if (pixels.length) size = await requireFrame(pixels, serial);
+    const targets = entries.map(({ args, label }) => {
+        const target = resolveTarget({ ...args, serial }, label);
+        if (!size || target.x < 0 || target.y < 0 || target.x >= size.width || target.y >= size.height) throw stepRuntime.failure('INVALID_COORDINATES', '触摸坐标超出屏幕。');
+        if (semantic(args)) rpcNodeSelector(serial, target.node);
+        return { ...target, screen: size };
+    });
+    stepRuntime.check();
+    return targets;
+}
+
+function rpcNodeSelector(serial, node) {
+    if (!node?.enabled || !node.inViewport) throw stepRuntime.failure('INVALID_RPC_TARGET', 'RPC 目标必须可见且启用。');
+    const attributes = [];
+    const intersect = (a, b) => {
+        if (!a || !b) return null;
+        const box = { left: Math.max(a.left, b.left), top: Math.max(a.top, b.top), right: Math.min(a.right, b.right), bottom: Math.min(a.bottom, b.bottom) };
+        return box.right > box.left && box.bottom > box.top ? box : null;
+    };
+    const stack = [{ raw: lastObserve.get(serial)?.graph.rawRoot, hidden: false, clip: node.clipped }];
+    while (stack.length) {
+        const { raw, hidden, clip } = stack.pop();
+        if (!raw) continue;
+        const ownHidden = hidden || raw.attrs?.['visible-to-user'] === 'false' || raw.attrs?.displayed === 'false';
+        if (raw.tag === 'node') attributes.push({ ...raw.attrs, hidden: ownHidden, clip });
+        const childClip = raw.attrs?.scrollable === 'true' ? intersect(clip, parseBounds(raw.attrs.bounds)) : clip;
+        for (const child of raw.children) stack.push({ raw: child, hidden: ownHidden, clip: childClip });
+    }
+    const sameIdentity = attrs => String(attrs.class || '').split('.').at(-1) === node.cls && attrs.package === node.package && (!node.id || attrs['resource-id'] === node.id);
+    const identities = attributes.filter(sameIdentity);
+    if (identities.length !== 1 || !identities[0].class || !identities[0].package || identities[0].enabled === 'false' || identities[0].hidden || !identities[0].clip) throw stepRuntime.failure('INVALID_RPC_TARGET', 'RPC 原始节点身份不唯一或不可见。');
+    node.clipped = identities[0].clip;
+    const selector = { mask: 16 | 524288, className: identities[0].class, packageName: node.package };
+    if (node.id) { selector.mask |= 2097152; selector.resourceId = node.id; }
+    return selector;
 }
 
 async function dispatchInput(serial, task, mark = true) {
     stepRuntime.check();
+    assertDeviceCertain(serial);
     lastObserve.delete(serial);
     lastVision.delete(serial);
     if (mark) stepRuntime.markDispatched();
@@ -787,7 +959,7 @@ async function observe(args = {}, executionContext = {}) {
 
     const { serial: active, switchNote } = await ensureActiveDevice(client, serial);
     // 一次往返取齐焦点 / 尺寸 / 电源态。
-    // 不能用 Promise.all 并发三个方法：它们都过同一个 SerialQueue，
+    // 不能用 Promise.all 并发三个方法：同设备调用共用一个调度 key，
     // 实测是严格串行（275-327ms），合并成单次 shell 后 130-163ms。
     const probe = await client.probeScreen(active).catch(() => null);
     let focus = probe?.focus || { package: null, component: null, window: null };
@@ -833,7 +1005,11 @@ async function observe(args = {}, executionContext = {}) {
     let settled = null;
     let stability = wantStable ? 'unknown' : 'not-sampled';
     if (wantStable) {
-        const again = await captureGraph(active, { limit, screen: size }).catch(() => null);
+        const again = await captureGraph(active, { limit, screen: size }).catch(error => {
+            stepRuntime.check();
+            if (uncertainDevices.has(active)) throw error;
+            return null;
+        });
         if (again) {
             settled = samePage(graph, again) && graphLayout(graph) === graphLayout(again);
             stability = settled ? 'stable' : 'changing';
@@ -883,7 +1059,7 @@ async function renderObservation(args, sample) {
     return {
         content,
         details: {
-            serial, focus, screen: size, signature: graph.signature,
+            serial, focus, screen: shot?.size || size, signature: graph.signature,
             snapshotId: record.snapshotId, observedAt: record.at, changed, settled, stability,
             controls: view.controls, total: graph.total, truncated: view.truncated,
             keyguard: graph.keyguard, canvas: graph.canvas, stats: graph.stats,
@@ -913,10 +1089,11 @@ function resolveTarget(args = {}, actionLabel = '操作') {
     }
 
     // 跨帧定位：id / text / selector 不依赖上次的数组下标，列表滚动后依然能命中。
-    const selector = firstString(args.selector);
+    const selector = args.selector;
+    if (selector !== undefined) validateSelector(selector);
     const byId = firstString(args.id, args.resourceId, args.resource_id);
     const byText = firstString(args.text);
-    if (selector || byId || byText) {
+    if (selector !== undefined || byId || byText) {
         if (!record) {
             throw new Error('[AndroidController] 尚未在该设备上执行 Observe，无法按 id/text 定位。请先 Observe，或直接给出 index / x,y。');
         }
@@ -924,7 +1101,7 @@ function resolveTarget(args = {}, actionLabel = '操作') {
         const key = selector || (byId ? `id=${encode(byId)}` : `text=${encode(byText)}`);
         const node = resolveSelector(record.graph, key);
         if (!node) {
-            throw new Error(`[AndroidController] 当前页面没有匹配「${key}」的控件。请重新 Observe 核对标签，或改用 index / x,y。`);
+            throw stepRuntime.failure('TARGET_NOT_UNIQUE', `当前页面没有匹配「${typeof key === 'string' ? key : '组合selector'}」的唯一控件；请收紧条件或显式指定nth。`);
         }
         return { serial, x: node.x, y: node.y, node, note: staleNote(record) };
     }
@@ -947,22 +1124,35 @@ function channelReceipt(result, attempts, extra = {}) {
 
 const RPC_OPERATION = Object.freeze({ READ: 'read', WRITE: 'write' });
 
-function rpcActionTimeoutMs(method, params) {
-    let durationMs = 0;
-    if (method === 'swipe') durationMs = params[4] * 5;
-    if (method === 'click') durationMs = params[2] || 0;
+/**
+ * 单步预算。长按由调用方显式声明持续时长，避免动作原语切换时丢掉时长预算。
+ * click 的第三参是按压毫秒；swipe 的 steps 换算只用于回退及滑动。
+ */
+function rpcActionTimeoutMs(method, params, declaredDurationMs) {
+    const declared = Number.isFinite(declaredDurationMs) ? declaredDurationMs : 0;
+    // swipe 是唯一能在参数自身里读出时长的原语（steps 而不是毫秒）。
+    const durationMs = declared
+        || (method === 'swipe' && Number.isFinite(params?.[4]) ? params[4] * 5 : 0);
     const actionBudgetMs = Math.max(4000, durationMs + 1000);
     return Math.min(stepRuntime.remainingMs(), actionBudgetMs);
 }
 
-async function rpcAction(serial, method, params, attempts, operation) {
+async function rpcAction(serial, method, params, attempts, operation, options = {}) {
     stepRuntime.check();
+    assertDeviceCertain(serial);
+    // 参数形状不在这一层校验：UiServer.invoke 是通往设备的唯一入口，那里校验一次
+    // 才是权威。此处只负责把它抛出的本地拒绝如实落成 not-dispatched 回执。
     const isWrite = operation === RPC_OPERATION.WRITE;
+    // silent：轮询式只读（如 Fill 读回）由调用方落一条汇总，避免回执里堆几十条 getText。
+    const silent = options.silent === true;
     const attempt = { channel: 'rpc', method, status: 'starting' };
-    attempts.push(attempt);
-    stepRuntime.inputReceipt({ channels: attempts.map(item => item.channel), attempts });
+    if (!silent) {
+        attempts.push(attempt);
+        stepRuntime.inputReceipt({ channels: attempts.map(item => item.channel), attempts });
+    }
     const previousDispatch = isWrite ? stepRuntime.dispatchState() : null;
     let invoking = false;
+    let rpcCompleted = false;
     try {
         if (!uiServerEnabled()) {
             throw Object.assign(new Error(), { code: 'UI_SERVER_DISABLED', dispatched: false });
@@ -973,17 +1163,29 @@ async function rpcAction(serial, method, params, attempts, operation) {
         if (!ready.ok) {
             throw Object.assign(new Error(), { code: 'UI_SERVER_NOT_READY', dispatched: false });
         }
+        if (options.beforeDispatch) {
+            await options.beforeDispatch();
+            stepRuntime.check();
+        }
+        const request = {
+            signal: stepRuntime.executionSignal(),
+            timeoutMs: rpcActionTimeoutMs(method, params, options.durationMs),
+        };
+        // 从首击 invoke 前的单调时刻计窗；ACK 和第二击就绪等待都占用窗口。
+        const dispatchAt = performance.now();
+        if (options.dispatchDeadline !== undefined && dispatchAt > options.dispatchDeadline) {
+            throw Object.assign(new Error(), { code: 'DOUBLE_TAP_WINDOW_MISSED', dispatched: false });
+        }
+        if (options.dispatchTiming) options.dispatchTiming.startedAt = dispatchAt;
         attempt.status = 'invoking';
         invoking = true;
         if (isWrite) stepRuntime.markDispatched();
-        const value = await server.invoke(method, params, {
-            signal: stepRuntime.executionSignal(),
-            timeoutMs: rpcActionTimeoutMs(method, params),
-        });
+        const value = await withDeviceRpc(serial, () => server.invoke(method, params, request));
+        rpcCompleted = true;
         if (isWrite) stepRuntime.markDispatched();
         attempt.status = 'dispatched';
         if (value === false) {
-            throw Object.assign(new Error(), { code: 'UI_SERVER_ACTION_REJECTED', dispatched: true });
+            throw Object.assign(new Error(), { code: 'UI_SERVER_ACTION_REJECTED', dispatched: true, drained: true });
         }
         stepRuntime.check();
         return value;
@@ -997,21 +1199,28 @@ async function rpcAction(serial, method, params, attempts, operation) {
         }
         const clean = stepRuntime.failure(attempt.code, 'RPC 动作未确认；已派发时不得重试。');
         clean.dispatched = !notDispatched;
+        clean.drained = notDispatched || rpcCompleted || error.drained === true;
+        if (Number.isInteger(error.rpcCode)) clean.rpcCode = error.rpcCode;
         clean.details = { channels: attempts.map(item => item.channel), attempts };
+        if (silent) clean.silent = true;
         throw clean;
     }
 }
 
-async function gesture(serial, method, params, shell) {
+async function gesture(serial, method, params, shell, options = {}) {
     const attempts = [];
     stepRuntime.inputReceipt({ channels: attempts.map(item => item.channel), attempts });
     await dispatchInput(serial, async () => {
-        try {
-            await rpcAction(serial, method, params, attempts, RPC_OPERATION.WRITE);
-            return;
-        } catch (error) {
-            stepRuntime.check();
-            if (error.dispatched) throw error;
+        const candidates = [{ method, params }];
+        if (options.rpcFallback) candidates.push(options.rpcFallback);
+        for (const candidate of candidates) {
+            try {
+                await rpcAction(serial, candidate.method, candidate.params, attempts, RPC_OPERATION.WRITE, options);
+                return;
+            } catch (error) {
+                stepRuntime.check();
+                if (error.dispatched) throw error;
+            }
         }
         stepRuntime.check();
         const attempt = { channel: 'shell', status: 'dispatched' };
@@ -1031,6 +1240,9 @@ async function gesture(serial, method, params, shell) {
     return attempts;
 }
 
+// 与 ui-graph 的 textfield 判定同源：只有这些类才是可承载文本的节点。
+const EDITABLE_CLASS = /(?:EditText|AutoCompleteTextView)$/;
+
 function fieldSelector(serial, node) {
     const attributes = [];
     const stack = [lastObserve.get(serial)?.graph.rawRoot];
@@ -1045,8 +1257,12 @@ function fieldSelector(serial, node) {
 
     const { left, top, right, bottom } = node.bounds;
     const bounds = `[${left},${top}][${right},${bottom}]`;
+    // 唯一性只在可编辑节点里算：无 resource-id 的输入框外面常套着 bounds 完全相同的
+    // android.view.View 容器（真机 com.coloros.note 编辑页即如此）。把包裹容器也算进来，
+    // 会把「一个输入框」误判成「两个重复字段」而拒绝 Fill。
     const matches = attributes.filter(attrs => (
-        attrs['resource-id'] === node.id
+        EDITABLE_CLASS.test(attrs.class || '')
+        && attrs['resource-id'] === node.id
         && attrs.package === node.package
         && attrs.bounds === bounds
     ));
@@ -1078,6 +1294,17 @@ function fieldSelector(serial, node) {
     return selector;
 }
 
+// The bundled carrier returns one structural newline after clearTextField.
+function readbackMatches(actual, expected) {
+    return typeof actual === 'string' && (actual === expected || (expected === '' && actual === '\n'));
+}
+
+// setText 返回不代表 UI 线程已应用：真机实测（PJZ110 / com.coloros.note）setText 返回
+// 后立即 getText 读到的是**上一次**的旧值，+20ms 才是新值。只读一次会把「写成功」误判
+// 成 FILL_READBACK_MISMATCH。这里只重复**读**，绝不重发写动作。
+const READBACK_WINDOW_MS = 1200;
+const READBACK_INTERVAL_MS = 40;
+
 async function fill(args = {}) {
     const attempts = [];
     try {
@@ -1085,10 +1312,11 @@ async function fill(args = {}) {
             || args.text.length > MAX_TEXT_INPUT
             || !(firstString(args.id, args.resourceId, args.resource_id, args.selector)
                 || args.index !== undefined)
-            || (args.selector && !args.selector.startsWith('id='))
+            || (args.selector !== undefined && (typeof args.selector !== 'string' || !args.selector.startsWith('id=')))
             || ['x', 'y', 'frameId', 'content'].some(key => args[key] !== undefined)) {
             throw stepRuntime.failure('INVALID_ARGUMENT', 'Fill 需要 text 字符串及 id/selector 或 index+snapshotId；空字符串清空。');
         }
+        // The RPC transport declares UTF-8; field text is passed unchanged.
         const { serial, node } = await stepRuntime.stage('prepareMs', () => prepareTarget({
             ...args,
             text: undefined,
@@ -1106,19 +1334,44 @@ async function fill(args = {}) {
         if (!node.flags.includes('password')) {
             let matched = false;
             let code = null;
+            let reads = 0;
+            let readDispatched = false;
+            let readUnknown = false;
             await stepRuntime.stage('verificationMs', async () => {
-                try {
-                    const value = await rpcAction(
-                        serial, 'getText', [selector], attempts, RPC_OPERATION.READ,
-                    );
-                    matched = value === args.text;
-                } catch (error) {
+                const deadline = Date.now() + Math.min(READBACK_WINDOW_MS, stepRuntime.remainingMs());
+                for (;;) {
                     stepRuntime.check();
-                    code = error.code;
+                    reads += 1;
+                    try {
+                        const value = await rpcAction(
+                            serial, 'getText', [selector], attempts, RPC_OPERATION.READ, { silent: true },
+                        );
+                        readDispatched = true;
+                        if (typeof value !== 'string') { code = 'FILL_READBACK_INVALID'; break; }
+                        // Preserve requested whitespace; only the proven clearTextField newline is accepted.
+                        matched = readbackMatches(value, args.text);
+                        code = null;
+                    } catch (error) {
+                        stepRuntime.check();
+                        code = error.code;
+                        readDispatched ||= error.dispatched !== false;
+                        readUnknown ||= error.dispatched !== false && error.drained !== true;
+                        // 传输/服务层失败不会因为再读一次就变好；只有「读到旧值」才值得重试。
+                        if (error.code !== 'UI_SERVER_RPC_ERROR') break;
+                    }
+                    if (matched || Date.now() >= deadline) break;
+                    await stepRuntime.pause(READBACK_INTERVAL_MS);
                 }
+            });
+            // 读回是一个动作的验证，不是一次独立派发：无论轮询几次，回执里只留一条。
+            // No returned value does not prove that no read was dispatched.
+            attempts.push({
+                channel: 'rpc', method: 'getText', reads,
+                status: readUnknown ? 'unknown' : readDispatched ? 'dispatched' : 'not-dispatched',
             });
             stepRuntime.verified(matched, {
                 condition: { type: 'fill-readback' },
+                reads,
                 error: code || (matched ? null : 'FILL_READBACK_MISMATCH'),
             });
             return channelReceipt(textResult(
@@ -1154,6 +1407,39 @@ async function tap(args = {}) {
     }), attempts);
 }
 
+const DOUBLE_TAP_INTERVAL_MS = 100;
+const DOUBLE_TAP_WINDOW_MS = 120;
+const DOUBLE_TAP_PRESS_MS = 20;
+
+async function doubleTap(args = {}) {
+    const attempts = [];
+    const extra = { experimental: true, intervalMs: DOUBLE_TAP_INTERVAL_MS, pressDurationMs: DOUBLE_TAP_PRESS_MS };
+    stepRuntime.inputReceipt({ channels: [], attempts, ...extra });
+    const { serial, x, y, node, note } = await stepRuntime.stage('prepareMs', () => prepareTarget(args, '双击'));
+    await dispatchInput(serial, async () => {
+        const dispatchTiming = {};
+        // The bundled two-argument click holds for 100ms; use explicit short taps so
+        // sequential acknowledgements do not consume almost the entire double-tap window.
+        await rpcAction(serial, 'click', [x, y, DOUBLE_TAP_PRESS_MS], attempts, RPC_OPERATION.WRITE, { dispatchTiming });
+        const dispatchDeadline = dispatchTiming.startedAt + DOUBLE_TAP_WINDOW_MS;
+        const waitMs = Math.max(0, dispatchTiming.startedAt + DOUBLE_TAP_INTERVAL_MS - performance.now());
+        await stepRuntime.pause(waitMs);
+        stepRuntime.check();
+        await rpcAction(serial, 'click', [x, y, DOUBLE_TAP_PRESS_MS], attempts, RPC_OPERATION.WRITE, { dispatchDeadline });
+    }, false);
+    const label = node ? `控件 [${node.index}]「${node.label || node.cls}」` : `坐标 (${x}, ${y})`;
+    return channelReceipt(textResult(`已向 ${label} 派发两次短按${note}；本次目标的双击识别须独立读回。`, {
+        serial, x, y,
+        index: node ? node.index : null,
+        selector: node ? node.selector : null,
+    }), attempts, extra);
+}
+
+
+const { drag, pinch } = require('./lib/gesture-actions').createGestureActions({
+    stepRuntime, prepareTargets, rpcNodeSelector, dispatchInput, rpcAction, textResult, channelReceipt,
+});
+
 async function swipe(args = {}) {
     const client = requireAdb();
     const serial = resolveSerial(args);
@@ -1164,11 +1450,11 @@ async function swipe(args = {}) {
     const duration = intOf(args.duration, 'duration', 300);
     if (duration < 1 || duration > 10000) throw stepRuntime.failure('INVALID_ARGUMENT', 'duration 必须在1–10000ms内。');
     await stepRuntime.stage('prepareMs', async () => {
-        const size = await client.screenSize(serial);
+        const size = await requireFrame(args, serial);
         if (!size || [x1, x2].some((x) => x < 0 || x >= size.width) || [y1, y2].some((y) => y < 0 || y >= size.height)) {
             throw stepRuntime.failure('INVALID_COORDINATES', '滑动坐标超出当前屏幕。');
         }
-        requireFrame(args, serial, size);
+
     });
     const attempts = await gesture(serial, 'swipe', [x1, y1, x2, y2, Math.max(1, Math.round(duration / 5))], () => client.runText(
         ['shell', 'input', 'swipe', String(x1), String(y1), String(x2), String(y2), String(duration)],
@@ -1177,6 +1463,12 @@ async function swipe(args = {}) {
     return channelReceipt(textResult(`已滑动 (${x1},${y1}) → (${x2},${y2})，历时 ${duration}ms。`, { serial, x1, y1, x2, y2, duration }), attempts);
 }
 
+const scrollUntil = require('./lib/scroll-until').createScrollUntil({
+    stepRuntime, prepareTargets, rpcNodeSelector, dispatchInput, rpcAction, requireAdb,
+    uiServerEnabled, uiServerFor, getGraph: serial => lastObserve.get(serial)?.graph,
+    textResult, channelReceipt,
+});
+
 async function scroll(args = {}) {
     const direction = firstString(args.direction).toLowerCase();
     const distance = args.distance === undefined ? 0.6 : Number(args.distance);
@@ -1184,7 +1476,7 @@ async function scroll(args = {}) {
     const numeric = value => ['number', 'string'].includes(typeof value) && String(value).trim() !== '' && Number.isFinite(Number(value));
     const hasIndex = args.index !== undefined;
     if ((hasIndex && requireInt(args.index, 'index') < 0) || (args.distance !== undefined && !numeric(args.distance))) throw stepRuntime.failure('INVALID_ARGUMENT', 'Scroll index/distance/duration 必须为有效数字。');
-    const semantic = hasIndex || firstString(args.id, args.resourceId, args.resource_id, args.text, args.selector);
+    const semantic = hasIndex || args.selector !== undefined || firstString(args.id, args.resourceId, args.resource_id, args.text);
     if (!['up', 'down', 'left', 'right'].includes(direction) || !Number.isFinite(distance) || distance < 0.1 || distance > 0.9 || !Number.isInteger(duration) || duration < 1 || duration > 10000 || !semantic || ['x', 'y', 'x1', 'y1', 'x2', 'y2', 'frameId'].some(key => args[key] !== undefined)) {
         throw stepRuntime.failure('INVALID_ARGUMENT', 'Scroll 需要语义目标及 direction=up|down|left|right；distance=0.1–0.9，duration=1–10000ms，不接受像素坐标。');
     }
@@ -1215,11 +1507,12 @@ async function longPress(args = {}) {
     const { serial, x, y, node, note } = await stepRuntime.stage('prepareMs', () => prepareTarget(args, '长按'));
     const duration = intOf(args.duration, 'duration', 800);
     if (duration < 300 || duration > 10000) throw stepRuntime.failure('INVALID_ARGUMENT', 'duration 必须在300–10000ms内。');
-    // 起止同点 + duration = 长按
+    // 原生 click(x,y,milliseconds)；只有明确未执行才降级同点 swipe，再到 shell。
+    const steps = Math.max(1, Math.round(duration / 5));
     const attempts = await gesture(serial, 'click', [x, y, duration], () => client.runText(
         ['shell', 'input', 'swipe', String(x), String(y), String(x), String(y), String(duration)],
         { serial, timeoutMs: 15000 },
-    ));
+    ), { durationMs: duration, rpcFallback: { method: 'swipe', params: [x, y, x, y, steps] } });
     const label = node ? `控件 [${node.index}]「${node.label || node.cls}」` : `坐标 (${x}, ${y})`;
     return channelReceipt(textResult(`已长按 ${label}，${duration}ms${note}。`, {
         serial,
@@ -1230,6 +1523,16 @@ async function longPress(args = {}) {
         selector: node ? node.selector : null,
     }), attempts);
 }
+
+const keyboardActions = require('./lib/keyboard-actions').createKeyboardActions({
+    stepRuntime, prepareTarget, dispatchInput, rpcAction, RPC_OPERATION,
+    captureGraph, fieldSelector, requireAdb, resolveSerial, ensureActiveDevice,
+    textResult, channelReceipt,
+});
+
+async function imeAction(args = {}) { return keyboardActions.imeAction(args); }
+async function eraseText(args = {}) { return keyboardActions.eraseText(args); }
+async function keyCombo(args = {}) { return keyboardActions.keyCombo(args); }
 
 async function keyEvent(args = {}) {
     const client = requireAdb();
@@ -1248,6 +1551,40 @@ async function keyEvent(args = {}) {
     await dispatchInput(serial, () => client.runText(['shell', 'input', 'keyevent', String(keycode)], { serial, timeoutMs: 15000 }));
     return textResult(`已发送按键 ${keycode}。`, { serial, keycode, requested: raw });
 }
+
+
+
+/**
+ * 剪贴板写入之后，用哪条路子把内容粘进当前光标。
+ *
+ * 真机证据（PJZ110 / ColorOS / Android 17，逐条实测而非推断）：
+ *   setClipboard   → 成功（返回 null）
+ *   getClipboard   → 成功（能读回刚写入的内容）
+ *   pasteClipboard → java.lang.AssertionError
+ * 三个方法共用同一套隐藏 IClipboard 反射，但**不是同生共死**：死的只有 paste 一个。
+ * 所以「剪贴板整组不可用」是错结论，按组一刀切会把 set/get 一起封掉。
+ *
+ * KEYCODE_PASTE(279) 是 TextView 自己的聚合粘贴路径，不碰那套反射。但它的适用范围
+ * 实测只到原生 EditText：WebView 渲染的编辑框（com.coloros.note 的 WVJBWebView）
+ * 直接忽略它，setClipboard 成功后发 279、字段依旧为空。
+ * 依然只是「已派发」，不声称粘贴成功 —— 验证者必须是独立读回。
+ */
+const KEYCODE_PASTE = 'KEYCODE_PASTE';
+
+/**
+ * keyevent is the default; rpc uses pasteClipboard unless this generation recorded a failure.
+ * none disables clipboard input. Neither dispatch path proves that text was inserted.
+ */
+function clipboardPasteStrategy(serial) {
+    const raw = String(runtime.config?.CLIPBOARD_PASTE ?? 'keyevent').trim().toLowerCase();
+    if (raw === 'off' || raw === 'none' || raw === 'false' || raw === '0') return 'none';
+    if (raw !== 'rpc') return 'keyevent';
+    const server = uiServers.get(String(serial || ''));
+    const observed = server?.capability('pasteClipboard');
+    return observed === 'unavailable' ? 'keyevent' : 'rpc';
+}
+
+
 
 async function hasAdbKeyboard(serial) {
     const cacheKey = serial || 'default';
@@ -1291,23 +1628,48 @@ async function inputText(args = {}) {
 
     const attempts = [];
     let clipboard = null;
-    try {
-        await dispatchInput(serial, async () => {
-            await rpcAction(
-                serial, 'setClipboard', ['AndroidController', text], attempts, RPC_OPERATION.WRITE,
-            );
-            clipboard = 'replaced';
-            stepRuntime.inputReceipt({ channels: attempts.map(item => item.channel), attempts, clipboard });
+    // Only explicit RPC mode consults observed paste failures; no mutating capability probe.
+    const strategy = clipboardPasteStrategy(serial);
+    if (strategy !== 'none') {
+        try {
+            await dispatchInput(serial, async () => {
+                await rpcAction(
+                    serial, 'setClipboard', ['AndroidController', text], attempts, RPC_OPERATION.WRITE,
+                );
+                clipboard = 'replaced';
+                stepRuntime.inputReceipt({ channels: attempts.map(item => item.channel), attempts, clipboard });
+                stepRuntime.check();
+                if (strategy === 'keyevent') {
+                    // KEYCODE_PASTE uses the focused widget; acknowledgement does not prove insertion.
+                    const attempt = { channel: 'keyevent', method: KEYCODE_PASTE, status: 'dispatched' };
+                    attempts.push(attempt);
+                    stepRuntime.inputReceipt({ channels: attempts.map(item => item.channel), attempts, clipboard });
+                    stepRuntime.markDispatched();
+                    await client.runText(['shell', 'input', 'keyevent', '279'], { serial, timeoutMs: 10000 });
+                } else {
+                    try {
+                        await rpcAction(serial, 'pasteClipboard', [], attempts, RPC_OPERATION.WRITE);
+                    } catch (error) {
+                        // This policy applies to future requests, never replaying the current write.
+                        if (error.code === 'UI_SERVER_RPC_ERROR' && error.drained === true) {
+                            uiServerFor(serial).noteCapability('pasteClipboard', 'unavailable');
+                        }
+                        throw error;
+                    }
+                }
+                stepRuntime.check();
+                if (enter) await client.runText(['shell', 'input', 'keyevent', 'KEYCODE_ENTER'], { serial, timeoutMs: 10000 });
+            }, false);
+            return channelReceipt(textResult(
+                '已派发当前光标/选区的 Unicode 粘贴；不证明字段值。',
+                { serial, method: strategy === 'keyevent' ? 'rpc-clipboard+keyevent-paste' : 'rpc-clipboard', ascii: false },
+            ), attempts, { clipboard, pasteStrategy: strategy });
+        } catch (error) {
+
+            error.details = { ...error.details, ...(clipboard ? { clipboard } : {}) };
             stepRuntime.check();
-            await rpcAction(serial, 'pasteClipboard', [], attempts, RPC_OPERATION.WRITE);
-            stepRuntime.check();
-            if (enter) await client.runText(['shell', 'input', 'keyevent', 'KEYCODE_ENTER'], { serial, timeoutMs: 10000 });
-        }, false);
-        return channelReceipt(textResult('已派发当前光标/选区的 Unicode 粘贴；不证明字段值。', { serial, method: 'rpc-clipboard', ascii: false }), attempts, { clipboard });
-    } catch (error) {
-        error.details = { ...error.details, ...(clipboard ? { clipboard } : {}) };
-        stepRuntime.check();
-        if (error.dispatched !== false) throw error;
+            if (error.dispatched !== false) throw error;
+        }
     }
     stepRuntime.check();
     // 非 ASCII 必须走 ADBKeyboard 的 base64 广播，input text 处理不了中文
@@ -1369,27 +1731,10 @@ async function inputText(args = {}) {
     }
 }
 
-/**
- * 启动应用，并确认它真的到了前台。
- *
- * 为什么要验证：`monkey` 在部分 ROM（如 ColorOS）上会打印
- * `Events injected: 1` 却什么都不启动 —— 光看输出文本会谎报成功。
- *
- * 启动顺序：
- *   1) 显式 activity（最可靠）
- *   2) 用 resolve-activity 问出真正的 launcher activity，再 am start
- *   3) monkey 兜底
- * 每一步之后都读前台，对上了才返回成功。
- *
- * @param {object} args
- * @param {object} [context] 第二个参数是 processToolCall 传进来的执行上下文；
- *   测试可通过 context.client 注入假 adb。生产路径下它通常是空对象，
- *   所以不能按 truthy 判断，必须显式取 .client。
- */
+/** Select one launcher, dispatch once, and verify foreground independently of command output. */
 async function launchApp(args = {}, context = {}) {
-    // 不能写成 `context || requireAdb()`：processToolCall 总会传一个空对象进来，
-    // 那样会把 {} 当成 client，运行时报 client.runText is not a function
-    const client = (context && context.client) || requireAdb();
+
+    const client = context?.client || requireAdb();
     const serial = resolveSerial(args);
     const pkg = firstString(args.package, args.packageName, args.app);
     if (args.url !== undefined) return launchUrl(args, client, serial, pkg);
@@ -1407,60 +1752,47 @@ async function launchApp(args = {}, context = {}) {
 
     const steps = [];
     let output = '';
-    let launchedBy = null;
+    let component = activity ? `${pkg}/${activity}` : '';
 
     // 先确认包真的存在。否则 monkey 会抛一大段 adb 原始输出，
     // 调用方看不出是「包名写错了」还是「启动失败了」。
     // 注意：查询本身失败（多设备、超时）不等于包不存在 —— 不能据此报 APP_NOT_FOUND。
-    let queryFailed = false;
     const listed = await client
         .runText(['shell', 'pm', 'list', 'packages', pkg], { serial, timeoutMs: 15000 })
-        .catch((error) => {
-            queryFailed = true;
-            return String(error?.message || '');
-        });
-    const exists = String(listed).split(/\r?\n/).some((line) => line.trim() === `package:${pkg}`);
-    if (!exists && !queryFailed) {
+        .catch(() => { stepRuntime.check(); return null; });
+    if (listed !== null && !String(listed).split(/\r?\n/).some(line => line.trim() === `package:${pkg}`)) {
         const clean = new Error(`[AndroidController] 设备上没有 ${pkg}。用 ListPackages 查看可用的包名。`);
         clean.code = 'APP_NOT_FOUND';
         throw clean;
     }
     // 查不到就继续尝试启动：宁可多试一次，也不要谎称包不存在
 
-    if (activity) {
-        const component = `${pkg}/${activity}`;
-        output = await dispatchInput(serial, () => client.runText(['shell', 'am', 'start', '-n', component], { serial, timeoutMs: 20000 }));
-        steps.push({ by: 'activity', component, output: output.trim() });
-        launchedBy = component;
-    } else {
-        // 问出真正的入口，比 monkey 可靠
+    if (!component) {
+        // Resolve a launcher before considering monkey.
         const resolved = await client
             .runText(['shell', 'cmd', 'package', 'resolve-activity', '--brief', pkg], { serial, timeoutMs: 15000 })
-            .catch(() => '');
-        const component = String(resolved).split(/\r?\n/).map((s) => s.trim())
+            .catch(() => { stepRuntime.check(); return ''; });
+        const candidate = String(resolved).split(/\r?\n/).map((s) => s.trim())
             .filter((s) => s.includes('/')).pop() || '';
-        if (component && /^[A-Za-z][\w]*(?:\.[A-Za-z][\w]*)*\/(?:\.?[A-Za-z_$][\w$]*)(?:\.[A-Za-z_$][\w$]*)*$/.test(component)) {
-            output = await dispatchInput(serial, () => client.runText(['shell', 'am', 'start', '-n', component], { serial, timeoutMs: 20000 }));
-            steps.push({ by: 'resolve-activity', component, output: output.trim() });
-            launchedBy = component;
-        }
+        if (/^[A-Za-z][\w]*(?:\.[A-Za-z][\w]*)*\/(?:\.?[A-Za-z_$][\w$]*)(?:\.[A-Za-z_$][\w$]*)*$/.test(candidate)) component = candidate;
     }
-
-    // 兜底：monkey。这里的结果不可信，只看有没有让应用进前台。
-    if (!launchedBy) {
+    if (component) {
+        output = await dispatchInput(serial, () => client.runText(['shell', 'am', 'start', '-n', component], { serial, timeoutMs: 20000 }));
+        steps.push({ by: activity ? 'activity' : 'resolve-activity', component, output: output.trim() });
+    } else {
+        // No component resolved: dispatch monkey once, then verify foreground.
         output = await dispatchInput(serial, () => client.runText(
             ['shell', 'monkey', '-p', pkg, '-c', 'android.intent.category.LAUNCHER', '1'],
             { serial, timeoutMs: 25000 },
-        )).catch((error) => {
+        )).catch(() => {
             stepRuntime.check();
-            // 走到这里说明包存在但没启动起来，原始输出对调用方没用
+            // Hide raw command output; a failed package query does not prove existence.
             const clean = new Error(`[AndroidController] ${pkg} 存在，但没有找到可启动的界面。`
                 + '如果它是个服务类应用，需要显式指定 activity。');
             clean.code = 'NO_LAUNCHER_ACTIVITY';
             throw clean;
         });
         steps.push({ by: 'monkey', output: output.trim() });
-        launchedBy = 'monkey';
     }
 
     // 等前台稳定：应用冷启动需要时间，轮询到 pkg 出现或超时
@@ -1468,9 +1800,10 @@ async function launchApp(args = {}, context = {}) {
     const ok = foreground.package === pkg;
     stepRuntime.verified(ok, { condition: { type: 'foreground', package: pkg }, evidence: foreground });
 
+    const launchedBy = component || 'monkey';
     const head = ok ? `已打开 ${pkg}` : `启动 ${pkg} 失败`;
     const detail = ok
-        ? (activity || launchedBy !== 'monkey' ? `\n入口：${launchedBy}` : '\n入口：monkey')
+        ? `\n入口：${launchedBy}`
         : `\n当前前台：${foreground.package || '(未知)'}`
             + '\n如果应用确实开着，试试 stop=true 先杀掉再启动。';
 
@@ -1575,8 +1908,9 @@ async function listPackages(args = {}) {
 // ---------------------------------------------------------------------------
 
 async function ensureDisplay(args = {}) {
-    if (streamServer?.server) return streamServer;
     if (displayStarting) return displayStarting;
+    if (streamServer?.server && streamServer.actualPort && !streamServer.stopped
+        && !streamServer.startPromise && !streamServer.stopPromise) return streamServer;
 
     displayStarting = (async () => {
         const requestedPort = intOf(args.port, 'port', null);
@@ -1683,6 +2017,8 @@ async function displayStatus() {
  *   - region：显式给设备坐标
  */
 async function screenshot(args = {}) {
+    if (args.target === 'element') stepRuntime.inputReceipt({ experimental: true, milestone: 'M2' });
+    elementShot.validate(args);
     if (!frameHub) throw new Error('[AndroidController] 画面采集未初始化。');
     const client = requireAdb();
     const requested = resolveSerial(args);
@@ -1691,12 +2027,8 @@ async function screenshot(args = {}) {
     // 否则 `wm size` 会直接报 "more than one device"。
     const { serial } = await ensureActiveDevice(client, requested);
 
-    const size = await client.screenSize(serial).catch(() => null);
-    if (!size || !size.width || !size.height) {
-        throw new Error('[AndroidController] 拿不到屏幕分辨率，无法建立坐标映射。');
-    }
-
-    const shot = await captureVisionShot({ client, serial, size, args });
+    const shot = await captureVisionShot({ client, serial, args });
+    const size = shot.size;
 
     return {
         content: [
@@ -1711,24 +2043,30 @@ async function screenshot(args = {}) {
             mapping: shot.frame.mapping,
             region: shot.frame.mapping.region,
             canvas: shot.canvas,
-            capturedAt: Date.now(),
+                        ...(shot.element ? { element: shot.element, experimental: true } : {}),
+                        capturedAt: Date.now(),
             frameId: shot.frame.frameId,
         },
     };
 }
 
-/**
- * 采一帧并按参数裁剪/缩放/叠网格，产出可直接塞进 content 的图。
- * Observe 的 screenshot:true 与 Screenshot 命令都走这里 —— 少一份拷贝。
- *
- * @returns {{frame:object, canvas:object|null, regionNote:string}}
- */
 async function captureVisionShot({ client, serial, size, args = {} }) {
-    // 区域优先级：显式 region > target=canvas > 整屏
+    lastVision.delete(serial);
+    assertDeviceCertain(serial);
+    const before = await freshFrameProbe(client, serial);
+    const context = frameContext(before);
+    size = logicalSize(before?.size) || logicalSize(size) || logicalSize(await client.screenSize(serial).catch(() => null));
+    stepRuntime.check();
+    // 区域优先级：元素目标、显式 region、target=canvas、整屏。
     let region = null;
     let regionNote = '';
     const target = firstString(args.target, args.crop);
-    if (args.region && typeof args.region === 'object') {
+    elementShot.validate(args);
+    const baseline = target === 'element' ? await elementShot.prepare({ client, serial, size, args }) : null;
+    if (baseline) {
+        region = baseline.element.region;
+        regionNote = '已裁到当前元素；遮挡状态未知，padding仅增加图像上下文。';
+    } else if (args.region && typeof args.region === 'object') {
         region = args.region;
     } else if (target && target.toLowerCase() === 'canvas') {
         const record = lastObserve.get(serial) || null;
@@ -1742,11 +2080,13 @@ async function captureVisionShot({ client, serial, size, args = {} }) {
     }
 
     const sharp = frameHub.requireSharp();
-    // 采集直接要原生分辨率的 raw 像素：后面还要裁剪/缩放/叠网格，
-    // 中间每多一次「编码→解码」都是白花的 CPU（实测省下 ~110ms/帧）。
-    // raw 不可用时（个别 ROM）才退回 PNG 编码帧。
-    const frame = await frameHub.captureOneShot({ serial, raw: true, maxWidth: size.width, format: 'png' });
-
+    // 采集原生分辨率，复用统一裁剪、缩放、网格和设备坐标映射。
+    const frame = await frameHub.captureOneShot({ serial, raw: true, ...(size ? { maxWidth: size.width } : {}), format: 'png' });
+    if (!size) {
+        size = logicalSize(frame.raw) || logicalSize(frame);
+        if (!size && Buffer.isBuffer(frame.buffer)) size = logicalSize(await sharp(frame.buffer).metadata());
+        if (!size) throw new Error('[AndroidController] 无法读取截图尺寸。');
+    }
     const frameResult = await vision.buildVisionFrame({
         sharp,
         frame,
@@ -1758,12 +2098,25 @@ async function captureVisionShot({ client, serial, size, args = {} }) {
         grid: args.grid !== false && String(args.grid).toLowerCase() !== 'false',
     });
 
+    if (baseline) await elementShot.verify({ client, serial, size, args, baseline });
+    const after = await freshFrameProbe(client, serial);
+    stepRuntime.check();
+    const afterContext = frameContext(after);
+    const reason = !context || !afterContext ? 'CONTEXT_UNKNOWN'
+        : !sameFrameContext(context, afterContext) ? 'CONTEXT_CHANGED'
+            : frameResult.sourceWidth !== size.width || frameResult.sourceHeight !== size.height ? 'SOURCE_SIZE_MISMATCH' : 'READY';
+    const actionable = reason === 'READY';
     const record = lastObserve.get(serial) || null;
-    const frameId = randomUUID();
-    lastVision.set(serial, { frameId, at: Date.now(), size });
+    const frameId = actionable ? randomUUID() : null;
+    if (actionable) lastVision.set(serial, { frameId, at: Date.now(), context });
     return {
+        size,
         frame: {
             frameId,
+            actionable,
+            reason,
+            sourceWidth: frameResult.sourceWidth,
+            sourceHeight: frameResult.sourceHeight,
             width: frameResult.width,
             height: frameResult.height,
             mime: frameResult.mime,
@@ -1773,25 +2126,29 @@ async function captureVisionShot({ client, serial, size, args = {} }) {
             dataUrl: frameResult.dataUrl,
         },
         canvas: record?.graph?.canvas || null,
+        element: baseline?.element || null,
         regionNote,
     };
 }
 
 /** 把一次视觉截图的元信息写成模型能直接用的说明。 */
-function describeVisionShot(shot, { serial, size }) {
+function describeVisionShot(shot, { serial }) {
     const { frame, canvas, regionNote } = shot;
+    const size = shot.size;
     return [
         `设备：${serial || '(当前设备)'}`,
         `屏幕：${size.width}×${size.height}`,
-        `图像凭据：${frame.frameId}（像素动作必须携带 frameId，动作后失效）`,
+        frame.actionable ? `图像凭据：${frame.frameId}（像素动作必须携带 frameId，动作后失效）`
+            : `图像凭据：null（${frame.reason}；仅供显示，不可用作坐标动作）`,
         regionNote || null,
-        vision.describeMapping(frame.mapping),
+        shot.element ? JSON.stringify({ element: shot.element, experimental: true }) : null,
+        frame.actionable ? vision.describeMapping(frame.mapping) : '坐标映射未经确认，仅供显示参考。',
         `图像：${frame.width}×${frame.height}  ${Math.round(frame.byteLength / 1024)}KB  ${frame.mime}`,
         frame.grid ? '网格：已叠加（标签为设备坐标）' : '网格：未叠加（模型需自行按换算公式换算）',
         canvas?.present
             ? `画布：${(canvas.kinds || []).join('/')} 占屏 ${Math.round((canvas.coverage || 0) * 100)}%，内部内容只能从图中读`
             : null,
-        '点击时直接传设备坐标（Tap 的 x/y），不要传图上坐标。',
+        frame.actionable ? '点击时直接传设备坐标（Tap 的 x/y），不要传图上坐标。' : '请重新截图取得有效 frameId 后再操作。',
     ].filter(Boolean).join('\n');
 }
 
@@ -1800,7 +2157,8 @@ function describeVisionShot(shot, { serial, size }) {
 // ---------------------------------------------------------------------------
 
 const ACTIONS = Object.freeze({
-    tap, swipe, scroll, fill, longpress: longPress, inputtext: inputText,
+    tap, doubletap: doubleTap, swipe, scroll, scrolluntil: scrollUntil, fill, longpress: longPress, inputtext: inputText,
+    drag, pinch, imeaction: imeAction, erasetext: eraseText, keycombo: keyCombo,
     keyevent: keyEvent, launchapp: launchApp, killapp: killApp, system: systemOperation,
 });
 const STEP_ACTIONS = new Set([...Object.keys(ACTIONS), 'wait']);
@@ -1814,15 +2172,14 @@ function parseObject(value, label) {
 }
 
 function validateSelector(selector) {
-    const match = /^(id|text)=([^#]+?)(?:#([1-9]\d*))?$/.exec(selector);
-    if (!match || (match[3] && !Number.isSafeInteger(Number(match[3])))) throw stepRuntime.failure('INVALID_ARGUMENT', 'selector 后置条件格式无效；字面量 # 必须编码为 %23。');
+    if (!isValidSelector(selector)) throw stepRuntime.failure('INVALID_ARGUMENT', 'selector 格式无效；请使用合法属性条件与显式序号。');
 }
 
 function parseExpectation(raw) {
     if (raw === undefined || raw === null) return null;
     const expected = parseObject(raw, 'expect 后置条件');
     if (['visible', 'absent'].includes(expected.type)) {
-        if (!firstString(expected.selector)) throw stepRuntime.failure('INVALID_ARGUMENT', 'expect 必须提供非空 selector。');
+        if (expected.selector === undefined) throw stepRuntime.failure('INVALID_ARGUMENT', 'expect 必须提供非空 selector。');
         validateSelector(expected.selector);
     } else if (expected.type === 'foreground') {
         validatePackage(firstString(expected.package));
@@ -1834,7 +2191,7 @@ function parseAfterObserve(value) {
     if (value === undefined || value === false || value === 'false') return null;
     if (value === true || value === 'true') return {};
     const options = { ...parseObject(value, 'afterObserve') };
-    const allowed = ['mode', 'limit', 'screenshot', 'region', 'target', 'maxWidth', 'format', 'quality', 'grid'];
+    const allowed = ['mode', 'limit', 'screenshot', 'region', 'target', 'maxWidth', 'format', 'quality', 'grid', 'selector', 'id', 'index', 'snapshotId', 'padding'];
     if (Object.keys(options).some(key => !allowed.includes(key))) throw stepRuntime.failure('INVALID_ARGUMENT', 'afterObserve 含未知字段。');
     if (options.mode !== undefined && !['ui', 'image'].includes(options.mode)) throw stepRuntime.failure('INVALID_ARGUMENT', 'afterObserve mode 仅支持 ui、image。');
     for (const [key, min, max] of [['limit', 1, 500], ['maxWidth', 64, 4096], ['quality', 10, 95]]) {
@@ -1847,7 +2204,9 @@ function parseAfterObserve(value) {
         if (options[key] !== undefined && typeof options[key] !== 'boolean') throw stepRuntime.failure('INVALID_ARGUMENT', `afterObserve ${key} 必须是布尔值。`);
     }
     if (options.format !== undefined && !['png', 'jpeg'].includes(options.format)) throw stepRuntime.failure('INVALID_ARGUMENT', 'afterObserve format 无效。');
-    if (options.target !== undefined && options.target !== 'canvas') throw stepRuntime.failure('INVALID_ARGUMENT', 'afterObserve target 仅支持 canvas。');
+    if (options.target !== undefined && !['canvas', 'element'].includes(options.target)) throw stepRuntime.failure('INVALID_ARGUMENT', 'afterObserve target 仅支持 canvas、element。');
+    elementShot.validate(options);
+    if (options.target !== 'element' && ['selector', 'id', 'index', 'snapshotId'].some(key => options[key] !== undefined)) throw stepRuntime.failure('INVALID_ARGUMENT', '元素寻址字段仅用于target=element。');
     if (options.region !== undefined) {
         const region = options.region;
         if (!region || typeof region !== 'object' || Array.isArray(region) || Object.keys(region).some(key => !['left', 'top', 'width', 'height'].includes(key)) || !['left', 'top', 'width', 'height'].every(key => Number.isInteger(region[key])) || region.left < 0 || region.top < 0 || region.width <= 0 || region.height <= 0) throw stepRuntime.failure('INVALID_ARGUMENT', 'afterObserve region 必须为有效设备坐标矩形。');
@@ -1858,9 +2217,10 @@ function parseAfterObserve(value) {
 async function appendObservation(result, after, serial, sample = null) {
     if (!after) return result;
     try {
+        assertDeviceCertain(serial);
         let observed;
         if (after.mode !== 'image' && sample && Date.now() - sample.at < STALE_SNAPSHOT_MS) {
-            sample.focus = await requireAdb().currentFocus(serial);
+            // Reuse the acquired tree, provenance and timestamp as one immutable sample.
             observed = await renderObservation(after, sample);
         } else observed = await observe({ ...after, serial, wake: 'never' });
         result.content.push(...observed.content);
@@ -1875,10 +2235,7 @@ async function appendObservation(result, after, serial, sample = null) {
 }
 
 async function executeSequence(args, executionContext) {
-    let steps = args.steps;
-    if (typeof steps === 'string') {
-        try { steps = JSON.parse(steps); } catch { throw stepRuntime.failure('INVALID_ARGUMENT', 'steps 必须是JSON数组。'); }
-    }
+    const steps = args.steps;
     if (!Array.isArray(steps) || steps.length < 1 || steps.length > 8 || ['action', 'expect', 'waitTimeoutMs'].some(key => args[key] !== undefined)) throw stepRuntime.failure('INVALID_ARGUMENT', 'steps需要1–8步，不可混用外层action/expect/waitTimeoutMs。');
     const after = parseAfterObserve(args.afterObserve);
     const serial = resolveSerial(args);
@@ -1887,13 +2244,16 @@ async function executeSequence(args, executionContext) {
         if (Object.keys(step).some(key => !['action', 'expect', 'waitTimeoutMs'].includes(key))) throw stepRuntime.failure('INVALID_ARGUMENT', 'step只接受action/expect/waitTimeoutMs。');
         const action = parseObject(step.action, 'action');
         const command = commandOf(action);
-        if (!STEP_ACTIONS.has(command) || command === 'system' || ['serial', 'device', 'deviceSerial'].some(key => action[key] !== undefined) || (index > 0 && ['index', 'snapshotId', 'frameId', 'x', 'y', 'x1', 'y1', 'x2', 'y2'].some(key => action[key] !== undefined))) throw stepRuntime.failure('INVALID_ARGUMENT', '序列仅支持绑定设备的GUI动作；后续步骤必须实时语义定位，不能复用旧凭据。');
+        const nestedTarget = command === 'drag' && action.target && typeof action.target === 'object' ? action.target : {};
+        const deviceKeys = ['serial', 'device', 'deviceSerial'];
+        const credentialKeys = ['index', 'snapshotId', 'frameId', 'x', 'y', 'x1', 'y1', 'x2', 'y2'];
+        if (!STEP_ACTIONS.has(command) || command === 'system' || deviceKeys.some(key => action[key] !== undefined || nestedTarget[key] !== undefined) || (index > 0 && credentialKeys.some(key => action[key] !== undefined || nestedTarget[key] !== undefined))) throw stepRuntime.failure('INVALID_ARGUMENT', '序列仅支持绑定设备的GUI动作；后续步骤必须实时语义定位，不能复用旧凭据。');
         const expect = parseExpectation(step.expect);
         validateWait(action, command, expect);
         if (index < steps.length - 1 && !expect) throw stepRuntime.failure('INVALID_ARGUMENT', '中间步骤必须声明expect，通过验证后才继续。');
         const waitTimeoutMs = intOf(step.waitTimeoutMs, 'waitTimeoutMs', 5000);
         if (waitTimeoutMs < 1 || waitTimeoutMs > 30000) throw stepRuntime.failure('INVALID_ARGUMENT', 'waitTimeoutMs必须在1–30000ms内。');
-        return { action, expect, waitTimeoutMs, command };
+        return { action, expected: expect, waitMs: waitTimeoutMs, command };
     });
     stepRuntime.beginSequence(parsed.length);
     const receipts = [];
@@ -1903,13 +2263,9 @@ async function executeSequence(args, executionContext) {
         stepRuntime.check();
         const isIntermediate = step !== parsed.at(-1);
         stepRuntime.beginItem(step.command);
-        result = await executeStep({
-            serial,
-            action: step.action,
-            expect: step.expect,
-            waitTimeoutMs: step.waitTimeoutMs,
-            afterObserve: isIntermediate ? undefined : args.afterObserve,
-        }, executionContext);
+        stepRuntime.setActionCommand(step.command);
+        const experimentalM2 = markStepExperiment(step.action, step.expected);
+        result = await executeStepPlan({ ...step, experimentalM2 }, serial, isIntermediate ? null : after, executionContext);
         const receipt = stepRuntime.finishItem(isIntermediate);
         receipts.push(receipt);
         if (receipt.outcome === 'unknown' || (isIntermediate && receipt.outcome !== 'verified')) {
@@ -1923,76 +2279,129 @@ async function executeSequence(args, executionContext) {
     return result.details.observation ? result : appendObservation(result, after, serial);
 }
 
+async function waitIdle(serial, timeoutMs) {
+    const client = requireAdb();
+    const deadlineMs = Date.now() + Math.min(timeoutMs, stepRuntime.remainingMs());
+    const inBudget = task => typeof client.withContext === 'function' ? client.withContext({ deadlineMs }, task) : task();
+    const freshProbe = () => inBudget(async () => {
+        const sampled = await client.probeScreen(serial);
+        sampled.size = await client.screenSize(serial, { force: true });
+        return sampled;
+    });
+    let latest = null;
+    let result;
+    try {
+        const probe = await freshProbe();
+        const baseline = screenContext(probe);
+        if (!baseline) {
+            stepRuntime.verified(false, { condition: { type: 'idle' }, error: 'IDLE_CONTEXT_UNPROVEN' });
+            return textResult('未确认醒着的未锁定应用上下文；不唤醒。', { serial, actionVerified: false, idleMode: null, experimental: true });
+        }
+        const server = uiServerEnabled() ? uiServerFor(serial) : null;
+        const ready = server?.isReady() === true;
+        const remaining = () => Math.max(0, Math.min(deadlineMs - Date.now(), stepRuntime.remainingMs()));
+        if (remaining() < 1) result = { matched: false, idleMode: null, error: 'IDLE_TIMEOUT' };
+        else result = await waitForIdle({ runtime: stepRuntime, timeoutMs: remaining(),
+            nativeIdle: ready ? async request => {
+                await withDeviceRpc(serial, () => server.invoke('waitForIdle', [request.timeoutMs], {
+                    signal: request.signal, timeoutMs: Math.max(1, Math.min(request.deadlineMs - Date.now(), remaining())),
+                }));
+            } : undefined,
+            sample: request => inBudget(async () => {
+                stepRuntime.check();
+                const current = await freshProbe();
+                if (screenContext(current) !== baseline) return { complete: false, context: screenContext(current) || 'invalid-context', digest: '' };
+                const budget = Math.floor(Math.min(request.deadlineMs - Date.now(), remaining()));
+                if (budget < 1) return { complete: false, context: baseline, digest: '' };
+                let xml;
+                if (ready) ({ xml } = await withDeviceRpc(serial, () => server.dump({ rootInActive: true, timeoutMs: budget, signal: request.signal })));
+                else xml = await client.runText(['exec-out', 'uiautomator', 'dump', '--compressed', '/dev/tty'],
+                    { serial, timeoutMs: budget, maxBuffer: 8 * 1024 * 1024 });
+                stepRuntime.check();
+                validateHierarchy(xml);
+                const graph = parseUiGraph(xml, { limit: 500, screen: current.size, rpcTarget: true });
+                const after = await freshProbe();
+                if (screenContext(after) !== baseline) return { complete: false, context: screenContext(after) || 'invalid-context', digest: '' };
+                latest = { serial, graph, size: current.size, focus: current.focus, limit: 500, at: Date.now() };
+                return layoutEvidence(graph, current);
+            }),
+        });
+    } catch (error) {
+        stepRuntime.check();
+        if (error.code !== 'ADB_TIMEOUT' || Date.now() < deadlineMs) throw error;
+        result = { matched: false, idleMode: null, error: 'IDLE_TIMEOUT' };
+    }
+    stepRuntime.verified(result.matched, { condition: { type: 'idle' }, evidence: { idleMode: result.idleMode }, error: result.error || null });
+    return textResult(result.matched ? '两次完整布局采样一致；不证明像素静止或业务完成。' : '等待预算内未证实布局稳定。', {
+        serial, actionVerified: result.matched, idleMode: result.idleMode, experimental: true,
+        ...(result.matched && latest ? { idleSample: latest } : {}),
+    });
+}
+
 function validateWait(action, command, expected) {
     if (command !== 'wait') return;
-    if (!expected || Object.keys(action).some(key => !['command', 'action', 'commandIdentifier'].includes(key))) throw stepRuntime.failure('INVALID_ARGUMENT', 'Wait必须声明expect；action只接受命令标识，不支持固定延时或其它动作参数。');
+    const idle = action.mode === 'idle';
+    if ((!idle && !expected) || (action.mode !== undefined && !idle)
+        || Object.keys(action).some(key => !['command', 'action', 'commandIdentifier', 'mode'].includes(key))) throw stepRuntime.failure('INVALID_ARGUMENT', 'Wait需要expect或mode=idle；不支持固定延时或其它动作参数。');
 }
 
 async function executeStep(args, executionContext) {
     if (args.steps !== undefined) return executeSequence(args, executionContext);
-    const action = parseObject(args.action, 'action');
+    const action = args.action;
     const command = commandOf(action);
     const after = parseAfterObserve(args.afterObserve);
     if (!STEP_ACTIONS.has(command)) throw stepRuntime.failure('INVALID_ARGUMENT', 'action 仅支持单个白名单动作，不能递归或切换设备。');
+    stepRuntime.setActionCommand(command);
     const serial = resolveSerial(args);
     const requested = firstString(action.serial, action.device, action.deviceSerial);
     if (requested && requested !== serial) throw stepRuntime.failure('INVALID_ARGUMENT', 'action 不能覆盖单步绑定设备。');
     const expected = parseExpectation(args.expect);
+    const experimentalM2 = markStepExperiment(action, expected);
     validateWait(action, command, expected);
     const waitMs = intOf(args.waitTimeoutMs, 'waitTimeoutMs', 5000);
     if (waitMs < 1 || waitMs > 30000) throw stepRuntime.failure('INVALID_ARGUMENT', 'waitTimeoutMs 必须在 1–30000ms 内。');
+    return executeStepPlan({ action, command, expected, waitMs, experimentalM2 }, serial, after, executionContext);
+}
+
+function markStepExperiment(action, expected) {
+    const m2Selector = value => value && (typeof value === 'object' || /^(contains|regex|class|role)=/.test(value));
+    const experimentalM2 = action.mode === 'idle' || [action.selector, action.target?.selector, expected?.selector].some(m2Selector);
+    if (experimentalM2) stepRuntime.inputReceipt({ experimental: true, milestone: 'M2' });
+    return experimentalM2;
+}
+
+async function executeStepPlan({ action, command, expected, waitMs, experimentalM2 }, serial, after, executionContext) {
+    const waitDeadline = command === 'wait' && action.mode === 'idle' ? Date.now() + waitMs : null;
     let result;
     try {
-        result = command === 'wait'
-            ? textResult('只读等待条件采样；不派发输入或唤醒。', { serial })
-            : await ACTIONS[command]({ ...action, serial }, executionContext);
+        if (command !== 'wait') {
+            result = await ACTIONS[command]({ ...action, serial }, executionContext);
+        } else if (action.mode === 'idle') {
+            result = await stepRuntime.stage('verificationMs', () => waitIdle(serial, waitMs));
+        } else {
+            result = textResult('只读等待条件采样；不派发输入或唤醒。', { serial });
+        }
     } catch (error) {
         if (command === 'inputtext' || command === 'fill') {
             const clean = stepRuntime.failure(error.code || 'INPUT_FAILED', '文本输入失败；已派发时不得直接重试。');
-            clean.details = error.details; throw clean;
+            clean.details = error.details;
+            throw clean;
         }
         throw error;
     }
-    let verifiedSample = null;
-    if (expected && !(command === 'fill' && (result.details.fillVerified === false || result.details.password))) await stepRuntime.stage('verificationMs', async () => {
-        const deadline = Date.now() + waitMs;
-        let matched = false;
-        let evidence = null;
-        let errorNote = null;
-        do {
-            stepRuntime.check();
-            try {
-                const client = requireAdb();
-                errorNote = null;
-                const sample = async () => {
-                    if (expected.type === 'foreground') {
-                        const focus = await client.currentFocus(serial);
-                        matched = focus?.package === expected.package;
-                        evidence = { package: focus?.package || null };
-                    } else {
-                        const size = await client.screenSize(serial);
-                        const graph = await captureGraph(serial, { limit: 500, screen: size });
-                        verifiedSample = { serial, graph, size, limit: 500, at: Date.now() };
-                        const found = Boolean(resolveSelector(graph, expected.selector));
-                        const incomplete = graph.truncated || graph.keyguard;
-                        matched = expected.type === 'visible' ? found : !found && !incomplete;
-                        if (expected.type === 'absent' && !found && incomplete) errorNote = 'INCOMPLETE_OBSERVATION';
-                        evidence = { signature: graph.signature, found, truncated: graph.truncated, keyguard: graph.keyguard };
-                    }
-                };
-                if (typeof client.withContext === 'function') await client.withContext({ deadlineMs: deadline }, sample);
-                else await sample();
-                if (Date.now() > deadline) { matched = false; errorNote = 'VERIFICATION_TIMEOUT'; }
-            } catch (error) {
-                stepRuntime.check();
-                errorNote = error.code || error.message;
-            }
-            if (matched || Date.now() >= deadline) break;
-            await stepRuntime.pause(Math.min(150, deadline - Date.now()));
-        } while (Date.now() < deadline);
-        stepRuntime.verified(matched, { condition: expected, evidence, error: errorNote });
-        if (!matched) verifiedSample = null;
-    });
+    if (experimentalM2) {
+        result.details = { ...result.details, experimental: true, milestone: 'M2' };
+        result.content.push({ type: 'text', text: JSON.stringify({ experimental: true, milestone: 'M2' }) });
+    }
+    let verifiedSample = result.details?.idleSample || null;
+    if (result.details) delete result.details.idleSample;
+    if (expected && result.details?.actionVerified !== false && !(command === 'fill' && (result.details.fillVerified === false || result.details.password))) {
+        const verification = await stepRuntime.stage('verificationMs', () => waitForExpectation({
+            runtime: stepRuntime, client: requireAdb(), captureGraph, serial, expected,
+            deadlineMs: waitDeadline ?? Date.now() + waitMs,
+        }));
+        verifiedSample = verification.matched ? verification.sample || verifiedSample : null;
+    }
     return appendObservation(result, after, serial, verifiedSample);
 }
 
@@ -2081,6 +2490,13 @@ async function describe(args = {}) {
 
 async function manage(args, executionContext) {
     const operation = firstString(args.operation).toLowerCase();
+    if (uncertainDevices.size && operation !== 'actionhistory' && operation !== 'displaystatus') throw stepRuntime.failure('DEVICE_STATE_UNCERTAIN', 'RPC结局未知，设备管理变更暂停；普通重连不能证明远端服务排干。');
+    if (operation === 'actionhistory') {
+        const allowed = new Set(['command', 'commandIdentifier', 'operation', 'serial', 'limit']);
+        if (Object.keys(args).some(key => !allowed.has(key))) throw stepRuntime.failure('INVALID_ARGUMENT', '动作历史只接受 serial 和 limit。');
+        const history = require('./lib/action-history').query({ serial: args.serial, limit: args.limit });
+        return textResult('只读动作历史；不重放、不连接设备。', history);
+    }
     const handlers = { connect: connectDevice, disconnect: disconnectDevice, startdisplay: startDisplay, stopdisplay: stopDisplay, displaystatus: displayStatus };
     const handler = Object.hasOwn(handlers, operation) ? handlers[operation] : null;
     if (operation === 'reconnect') {
@@ -2089,7 +2505,7 @@ async function manage(args, executionContext) {
             return textResult(result.message, result);
         });
     }
-    if (!handler) throw stepRuntime.failure('INVALID_ARGUMENT', 'Manage operation 仅支持 connect、reconnect、disconnect、startDisplay、stopDisplay、displayStatus。');
+    if (!handler) throw stepRuntime.failure('INVALID_ARGUMENT', 'Manage operation 仅支持 connect、reconnect、disconnect、startDisplay、stopDisplay、displayStatus、actionHistory。');
     return stepRuntime.runManagement(() => handler(args, executionContext));
 }
 
@@ -2107,7 +2523,8 @@ async function processToolCall(args = {}, executionContext = {}) {
         );
     }
 
-    const systemAction = command === 'executestep' && args.steps === undefined && commandOf(parseObject(args.action, 'action')) === 'system';
+    if (command === 'executestep' && args.steps === undefined) args = { ...args, action: parseObject(args.action, 'action') };
+    const systemAction = command === 'executestep' && args.steps === undefined && commandOf(args.action) === 'system';
     if (systemAction && (typeof args.serial !== 'string' || !args.serial.trim())) throw stepRuntime.failure('INVALID_ARGUMENT', '系统能力必须显式指定 serial，不使用默认设备。');
     const handler = Object.hasOwn(COMMANDS, command) ? COMMANDS[command] : null;
     if (!handler) {
@@ -2115,18 +2532,36 @@ async function processToolCall(args = {}, executionContext = {}) {
     }
 
     try {
-
         const deviceRead = command === 'describe' && firstString(args.topic).toLowerCase() === 'packages';
         const apiRead = command === 'observe' && firstString(args.mode).toLowerCase() === 'api';
         if ((command !== 'executestep' && command !== 'observe' && !deviceRead) || apiRead) return await handler(args, executionContext);
         const client = requireAdb();
         const serial = resolveSerial(args) || '__auto__';
+        if (serial === '__auto__' && uncertainDevices.size) throw stepRuntime.failure('DEVICE_STATE_UNCERTAIN', '存在结局未知设备时禁止自动选设备。');
+        assertDeviceCertain(serial);
         const timeoutMs = intOf(args.timeoutMs, 'timeoutMs', 60000);
         if (timeoutMs < 1 || timeoutMs > 300000) throw stepRuntime.failure('INVALID_ARGUMENT', 'timeoutMs 必须在 1–300000ms 内。');
         const outcome = command === 'executestep' ? 'dispatched' : 'observed';
         return await stepRuntime.run({ serial, timeoutMs, signal: executionContext.signal, client, outcome }, async () => {
+            if (command === 'executestep' && typeof args.steps === 'string') {
+                let steps;
+                try { steps = JSON.parse(args.steps); } catch { throw stepRuntime.failure('INVALID_ARGUMENT', 'steps 必须是JSON数组。'); }
+                args = { ...args, steps };
+            }
+            if (command === 'executestep' && serial !== '__auto__') {
+                const steps = args.steps;
+                const firstStep = steps === undefined ? args : parseObject(steps?.[0], 'step');
+                const action = steps === undefined ? firstStep.action : parseObject(firstStep.action, 'action');
+                if (Array.isArray(steps)) args = { ...args, steps: [{ ...firstStep, action }, ...steps.slice(1)] };
+                const actionCommand = commandOf(action);
+                const semantic = action.index !== undefined || action.selector !== undefined || firstString(action.id, action.resourceId, action.resource_id, action.text);
+                if (firstString(action.frameId) && (actionCommand === 'swipe'
+                    || (['tap', 'doubletap', 'longpress'].includes(actionCommand) && !semantic)
+                    || (actionCommand === 'drag' && (!semantic || action.x2 !== undefined || action.y2 !== undefined)))) checkFrame(action, serial);
+            }
             const active = await stepRuntime.stage('prepareMs', () => ensureActiveDevice(client, serial === '__auto__' ? '' : serial));
             stepRuntime.bindDevice(active.serial);
+            assertDeviceCertain(active.serial);
             const pinned = { ...args, serial: active.serial };
             return handler(pinned, executionContext);
         });
@@ -2368,7 +2803,10 @@ const deviceApi = {
 
 for (const name of ['pair', 'connect', 'disconnect', 'reconnect']) {
     const handler = deviceApi[name];
-    deviceApi[name] = (...args) => stepRuntime.runManagement(() => handler(...args));
+    deviceApi[name] = (...args) => {
+        if (uncertainDevices.size) throw stepRuntime.failure('DEVICE_STATE_UNCERTAIN', 'RPC请求结局未知，设备管理暂停。');
+        return stepRuntime.runManagement(() => handler(...args));
+    };
 }
 
 async function initialize(options = {}) {

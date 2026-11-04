@@ -113,6 +113,7 @@ class FrameHub extends EventEmitter {
      * 推送循环会同时调这里，不单飞就会让 adb 请求成倍堆积。
      */
     capture() {
+        if (this.stopped) return Promise.reject(new Error('FrameHub 已停止。'));
         if (!this.adb) return Promise.reject(new Error('FrameHub 尚未绑定 AdbClient。'));
         if (this.inFlight) return this.inFlight;
 
@@ -169,6 +170,7 @@ class FrameHub extends EventEmitter {
      * 也不复用 inFlight：参数不同，复用就是错。
      */
     async captureOneShot(options = {}) {
+        if (this.stopped) throw new Error('FrameHub 已停止。');
         if (!this.adb) throw new Error('FrameHub 尚未绑定 AdbClient。');
         const opts = { ...options, serial: options.serial ?? this.adb.serial ?? '', publish: false };
         if (this.effectiveMode === MODE_RAW) {

@@ -85,6 +85,8 @@ class StreamServer {
         this.server = null;
         this.wss = null;
         this.actualPort = null;
+        this.startPromise = null;
+        this.stopPromise = null;
         this.unsubscribers = new Map();
         // 设备管理接口（配对/连接/断开）。由主服务注入，未注入时 API 返回 503。
         this.deviceApi = options.deviceApi || null;
@@ -541,8 +543,18 @@ class StreamServer {
         this.sendText(socket, JSON.stringify({ type: 'status', scrcpy: now }));
     }
 
-    async start() {
-        if (this.server) return this.actualPort;
+    start() {
+        if (this.stopPromise) return this.stopPromise.then(() => this.start());
+        if (this.startPromise) return this.startPromise;
+        if (this.server) return Promise.resolve(this.actualPort);
+        this.startPromise = this._start().catch(async (error) => {
+            await this._stop();
+            throw error;
+        }).finally(() => { this.startPromise = null; });
+        return this.startPromise;
+    }
+
+    async _start() {
         this.stopped = false;
         this.sessionToken = randomBytes(32).toString('hex');
 
@@ -1065,6 +1077,7 @@ class StreamServer {
         if (latest) this.sendFrame(socket, latest);
         this.sendText(socket, JSON.stringify({ type: 'status', frame: this.frameHub.status() }));
 
+        if (this.stopped || socket.readyState !== 1 || this.disposedSockets.has(socket)) return;
         const unsubscribe = this.frameHub.subscribe((frame) => this.sendFrame(socket, frame));
         this.unsubscribers.set(socket, unsubscribe);
     }
@@ -1141,7 +1154,7 @@ class StreamServer {
     }
 
     sendFrame(socket, frame) {
-        if (!socket || socket.readyState !== 1) return;
+        if (!socket || socket.readyState !== 1 || this.disposedSockets.has(socket)) return;
         if (!frame?.buffer?.length) return;
         if ((socket.bufferedAmount || 0) + 16 + frame.buffer.length > this.maxBufferedBytes) {
             this.counters.jpegDroppedByBackpressure += 1;
@@ -1152,11 +1165,22 @@ class StreamServer {
             this.counters.jpegFramesSent += 1;
             this.counters.jpegBytesSent += frame.buffer.length;
         } catch {
-            // 发送失败通常是 socket 已关闭，交给 close 事件清理
+            this.disposeSocket(socket);
         }
     }
 
-    async stop() {
+    stop() {
+        if (this.stopPromise) return this.stopPromise;
+        this.stopped = true;
+        this.lifecycle += 1;
+        this.stopPromise = (async () => {
+            if (this.startPromise) await this.startPromise.catch(() => {});
+            await this._stop();
+        })().finally(() => { this.stopPromise = null; });
+        return this.stopPromise;
+    }
+
+    async _stop() {
         this.stopped = true;
         this.lifecycle += 1;
         this.cancelScrcpyProbe();
