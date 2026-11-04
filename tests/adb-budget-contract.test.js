@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const { EventEmitter } = require('node:events');
+const { createRequire } = require('node:module');
 const { AdbClient } = require('../VCPDistributedServer/Plugin/AndroidController/lib/adb');
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -23,8 +24,9 @@ function blockedClient(options = {}) {
 function fakeExecClient(exec) {
     const filename = require.resolve('../VCPDistributedServer/Plugin/AndroidController/lib/adb');
     const module = { exports: {} };
+    const productionRequire = createRequire(filename);
     vm.runInNewContext(fs.readFileSync(filename, 'utf8'), {
-        module, exports: module.exports, require: (name) => name === 'child_process' ? { execFile: exec } : require(name),
+        module, exports: module.exports, require: (name) => name === 'child_process' ? { execFile: exec } : productionRequire(name),
         console, Buffer, setTimeout, clearTimeout, AbortController, AbortSignal,
     }, { filename });
     return new module.exports.AdbClient({ adbPath: 'never-execute-adb' });

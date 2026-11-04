@@ -3,6 +3,7 @@
 const { AsyncLocalStorage } = require('node:async_hooks');
 const { performance } = require('node:perf_hooks');
 const { randomUUID } = require('node:crypto');
+const actionHistory = require('./action-history');
 
 const context = new AsyncLocalStorage();
 const leases = new Set();
@@ -44,7 +45,7 @@ async function pause(ms) {
     check();
 }
 
-async function run({ serial, timeoutMs = 60000, signal, client, outcome = 'dispatched' }, task) {
+async function run({ serial, timeoutMs = 60000, signal, client, outcome = 'dispatched', actionCommand }, task) {
     if (managementActive || leases.has(serial)) throw failure('DEVICE_BUSY', '设备已有操作或连接管理，请等待当前操作结束。');
     const controller = new AbortController();
     const state = {
@@ -53,6 +54,7 @@ async function run({ serial, timeoutMs = 60000, signal, client, outcome = 'dispa
         timings: { prepareMs: 0, actionMs: 0, verificationMs: 0, totalMs: 0 },
         outcome, dispatched: false, verification: null,
         leaseKeys: new Set([serial]), activeSerial: null,
+        historySerial: serial, actionCommand: actionHistory.normalizeCommand(actionCommand), historyClosed: false,
     };
     leases.add(serial);
     const started = performance.now();
@@ -91,9 +93,14 @@ async function run({ serial, timeoutMs = 60000, signal, client, outcome = 'dispa
                 ? client.withContext({ deadlineMs: state.deadlineMs, signal: state.signal }, execute) : execute();
         });
         operation.then(release, release);
-        return await Promise.race([boundary, operation]);
+        const result = await Promise.race([boundary, operation]);
+        state.historyClosed = true;
+        finishHistory(state, result.details.execution.outcome, performance.now() - started);
+        return result;
     } catch (error) {
+        state.historyClosed = true;
         state.timings.totalMs = performance.now() - started;
+        finishHistory(state, state.dispatched ? 'unknown' : 'failed', state.timings.totalMs, controller.signal.reason?.code || error.code);
         if (state.inputReceipt) error.details = state.inputReceipt;
         if (controller.signal.reason?.code === 'STEP_DEADLINE') error = Object.assign(controller.signal.reason, { details: error.details });
         error.execution = {
@@ -167,9 +174,13 @@ function beginSequence(total) {
 
 function beginItem(command) {
     const state = context.getStore();
+    if (state.historyClosed) return;
+    state.actionCommand = actionHistory.normalizeCommand(command);
+    state.itemHistory = { started: performance.now(), recorded: false };
     state.outcome = 'dispatched';
     state.verification = null;
     state.itemDispatched = false;
+    state.inputReceipt = null;
     state.sequence.status = 'running';
     state.sequence.steps.push({ index: state.sequence.steps.length, command, outcome: 'running' });
 }
@@ -181,7 +192,29 @@ function finishItem(requireVerified = false) {
     step.verification = state.verification;
     const stopped = state.outcome === 'unknown' || (requireVerified && state.outcome !== 'verified');
     state.sequence.status = stopped ? 'stopped' : 'completed';
+    if (!state.historyClosed) finishHistory(state, step.outcome, performance.now() - state.itemHistory.started);
     return { ...step };
 }
 
-module.exports = { inputReceipt, dispatchState, restoreDispatch, remainingMs, beginSequence, beginItem, finishItem, run, stage, pause, check, failure, markDispatched, verified, bindDevice, activeDevice, executionSignal, assertManagementIdle, runManagement };
+function setActionCommand(command) {
+    const state = context.getStore();
+    if (state && !state.historyClosed) state.actionCommand = actionHistory.normalizeCommand(command);
+}
+
+function finishHistory(state, outcome, durationMs, code) {
+    if (state.sequence) {
+        if (!state.itemHistory || state.itemHistory.recorded) return;
+        state.itemHistory.recorded = true;
+        const step = state.sequence.steps.at(-1);
+        // A dispatched earlier step does not make an unstarted current step unknown.
+        outcome = step.outcome === 'running' ? (state.itemDispatched ? 'unknown' : 'failed') : step.outcome;
+        durationMs = performance.now() - state.itemHistory.started;
+    }
+    actionHistory.record({
+        serial: state.activeSerial || state.historySerial, requestId: state.requestId,
+        command: state.actionCommand, outcome, durationMs, code, receipt: state.inputReceipt,
+        ...(state.sequence ? { stepIndex: state.sequence.steps.length - 1 } : {}),
+    });
+}
+
+module.exports = { setActionCommand, inputReceipt, dispatchState, restoreDispatch, remainingMs, beginSequence, beginItem, finishItem, run, stage, pause, check, failure, markDispatched, verified, bindDevice, activeDevice, executionSignal, assertManagementIdle, runManagement };

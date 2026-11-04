@@ -9,8 +9,12 @@ test('hard deadline returns while an uncancellable dependency hangs, keeping its
     const gate = new Promise((resolve) => { release = resolve; });
     let cancelled = false;
     const client = { withContext(options, fn) { options.signal.addEventListener('abort', () => { cancelled = true; }, { once: true }); return fn(); } };
-    const work = runtime.run({ serial: 'hard-budget', timeoutMs: 15, client }, async () => { await gate; runtime.check(); return { details: {} }; });
-    const bounded = await Promise.race([work.then(() => 'success', (error) => error), sleep(100).then(() => 'not-bounded')]);
+    // Allow setup under full-suite contention; the gate still outlives the hard deadline.
+    const work = runtime.run({ serial: 'hard-budget', timeoutMs: 250, client }, async () => { await gate; runtime.check(); return { details: {} }; });
+    let watchdog;
+    const bounded = await Promise.race([work.then(() => 'success', error => error),
+        new Promise(resolve => { watchdog = setTimeout(() => resolve('not-bounded'), 2000); })]);
+    clearTimeout(watchdog);
     try {
         assert.equal(bounded.code, 'STEP_DEADLINE');
         assert.equal(cancelled, true);

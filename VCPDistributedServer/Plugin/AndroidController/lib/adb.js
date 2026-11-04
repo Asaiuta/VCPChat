@@ -14,140 +14,24 @@ const { execFile } = require('child_process');
 const { AsyncLocalStorage } = require('node:async_hooks');
 
 const DEFAULT_TIMEOUT_MS = 20000;
-const DEFAULT_MAX_QUEUE_SIZE = 64;
 const DEFAULT_MAX_BUFFER = 16 * 1024 * 1024;
 const MAX_TEXT_BYTES = 4 * 1024 * 1024;
-
-// 队列边界拒绝码。执行期失败（ADB_FAILED/ADB_EXIT 等）不计入 rejected。
-const REJECTION_CODES = new Set(['ADB_QUEUE_FULL', 'ADB_TIMEOUT', 'ADB_ABORTED']);
-
-class AdbError extends Error {
-    constructor(code, message, details = {}) {
-        super(message);
-        this.name = 'AdbError';
-        this.code = code;
-        Object.assign(this, details);
-    }
-}
+const { AdbError } = require('./adb-error');
+const { AdbCommandQueue, DEFAULT_MAX_QUEUE_SIZE } = require('./adb-queue');
+const HOST_READ_KEY = Symbol('adb-host-read');
 
 function normalizeAdbPath(value) {
     const configured = String(value ?? '').trim();
     return configured || 'adb';
 }
 
-function createQueueStats() {
-    return {
-        peakDepth: 0,
-        completed: 0,
-        failed: 0,
-        rejected: { ADB_QUEUE_FULL: 0, ADB_TIMEOUT: 0, ADB_ABORTED: 0 },
-        failedByCode: {},
-    };
-}
-
-function countRejection(stats, code) {
-    stats.rejected[code] = (stats.rejected[code] || 0) + 1;
-}
-
-/**
- * 串行化对同一设备的 adb 调用。
- *
- * 为什么不并发：uiautomator dump 与 screencap 同时打一台手机时，adb 的 EXEC 服务
- * 会互相挤占，实测表现为随机 "error: closed" 或空输出。队列化比重试便宜。
- */
-class SerialQueue {
-    constructor(maxQueueSize = DEFAULT_MAX_QUEUE_SIZE) {
-        this.maxQueueSize = Number.isSafeInteger(maxQueueSize) && maxQueueSize > 0
-            ? maxQueueSize : DEFAULT_MAX_QUEUE_SIZE;
-        this.tail = Promise.resolve();
-        this.depth = 0;
-        this.pending = [];
-        this.running = false;
-        // 计数仅用于性能基线观测，不参与调度决策。丢弃后不可恢复，resetStats() 显式清零。
-        this.stats = createQueueStats();
-    }
-
-    resetStats() {
-        this.stats = createQueueStats();
-    }
-
-    push(task, deadlineMs, signal) {
-        if (signal?.aborted) {
-            countRejection(this.stats, 'ADB_ABORTED');
-            return Promise.reject(new AdbError('ADB_ABORTED', 'adb 调用已取消。'));
-        }
-        if (deadlineMs !== undefined && Date.now() >= deadlineMs) {
-            countRejection(this.stats, 'ADB_TIMEOUT');
-            return Promise.reject(new AdbError('ADB_TIMEOUT', 'adb 调用在队列中已超时。'));
-        }
-        if (this.depth >= this.maxQueueSize) {
-            countRejection(this.stats, 'ADB_QUEUE_FULL');
-            return Promise.reject(new AdbError('ADB_QUEUE_FULL', 'adb 调用队列已满。'));
-        }
-        if (this.depth === 0) this.tail = new Promise((resolve) => { this.resolveIdle = resolve; });
-        this.depth += 1;
-        if (this.depth > this.stats.peakDepth) this.stats.peakDepth = this.depth;
-        return new Promise((resolve, reject) => {
-            const entry = { task, resolve, reject, deadlineMs, signal };
-            const cancel = (error) => {
-                const index = this.pending.indexOf(entry);
-                if (index < 0) return;
-                this.pending.splice(index, 1);
-                this.finish(entry, error);
-            };
-            entry.onAbort = () => cancel(new AdbError('ADB_ABORTED', 'adb 调用已取消。'));
-            this.pending.push(entry);
-            signal?.addEventListener('abort', entry.onAbort, { once: true });
-            if (deadlineMs !== undefined) {
-                entry.timer = setTimeout(() => cancel(new AdbError('ADB_TIMEOUT', 'adb 调用在队列中已超时。')),
-                    Math.min(2147483647, Math.max(0, deadlineMs - Date.now())));
-            }
-            Promise.resolve().then(() => this.drain());
-        });
-    }
-
-    cleanup(entry) {
-        clearTimeout(entry.timer);
-        entry.signal?.removeEventListener('abort', entry.onAbort);
-    }
-
-    finish(entry, error, result, failed = true) {
-        this.cleanup(entry);
-        this.depth -= 1;
-        if (failed) {
-            this.stats.failed += 1;
-            const code = error?.code || 'UNKNOWN';
-            // 队列拒绝与执行失败分开计数：前者说明入口压力，后者说明设备/命令问题。
-            if (REJECTION_CODES.has(code)) countRejection(this.stats, code);
-            this.stats.failedByCode[code] = (this.stats.failedByCode[code] || 0) + 1;
-            entry.reject(error);
-        } else {
-            this.stats.completed += 1;
-            entry.resolve(result);
-        }
-        if (this.depth === 0) this.resolveIdle();
-    }
-
-    drain() {
-        if (this.running || !this.pending.length) return;
-        const entry = this.pending.shift();
-        this.running = true;
-        this.cleanup(entry);
-        const complete = (error, result, failed = true) => {
-            this.running = false;
-            this.finish(entry, error, result, failed);
-            this.drain();
-        };
-        try {
-            if (entry.signal?.aborted) throw new AdbError('ADB_ABORTED', 'adb 调用已取消。');
-            if (entry.deadlineMs !== undefined && Date.now() >= entry.deadlineMs) {
-                throw new AdbError('ADB_TIMEOUT', 'adb 调用在队列中已超时。');
-            }
-            Promise.resolve(entry.task()).then((result) => complete(null, result, false), (error) => complete(error));
-        } catch (error) {
-            complete(error);
-        }
-    }
+function schedulingKey(args, request) {
+    if (!request.noSelector) return request.serial || null;
+    const [command, option] = args;
+    const hostRead = (command === 'devices' && (args.length === 1 || (args.length === 2 && option === '-l')))
+        || (command === 'version' && args.length === 1)
+        || (command === 'mdns' && args.length === 2 && ['services', 'check'].includes(option));
+    return hostRead ? HOST_READ_KEY : null;
 }
 
 class AdbClient {
@@ -158,7 +42,7 @@ class AdbClient {
         this.timeoutMs = Number.isFinite(options.timeoutMs) && options.timeoutMs > 0
             ? options.timeoutMs
             : DEFAULT_TIMEOUT_MS;
-        this.queue = new SerialQueue(options.maxQueueSize);
+        this.queue = new AdbCommandQueue(options.maxQueueSize);
         this.context = new AsyncLocalStorage();
         this.lastError = null;
         // 分辨率在一次会话里不会变（除非手动改过）。按 serial 缓存，避免每次感知
@@ -169,10 +53,10 @@ class AdbClient {
     /**
      * 队列观测快照。性能基线用，不含任何调度副作用。
      *
-     * 计数语义（刻意不重叠，避免同一个失败被数两次）：
-     *   completed / failed —— 只统计真正入队并被执行的任务。
-     *   rejected            —— 在 push 入口即被拒的任务（满/超时/取消），根本不入队。
-     *   failedByCode        —— 入队后失败的分类，入口拒绝不在此列。
+     * 计数语义：入口拒绝不计 failed；已接纳后的取消/超时保留既有双维度统计。
+     *   completed / failed —— 已接纳任务的结局，含排队期取消/超时。
+     *   rejected            —— 容量拒绝及取消/超时，含已接纳后排队失效的任务。
+     *   failedByCode        —— 已接纳任务失败的分类，入口拒绝不在此列。
      * 所以「队列被挤爆」表现为 rejected.ADB_QUEUE_FULL 上涨而 failed 不变；
      * 「设备/命令有问题」表现为 failed 与 failedByCode 上涨。两者混在一起
      * 就无法从基线判断到底是入口压力还是设备故障。
@@ -274,6 +158,7 @@ class AdbClient {
     }
 
     enqueue(args, options = {}) {
+        const argv = [...args];
         const context = this.context.getStore() || {};
         const timeoutMs = Number.isFinite(options.timeoutMs) && options.timeoutMs > 0
             ? options.timeoutMs : this.timeoutMs;
@@ -281,7 +166,7 @@ class AdbClient {
         const signals = [...new Set([context.signal, options.signal].filter(Boolean))];
         const request = {
             ...options,
-            serial: options.serial ?? this.serial,
+            serial: String(options.serial ?? this.serial ?? '').trim(),
             deadlineMs: Math.min(...deadlines),
             signal: signals.length > 1 ? AbortSignal.any(signals) : signals[0],
         };
@@ -289,8 +174,8 @@ class AdbClient {
             const remaining = request.deadlineMs - Date.now();
             if (remaining <= 0) throw new AdbError('ADB_TIMEOUT', 'adb 调用在队列中已超时。');
             request.timeoutMs = Math.max(1, Math.ceil(Math.min(timeoutMs, remaining)));
-            return this.runRaw(args, request);
-        }, request.deadlineMs, request.signal);
+            return this.runRaw(argv, request);
+        }, request.deadlineMs, request.signal, schedulingKey(argv, request));
     }
 
     async runText(args, options = {}) {
@@ -311,7 +196,7 @@ class AdbClient {
     }
 
     async version() {
-        const text = await this.runText(['version'], { timeoutMs: 8000 });
+        const text = await this.runText(['version'], { timeoutMs: 8000, noSelector: true });
         return text.trim();
     }
 
@@ -377,13 +262,28 @@ class AdbClient {
     /**
      * 一次往返取齐感知层需要的三件事：前台焦点、屏幕尺寸、电源态。
      *
-     * 为什么不能靠 Promise.all：所有调用都过 SerialQueue（同一设备并发打 adb 会
+     * 为什么不能靠 Promise.all：同设备调用共用调度 key（并发打 adb 会
      * 互相挤占、随机 "error: closed"），所以「并发」三个方法实际是严格串行：
      * 三次进程启动 + 三次往返。实测无线连接下 275-327ms，合并后 129-219ms。
      *
      * 用一条 shell 一次性跑完，靠分隔符分段；解析失败不影响其它字段（各自独立容错）。
      */
-    async probeScreen(serial) {
+    async probeScreen(serial, options = {}) {
+        if (options.fresh === true) {
+            // No fallback or cache: cancellation, timeout and transport failures must propagate.
+            // These dumps are sequential observations, not an atomic screenshot transaction.
+            const command = 'dumpsys window displays || exit $?; '
+                + 'echo @@VCP_POLICY@@; dumpsys window policy || exit $?; '
+                + 'echo @@VCP_POWER@@; dumpsys power || exit $?; echo @@VCP_END@@';
+            const text = await this.runText(['shell', command], {
+                serial,
+                timeoutMs: options.timeoutMs ?? 20000,
+                maxBuffer: 8 * 1024 * 1024,
+                signal: options.signal,
+                deadlineMs: options.deadlineMs,
+            });
+            return parseFreshScreenProbe(text);
+        }
         const MARK_SIZE = '@@VCP_SIZE@@';
         const MARK_POWER = '@@VCP_POWER@@';
         const cacheKey = String(serial ?? this.serial ?? '');
@@ -479,6 +379,89 @@ function parseFocusFromDumpsys(text) {
 }
 
 /**
+ * Fresh coordinate evidence uses only explicitly scoped current state. Format reference:
+ * AOSP android-14.0.0_r1 DisplayContent.dump (cur = logicalWidth/Height),
+ * DisplayRotation.dump (mRotation), KeyguardStateMonitor.dump (showing/input restriction).
+ * Unknown OEM formats and multiple displays are deliberately unsupported, not guessed.
+ */
+function parseFreshScreenProbe(text) {
+    // dumpsys can print its own timeout while the surrounding shell still exits zero.
+    if (/\bDUMP TIMEOUT\b/.test(String(text ?? ''))) {
+        throw new AdbError('ADB_TIMEOUT', '屏幕上下文 dumpsys 采样超时。');
+    }
+    const result = {
+        focus: { window: null, component: null, package: null, raw: '' },
+        size: null, rotation: null, displayId: null,
+        wakefulness: null, awake: null, keyguard: { showing: null, inputRestricted: null },
+    };
+    const sections = String(text ?? '').replace(/\r/g, '').split(
+        /^@@VCP_(POLICY|POWER|END)@@[ \t]*$/m,
+    );
+    if (sections.length !== 7 || sections[1] !== 'POLICY'
+        || sections[3] !== 'POWER' || sections[5] !== 'END' || sections[6].trim()) return result;
+    const [windowText, , policyText, , powerText] = sections;
+    const wake = [...powerText.matchAll(/^[ \t]*mWakefulness=([^\n]*)$/gm)];
+    if (wake.length === 1 && /^(Awake|Asleep|Dozing|Dreaming)$/.test(wake[0][1].trim())) {
+        result.wakefulness = wake[0][1].trim();
+        result.awake = result.wakefulness === 'Awake';
+    }
+    const monitors = dumpSections(policyText, 'KeyguardStateMonitor');
+    if (monitors.length === 1) {
+        const showing = dumpBoolean(monitors[0], 'mIsShowing');
+        const restricted = dumpBoolean(monitors[0], 'mInputRestricted');
+        result.keyguard = { showing, inputRestricted: restricted };
+    }
+    const displays = [...windowText.matchAll(/^[ \t]*Display:[^\n]*$/gm)];
+    if (displays.length !== 1 || !/^[ \t]*Display: mDisplayId=0(?: \(organized\))?[ \t]*$/.test(displays[0][0])) return result;
+    result.displayId = 0;
+    const displayText = windowText.slice(displays[0].index);
+    const focusLines = displayText.split('\n').filter((line) => /^[ \t]*mCurrentFocus=/.test(line));
+    if (focusLines.length === 1 && /^[ \t]*mCurrentFocus=Window\{\S+[ \t]+(?:u\d+[ \t]+)?[^ \t/{}]+\/[^ \t{}]+[^}]*\}[ \t]*$/.test(focusLines[0])) {
+        result.focus = parseFocusFromDumpsys(focusLines[0]);
+    }
+    // cur, unlike init/base/wm size or app bounds, is the current logical display size.
+    const sizes = [...displayText.matchAll(/^[ \t]*(?:init=[^\n]*?[ \t]+)?cur=(\d+)x(\d+)[ \t]+app=/gm)];
+    if (sizes.length === 1) {
+        const width = Number(sizes[0][1]);
+        const height = Number(sizes[0][2]);
+        if (Number.isSafeInteger(width) && width > 0 && Number.isSafeInteger(height) && height > 0) {
+            result.size = { width, height };
+        }
+    }
+    const rotations = dumpSections(displayText, 'DisplayRotation');
+    if (rotations.length === 1) {
+        const values = [...rotations[0].matchAll(/^[ \t]*mRotation=([^ \t\n]+)(?:[ \t]|$)/gm)];
+        if (values.length === 1 && /^[0-3]$/.test(values[0][1])) result.rotation = Number(values[0][1]);
+    }
+    return result;
+}
+
+// Preserve indentation boundaries: similarly named fields in other dump objects are not evidence.
+function dumpSections(text, name) {
+    const lines = text.split('\n');
+    const sections = [];
+    for (let i = 0; i < lines.length; i += 1) {
+        if (lines[i].trim() !== name) continue;
+        const indent = lines[i].search(/\S/);
+        const body = [];
+        for (let j = i + 1; j < lines.length; j += 1) {
+            if (lines[j].trim() && lines[j].search(/\S/) <= indent) break;
+            body.push(lines[j]);
+        }
+        sections.push(body.join('\n'));
+    }
+    return sections;
+}
+
+function dumpBoolean(text, name) {
+    const matches = text.split('\n').map((line) => line.trim()).filter((line) => line.startsWith(`${name}=`));
+    if (matches.length !== 1) return null;
+    if (matches[0] === `${name}=true`) return true;
+    if (matches[0] === `${name}=false`) return false;
+    return null;
+}
+
+/**
  * 解析 `wm size` 输出。
  * 优先取 Override size：用户手动设过分辨率时它才存在，且才是实际渲染尺寸。
  */
@@ -571,7 +554,8 @@ module.exports = {
     DEFAULT_MAX_QUEUE_SIZE,
     DEFAULT_TIMEOUT_MS,
     MAX_TEXT_BYTES,
-    SerialQueue,
+    AdbCommandQueue,
+    SerialQueue: AdbCommandQueue,
     normalizeAdbPath,
     parseDevices,
     parseMdnsServices,
