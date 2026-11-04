@@ -34,38 +34,47 @@ function clampInt(value, fallback, min, max) {
     return Math.min(max, Math.max(min, parsed));
 }
 
-/**
- * 裁剪区域收敛到屏幕内。接受 {left,top,width,height} 或 {x,y,width,height}。
- * 越界一律夹紧 —— 宁可裁小一点，也不要让 sharp 直接抛错。
- */
+/** 整数设备像素矩形与屏幕取交集；仅缺省字段使用默认值，坏输入不回退。 */
 function normalizeRegion(region, screen) {
-    const sw = screen && screen.width > 0 ? Math.round(screen.width) : 0;
-    const sh = screen && screen.height > 0 ? Math.round(screen.height) : 0;
-    if (!sw || !sh) throw new Error('缺少屏幕尺寸，无法计算裁剪区域。');
-
-    if (!region) return { left: 0, top: 0, width: sw, height: sh };
-
-    // 显式给了非正尺寸就是调用方的错，不能默默夹成 1 —— 那会生成一张
-    // 1×1 的图，模型对着它一无所措，排查还得多绕一圈。
-    if (region.width !== undefined && !(Number(region.width) > 0)) {
-        throw new Error(`裁剪区域无效：width=${region.width}`);
+    const sw = screen?.width;
+    const sh = screen?.height;
+    if (!Number.isSafeInteger(sw) || sw <= 0 || !Number.isSafeInteger(sh) || sh <= 0) {
+        throw new Error('缺少有效屏幕尺寸，无法计算裁剪区域。');
     }
-    if (region.height !== undefined && !(Number(region.height) > 0)) {
-        throw new Error(`裁剪区域无效：height=${region.height}`);
-    }
+    if (region == null) return { left: 0, top: 0, width: sw, height: sh };
+    if (typeof region !== 'object' || Array.isArray(region)) throw new Error('裁剪区域无效：必须为矩形对象。');
 
-    const rawLeft = clampInt(region.left ?? region.x, 0, -Infinity, Infinity);
-    const rawTop = clampInt(region.top ?? region.y, 0, -Infinity, Infinity);
-    const right = clampInt(rawLeft + clampInt(region.width, sw - rawLeft, 1, Infinity), sw, 0, sw);
-    const bottom = clampInt(rawTop + clampInt(region.height, sh - rawTop, 1, Infinity), sh, 0, sh);
-    const left = clampInt(rawLeft, 0, 0, sw);
-    const top = clampInt(rawTop, 0, 0, sh);
-    const width = right - left;
-    const height = bottom - top;
-    if (width <= 0 || height <= 0) {
+    const pixel = (name, value, fallback) => {
+        if (value === undefined) return fallback;
+        const number = typeof value === 'string' && value.trim() ? Number(value) : value;
+        if (!Number.isSafeInteger(number)) throw new Error(`裁剪区域无效：${name}=${String(value)}`);
+        return number;
+    };
+    const rawLeft = pixel('left', region.left ?? region.x, 0);
+    const rawTop = pixel('top', region.top ?? region.y, 0);
+    const rawWidth = pixel('width', region.width, sw - rawLeft);
+    const rawHeight = pixel('height', region.height, sh - rawTop);
+    const left = Math.max(0, rawLeft);
+    const top = Math.max(0, rawTop);
+    const width = Math.min(sw, rawLeft + rawWidth) - left;
+    const height = Math.min(sh, rawTop + rawHeight) - top;
+    if (rawWidth <= 0 || rawHeight <= 0 || width <= 0 || height <= 0) {
         throw new Error(`裁剪区域无效：${JSON.stringify(region)}（屏幕 ${sw}×${sh}）`);
     }
     return { left, top, width, height };
+}
+
+function elementRegion({ bounds, visibleBounds, screen, padding = 0 }) {
+    if (!Number.isSafeInteger(padding) || padding < 0 || padding > 128) throw new Error('padding 必须为0–128设备像素整数。');
+    const valid = box => box && ['left', 'top', 'right', 'bottom'].every(key => Number.isSafeInteger(box[key]))
+        && box.right > box.left && box.bottom > box.top;
+    if (!valid(bounds) || !valid(visibleBounds)) throw new Error('元素没有有效可见矩形。');
+    const region = normalizeRegion({ left: visibleBounds.left - padding, top: visibleBounds.top - padding,
+        width: visibleBounds.right - visibleBounds.left + padding * 2,
+        height: visibleBounds.bottom - visibleBounds.top + padding * 2 }, screen);
+    return { elementBounds: { ...bounds }, visibleBounds: { ...visibleBounds }, padding, region,
+        center: { x: Math.round((bounds.left + bounds.right) / 2), y: Math.round((bounds.top + bounds.bottom) / 2) },
+        occlusion: 'unknown', warnings: ['OCCLUSION_NOT_PROVEN'] };
 }
 
 /**
@@ -348,6 +357,8 @@ async function buildVisionFrame(options = {}) {
         mime: format === 'png' ? 'image/png' : 'image/jpeg',
         width: imageWidth,
         height: imageHeight,
+        sourceWidth: frameW,
+        sourceHeight: frameH,
         byteLength: buffer.length,
         grid: wantGrid,
         mapping,
@@ -369,5 +380,6 @@ module.exports = {
     devicePointToImage,
     imagePointToDevice,
     normalizeRegion,
+    elementRegion,
     pickStep,
 };

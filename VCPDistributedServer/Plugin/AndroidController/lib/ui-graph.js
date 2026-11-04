@@ -22,6 +22,7 @@
  */
 
 const crypto = require('node:crypto');
+const { parseSelector, validateSelector, evaluateSelector, findControls, resolveSelector, MATCH_LABEL } = require('./selector');
 
 const {
     decodeXmlEntities: decodeEntities,
@@ -31,6 +32,10 @@ const {
     parseUiAutomatorTree,
     parseUiAutomatorXml,
     unionPixelBounds,
+    SYSTEM_PACKAGES,
+    deriveUiAutomatorRole,
+    deriveWebRole,
+    FULL_LABEL,
 } = require('./argent-uiautomator');
 
 const DEFAULT_LIMIT = 60;
@@ -326,6 +331,58 @@ function makeSignature(pkg, controls) {
 }
 
 /**
+ * The port forwards attrs.package -> UiNode.pkg -> DescribeNode.package unchanged.
+ * A boxed package on a private input copy carries exact provenance through flattening
+ * and wrapper folding; public controls immediately normalize it back to a string.
+ * System packages remain primitive when filtering, preserving Set-based chrome checks.
+ * Explicitly hidden nodes lose their own semantics only in this private copy; children
+ * remain traversable. Original XML attributes and ancestor identity remain unchanged.
+ */
+function provenanceInput(rawRoot, includeSystem) {
+    const provenance = new WeakMap();
+    if (!rawRoot) return { root: null, provenance, scopes: [] };
+    const scopes = [];
+    const root = { tag: rawRoot.tag, attrs: { ...rawRoot.attrs }, children: [] };
+    const stack = [{ raw: rawRoot, copy: root, parent: null, inWebView: false }];
+    while (stack.length) {
+        const { raw, copy, parent, inWebView } = stack.pop();
+        Object.defineProperty(raw, 'parent', { value: parent });
+        const hidden = raw.attrs['visible-to-user'] === 'false' || raw.attrs.displayed === 'false';
+        if (hidden) {
+            for (const key of ['text', 'content-desc', 'resource-id', 'clickable', 'long-clickable',
+                'scrollable', 'checkable', 'checked', 'focusable', 'focused', 'selected', 'password']) delete copy.attrs[key];
+            copy.attrs.class = 'android.view.View';
+        }
+        const pkg = String(raw.attrs.package || '');
+        if (includeSystem || !SYSTEM_PACKAGES.has(pkg)) {
+            const token = new String(pkg);
+            provenance.set(token, raw);
+            copy.attrs.package = token;
+        }
+        const cls = String(raw.attrs.class || '');
+        const label = hidden ? '' : raw.attrs.password === 'true' ? PASSWORD_LABEL
+            : String(raw.attrs['content-desc'] || raw.attrs.text || '').trim();
+        if (raw.tag === 'node') {
+            const scope = {
+                index: scopes.length, id: String(raw.attrs['resource-id'] || ''), label,
+                cls: cls.replace(/^.*\./, ''),
+                role: roleKey(inWebView ? deriveWebRole(cls, raw.attrs, label, raw.children.length > 0)
+                    : deriveUiAutomatorRole(cls)),
+                bounds: parseBounds(raw.attrs.bounds),
+            };
+            Object.defineProperties(scope, { rawNode: { value: raw }, fullClass: { value: cls } });
+            scopes.push(scope);
+        }
+        copy.children = raw.children.map((child) => ({ tag: child.tag, attrs: { ...child.attrs }, children: [] }));
+        for (let i = raw.children.length - 1; i >= 0; i -= 1) {
+            stack.push({ raw: raw.children[i], copy: copy.children[i], parent: raw,
+                inWebView: inWebView || cls === 'android.webkit.WebView' || cls === 'android.webkit.WebViewChromium' });
+        }
+    }
+    return { root, provenance, scopes };
+}
+
+/**
  * @param {string} xml
  * @param {{screen?: {width:number,height:number}, limit?: number, textLength?: number,
  *          includeDisabled?: boolean, includeSystem?: boolean, includeOffscreen?: boolean,
@@ -349,12 +406,12 @@ function parseUiGraph(xml, options = {}) {
     };
 
     const hierarchy = extractHierarchy(xml);
-    // 原始树只解析一次，节点数 / 屏幕尺寸 / 越界范围都从它算。
-    // 整条链路只解析一次：扫描统计与 port 剪枝共用同一棵原始树。
+    // Parse XML once; scan the original and prune a provenance-carrying private copy.
     const rawRoot = hierarchy ? parseUiAutomatorXml(hierarchy) : null;
     const rawScan = scanRawTree(rawRoot);
     stats.rawNodes = rawScan.nodes;
     if (options.includeSystem !== true) stats.droppedSystem = rawScan.systemNodes;
+    const source = provenanceInput(rawRoot, options.includeSystem === true);
 
     const screen = options.screen && Number.isFinite(options.screen.width) && options.screen.width > 0
         ? { width: Math.round(options.screen.width), height: Math.round(options.screen.height) }
@@ -373,7 +430,7 @@ function parseUiGraph(xml, options = {}) {
     if (rawRoot) {
         try {
             const tree = parseUiAutomatorTree(
-                rawRoot,
+                source.root,
                 pruneScreenW || 1,
                 pruneScreenH || 1,
                 { includeSystem: options.includeSystem === true },
@@ -400,10 +457,9 @@ function parseUiGraph(xml, options = {}) {
             stats.droppedSystem += 1;
             continue;
         }
-        if (!includeDisabled && node.disabled) {
-            stats.droppedDisabled += 1;
-            continue;
-        }
+        if (!includeDisabled && node.disabled) stats.droppedDisabled += 1;
+        const raw = source.provenance.get(node.package);
+        if (raw?.attrs['visible-to-user'] === 'false' || raw?.attrs.displayed === 'false') continue;
 
         const bounds = fromPixel(node.pixel);
         if (!includeOffscreen && screenArea) {
@@ -414,6 +470,7 @@ function parseUiGraph(xml, options = {}) {
         }
 
         const rawLabel = String(node.label ?? '');
+        const matchLabel = node.password ? PASSWORD_LABEL : meaningfulLabel(node[FULL_LABEL] ?? rawLabel, node.cls);
         const label = rawLabel === PASSWORD_LABEL ? PASSWORD_LABEL : meaningfulLabel(rawLabel, node.cls);
         if (rawLabel && !label) stats.droppedPlaceholder += 1;
 
@@ -434,6 +491,7 @@ function parseUiGraph(xml, options = {}) {
             node,
             level,
             label,
+            matchLabel,
             value,
             id: String(node.identifier ?? ''),
             cls: String(node.cls ?? '').replace(/^.*\./, ''),
@@ -459,14 +517,11 @@ function parseUiGraph(xml, options = {}) {
         stats.hiddenInScroll = sum;
     }
 
-    const total = flat.length;
-    const kept = flat.slice(0, limit);
-
-    const controls = kept.map((item, index) => {
+    const evidenceControls = flat.map((item) => {
         const point = clickPointOf(item, screen);
         const clipped = clipToScreen(item.bounds, screen);
-        return {
-            index,
+        const control = {
+            index: -1,
             level: item.level,
             selector: '',
             label: normalizeText(item.label, textLength),
@@ -487,25 +542,54 @@ function parseUiGraph(xml, options = {}) {
             enabled: item.enabled,
             inViewport: screenArea && item.bounds ? intersectArea(item.bounds, screenArea) > 0 : true,
         };
+        Object.defineProperties(control, {
+            [MATCH_LABEL]: { value: normalizeText(item.matchLabel, Infinity) },
+            rawNode: { value: source.provenance.get(item.node.package) || null },
+            fullClass: { value: String(item.node.cls || '') },
+        });
+        return control;
     });
+
+    const allControls = evidenceControls.filter(control => includeDisabled || control.enabled);
+    allControls.forEach((control, index) => { control.index = index; });
+    const total = allControls.length;
 
     // selector 唯一性：同 key 一律带序号，避免「裸 key」与「#1」并存。
     // Escape delimiters before appending an ordinal; literal Item#1 is not Item's first hit.
     const escapeKey = (key) => key.replace(/[%#]/g, (char) => char === '%' ? '%25' : '%23');
-    const keyOf = (c) => (c.id ? `id=${escapeKey(c.id)}` : `text=${escapeKey(c.label)}`);
+    const keysOf = (c) => [c.id ? `id=${escapeKey(c.id)}` : null, `text=${escapeKey(c[MATCH_LABEL])}`].filter(key => key !== null);
     const counts = new Map();
-    for (const c of controls) counts.set(keyOf(c), (counts.get(keyOf(c)) || 0) + 1);
+    for (const c of allControls) {
+        for (const key of keysOf(c)) counts.set(key, (counts.get(key) || 0) + 1);
+    }
     const seen = new Map();
-    for (const c of controls) {
-        const key = keyOf(c);
-        if (counts.get(key) > 1) {
-            const n = (seen.get(key) || 0) + 1;
-            seen.set(key, n);
-            c.selector = `${key}#${n}`;
-        } else {
-            c.selector = key;
+    for (const c of allControls) {
+        const keys = keysOf(c);
+        // Text matching includes controls whose preferred public selector uses an id.
+        for (const key of keys) seen.set(key, (seen.get(key) || 0) + 1);
+        const key = keys[0];
+        let candidate = key;
+        if (counts.get(key) > 1 || (!c.id && !c.label)) candidate = `${key}#${seen.get(key)}`;
+        // Apply the parser's decoded condition budget, not the escaped wire length.
+        // Unrepresentable identities remain snapshot-only; never invent a positional selector.
+        try {
+            const parsed = parseSelector(candidate);
+            c.selector = (parsed.id ?? parsed.text) === (c.id || c[MATCH_LABEL]) ? candidate : null;
+        } catch { c.selector = null; }
+    }
+    const controls = allControls.slice(0, limit);
+    const scopeByRaw = new Map(source.scopes.map((scope) => [scope.rawNode, scope]));
+    for (const control of evidenceControls) {
+        const scope = scopeByRaw.get(control.rawNode);
+        if (scope) {
+            scope.label = control.label;
+            scope.role = control.role;
+            Object.defineProperty(scope, MATCH_LABEL, { value: control[MATCH_LABEL] });
         }
     }
+    Object.defineProperties(controls, {
+        matchingControls: { value: allControls }, evidenceControls: { value: evidenceControls }, scopeControls: { value: source.scopes },
+    });
 
     const pkg = controls.find((c) => c.package)?.package || '';
 
@@ -555,6 +639,9 @@ function parseUiGraph(xml, options = {}) {
         canvas,
         stats,
     };
+    Object.defineProperties(graph, {
+        matchingControls: { value: allControls }, evidenceControls: { value: evidenceControls }, scopeControls: { value: source.scopes },
+    });
     if (options.rpcTarget === true) {
         // Retain unfiltered identity evidence without serializing raw field values.
         Object.defineProperty(graph, 'rawRoot', { value: rawRoot });
@@ -565,36 +652,6 @@ function parseUiGraph(xml, options = {}) {
 // ---------------------------------------------------------------------------
 // 寻址
 // ---------------------------------------------------------------------------
-
-/**
- * 稳定 selector：`id=<resource-id>[#n]` / `text=<label>[#n]`。
- * 跨帧重绑靠 key 在控件序列中的位次，与坐标无关。
- */
-function findControls(graphOrControls, query = {}) {
-    const controls = Array.isArray(graphOrControls) ? graphOrControls : graphOrControls?.controls || [];
-    return controls.filter((control) => {
-        if (query.id !== undefined && control.id !== query.id) return false;
-        if (query.text !== undefined && control.label !== query.text) return false;
-        if (query.role && control.role !== query.role) return false;
-        return true;
-    });
-}
-
-function resolveSelector(graphOrControls, selector) {
-    const rawText = String(selector ?? '').trim();
-    if (!rawText) return null;
-    const match = /^(id|text)=([\s\S]*?)(?:#(\d+))?$/.exec(rawText);
-    if (!match) return null;
-    const [, kind, encodedKey, ordinalRaw] = match;
-    const key = encodedKey.replace(/%25|%23/gi, (code) => code.toLowerCase() === '%25' ? '%' : '#');
-    const hits = findControls(graphOrControls, {
-        id: kind === 'id' ? key : undefined,
-        text: kind === 'text' ? key : undefined,
-    });
-    if (!hits.length) return null;
-    const ordinal = ordinalRaw ? Number.parseInt(ordinalRaw, 10) : 1;
-    return hits[ordinal - 1] || null;
-}
 
 function samePage(a, b) {
     if (!a || !b) return false;
@@ -645,7 +702,8 @@ function renderView(graph, options = {}) {
         const role = NOTEWORTHY_ROLES.has(control.role) ? ` <${control.role}>` : '';
         const value = control.value ? ` =${control.value}` : '';
         const label = control.label || '(无标签)';
-        return `${pad}[${control.index}] ${label}${value}${role} (${control.x},${control.y})${ident}${flags}`;
+        const addressing = control.selector === null ? '（仅限本次快照 index+snapshotId）' : '';
+        return `${pad}[${control.index}] ${label}${value}${role} (${control.x},${control.y})${ident}${flags}${addressing}`;
     });
 
     return `${note ? `${note}\n` : ''}${header}\n${lines.join('\n')}`;
@@ -672,6 +730,9 @@ module.exports = {
     parseAttributes,
     parseBounds,
     parseUiGraph,
+    parseSelector,
+    validateSelector,
+    evaluateSelector,
     renderView,
     resolveSelector,
     samePage,
