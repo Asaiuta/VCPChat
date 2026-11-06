@@ -24,6 +24,8 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const { randomBytes, timingSafeEqual } = require('crypto');
+const { attachTakeoverChannel } = require('./takeover-channel');
+const { validateScrcpyConfig, validateFitWidth, DEFAULTS: DISPLAY_DEFAULTS } = require('./display-preferences');
 
 const VIEWER_FILE = path.join(__dirname, 'viewer.html');
 const DEFAULT_PORT = 5977;
@@ -75,6 +77,7 @@ class StreamServer {
         this.frameHub = options.frameHub;
         // 可选：scrcpy H.264 通道。注入后 WS 优先走它（帧率高两个数量级）。
         this.scrcpyHub = options.scrcpyHub || null;
+        this.displayPreferences = options.displayPreferences || null;
         this.logger = options.logger || console;
         this.port = Number.isFinite(options.port) && options.port >= 0 ? options.port : DEFAULT_PORT;
         this.host = options.host || '127.0.0.1';
@@ -90,12 +93,17 @@ class StreamServer {
         this.unsubscribers = new Map();
         // 设备管理接口（配对/连接/断开）。由主服务注入，未注入时 API 返回 503。
         this.deviceApi = options.deviceApi || null;
+        this.takeoverApi = options.takeoverApi || null;
+        this.takeoverChannels = new Map();
         this.scrcpyStreamers = new Map();   // socket → 取消订阅函数
+        this.h264Decoders = new WeakMap(); // per-subscriber configuration and reference continuity
         this.lifecycle = 0;
         this.stopped = false;
         this.h264Paused = false;
         this.changingDevice = null;
         this.selectionBarrier = null;
+        this.configQueue = null;
+        this.configEpoch = 0;
         this.disposedSockets = new WeakSet();
         this.jpegOnlySockets = new WeakSet();
         this.maxBufferedBytes = Number.isFinite(options.maxBufferedBytes) && options.maxBufferedBytes > 0
@@ -148,7 +156,7 @@ class StreamServer {
             ...this.counters,
             h264Viewers: this.scrcpyStreamers.size,
             jpegViewers: this.unsubscribers.size,
-            bufferedBytes: [...this.scrcpyStreamers.keys(), ...this.unsubscribers.keys()]
+            bufferedBytes: [...new Set([...this.scrcpyStreamers.keys(), ...this.unsubscribers.keys()])]
                 .reduce((sum, socket) => sum + (socket.bufferedAmount || 0), 0),
             maxBufferedBytes: this.maxBufferedBytes,
             recovering: this.recovering,
@@ -366,7 +374,8 @@ class StreamServer {
     }
 
     /** 停旧流后选择设备；只为仍有 H264 意图的观众恢复新流。 */
-    changeDevice(select, { resume = true } = {}) {
+    changeDevice(select, { resume = true, configuration = false, onStreamError } = {}) {
+        if (!configuration) this.configEpoch += 1;
         const previous = this.selectionBarrier;
         this.h264Paused = !resume;
         const token = ++this.lifecycle;
@@ -396,6 +405,7 @@ class StreamServer {
                     if (token === this.lifecycle && !this.stopped && this.scrcpyStreamers.size > 0) this.startWatchdog();
                 } catch (error) {
                     if (token === this.lifecycle && !this.stopped && this.hasH264Viewers()) {
+                        onStreamError?.(error);
                         this.logger.warn?.(`[AndroidController] 设备已切换，H264 启动失败：${error.message}`);
                         this.fallbackAllToJpeg();
                         this.scheduleScrcpyProbe();
@@ -407,6 +417,70 @@ class StreamServer {
         this.changingDevice = operation;
         operation.finally(() => {
             if (this.changingDevice === operation) this.changingDevice = null;
+        }).catch(() => {});
+        return operation;
+    }
+
+    /** Validate before enqueueing; only configuration requests share this FIFO. */
+    configureScrcpy(body, { resetDisplay = false } = {}) {
+        const config = validateScrcpyConfig(body);
+        const epoch = this.configEpoch;
+        const previous = this.configQueue;
+        const operation = (async () => {
+            if (previous) await previous.catch(() => {});
+            // A device transaction may be restoring viewers after its selection
+            // barrier has cleared. Do not let a configuration supersede it.
+            while (this.changingDevice) await this.changingDevice;
+            if (this.idleScrcpyStop) await this.idleScrcpyStop;
+            const current = () => epoch === this.configEpoch && !this.stopped;
+            const cancelled = (saved = false, configured = false) => Object.assign(new Error('显示配置已被设备切换或停止取消'), {
+                code: 'SCRCPY_CONFIG_CANCELLED', saved, applied: configured ? 'next-start' : null,
+            });
+            if (!current()) throw cancelled();
+            const hub = this.scrcpyHub;
+            let saved = false, configured = false, streamError = null;
+            const persistAndConfigure = async () => {
+                const assertCurrent = () => { if (!current()) throw cancelled(); };
+                assertCurrent();
+                if (this.displayPreferences) {
+                    if (resetDisplay) await this.displayPreferences.reset({ assertCurrent });
+                    else await this.displayPreferences.updateScrcpy(config, { assertCurrent });
+                    saved = true;
+                }
+                // A committed preference remains the next-start value even when a
+                // device transaction supersedes the stream restart during disk I/O.
+                hub.configure(config);
+                configured = true;
+            };
+            if (!this.hasH264Viewers()) {
+                await persistAndConfigure();
+                if (!current()) throw cancelled(saved, configured);
+                return { ok: true, saved, status: hub.status(), applied: 'next-start' };
+            }
+            let saveError = null;
+            const changing = this.changeDevice(async () => {
+                try { await persistAndConfigure(); }
+                catch (error) {
+                    if (error.code === 'SCRCPY_CONFIG_CANCELLED') throw error;
+                    // Resume the previous configuration; an I/O failure must not
+                    // leave subscribed viewers attached to a permanently stopped hub.
+                    saveError = error;
+                }
+            }, { resume: !this.h264Paused, configuration: true, onStreamError: error => { streamError = error; } });
+            const token = this.lifecycle;
+            await changing;
+            if (!current() || token !== this.lifecycle) throw cancelled(saved, configured);
+            const status = hub.status();
+            if (saveError) throw saveError;
+            if (streamError) {
+                return { ok: false, saved, status, applied: 'fallback', error: streamError.message, code: streamError.code || null };
+            }
+            return { ok: true, saved, status, applied: this.scrcpyStreamers.size > 0 && status.state === 'streaming'
+                ? 'active-stream' : 'next-start' };
+        })();
+        this.configQueue = operation;
+        operation.finally(() => {
+            if (this.configQueue === operation) this.configQueue = null;
         }).catch(() => {});
         return operation;
     }
@@ -538,6 +612,10 @@ class StreamServer {
             width: now.width,
             height: now.height,
             maxSize: now.maxSize,
+            maxShortEdge: now.maxShortEdge ?? null,
+            sourceWidth: now.sourceWidth ?? null,
+            sourceHeight: now.sourceHeight ?? null,
+            effectiveMaxSize: now.effectiveMaxSize ?? null,
             maxFps: now.maxFps,
         }));
         this.sendText(socket, JSON.stringify({ type: 'status', scrcpy: now }));
@@ -569,6 +647,7 @@ class StreamServer {
         this.wss = new WebSocketServer({
             server: this.server,
             path: '/stream',
+            maxPayload: 16384,
             verifyClient: ({ req }, done) => {
                 const allowed = this.isSameOrigin(req) && this.isAllowedRequest(req) && this.hasSession(req);
                 done(allowed, 403, 'Forbidden');
@@ -619,7 +698,7 @@ class StreamServer {
             return;
         }
         const url = new URL(req.url || '/', this.requestOrigin(req));
-        const sensitive = ['/frame', '/status'].includes(url.pathname)
+        const sensitive = ['/frame', '/status', '/api/display/preferences'].includes(url.pathname)
             || (url.pathname.startsWith('/api/') && this.deviceApi);
         if (sensitive && !this.hasSession(req)) {
             sendJson(res, 403, { ok: false, error: 'Session required' });
@@ -639,6 +718,7 @@ class StreamServer {
 
         switch (url.pathname) {
             case '/':
+            case '/settings':
             case '/index.html': {
                 const html = loadViewer();
                 res.writeHead(200, {
@@ -660,7 +740,8 @@ class StreamServer {
                 sendJson(res, 200, {
                     ok: true,
                     scrcpy: this.scrcpyHub?.status?.() || null,
-                    display: this.frameHub?.status?.() || null,
+                    display: this.frameHub ? { ...this.frameHub.status(), serial: this.frameHub.adb?.serial || null } : null,
+                    takeover: this.takeoverApi?.status() || { available: false, state: 'idle' },
                 });
                 return;
             case '/frame':
@@ -680,12 +761,13 @@ class StreamServer {
      * 3) 不接受跨源请求或预检。会话只由 viewer 启动响应的 HttpOnly cookie 交付。
      */
     async handleApi(req, res, url) {
-        if (!this.deviceApi) {
+        if (!this.deviceApi && url.pathname !== '/api/display/preferences') {
             sendJson(res, 503, { ok: false, error: '设备接口未就绪' });
             return;
         }
 
         const isWrite = req.method === 'POST';
+        const manage = task => this.takeoverApi?.management ? this.takeoverApi.management(task) : task();
 
         // 预检请求一律拒绝：本服务不接受任何跨源写操作
         // （浏览器只有拿到 2xx 预检才会发真实 POST，这里直接断掉）
@@ -709,6 +791,11 @@ class StreamServer {
         try {
             if (req.method === 'GET') {
                 switch (url.pathname) {
+                    case '/api/display/preferences': {
+                        const preferences = await this.displayPreferences?.load();
+                        sendJson(res, 200, { ok: true, fitWidth: preferences?.fitWidth ?? false });
+                        return;
+                    }
                     case '/api/devices':
                         sendJson(res, 200, await this.deviceApi.listDevices());
                         return;
@@ -729,25 +816,52 @@ class StreamServer {
             }
 
             const body = await readJsonBody(req);
+            if (url.pathname === '/api/display/preferences') {
+                const preferences = validateFitWidth(body);
+                if (!this.displayPreferences) throw Object.assign(new Error('显示偏好存储未就绪'), {
+                    code: 'DISPLAY_PREFERENCES_UNAVAILABLE',
+                });
+                const session = this.sessionToken;
+                const assertCurrent = () => {
+                    if (this.stopped || session !== this.sessionToken) throw Object.assign(new Error('显示偏好保存已取消'), {
+                        code: 'DISPLAY_PREFERENCES_CANCELLED',
+                    });
+                };
+                const saved = await this.displayPreferences.updateFitWidth(preferences, { assertCurrent });
+                sendJson(res, 200, { ok: true, fitWidth: saved.fitWidth });
+                return;
+            }
+            this.takeoverApi?.assertIdle();
             switch (url.pathname) {
                 case '/api/discover':
                     sendJson(res, 200, await this.deviceApi.discover(body));
                     return;
                 case '/api/pair':
-                    sendJson(res, 200, await this.deviceApi.pair(body));
+                    sendJson(res, 200, await manage(() => this.deviceApi.pair(body)));
                     return;
                 case '/api/connect':
-                    sendJson(res, 200, await this.deviceApi.connect(body));
+                    sendJson(res, 200, await manage(() => this.deviceApi.connect(body)));
                     return;
                 case '/api/disconnect':
-                    sendJson(res, 200, await this.deviceApi.disconnect(body));
+                    sendJson(res, 200, await manage(() => this.deviceApi.disconnect(body)));
                     return;
                 case '/api/scrcpy/start':
                     if (!this.scrcpyHub) {
                         sendJson(res, 200, { ok: false, error: 'scrcpy 通道未启用' });
                         return;
                     }
-                    await this.startScrcpy();
+                    if (this.h264Paused) {
+                        let streamError = null;
+                        const restarting = this.changeDevice(() => {}, { resume: true,
+                            onStreamError: error => { streamError = error; } });
+                        const token = this.lifecycle;
+                        await restarting;
+                        if (token !== this.lifecycle || this.stopped) throw new Error('scrcpy 启动已取消');
+                        if (streamError) throw streamError;
+                        if (!this.hasH264Viewers()) await this.startScrcpy();
+                    } else {
+                        await this.startScrcpy();
+                    }
                     sendJson(res, 200, { ok: true, status: this.scrcpyHub.status() });
                     return;
                 case '/api/scrcpy/stop':
@@ -755,7 +869,7 @@ class StreamServer {
                         sendJson(res, 200, { ok: false, error: 'scrcpy 通道未启用' });
                         return;
                     }
-                    await this.scrcpyHub.stop();
+                    await this.changeDevice(() => {}, { resume: false });
                     sendJson(res, 200, { ok: true, status: this.scrcpyHub.status() });
                     return;
                 case '/api/scrcpy/config':
@@ -763,13 +877,18 @@ class StreamServer {
                         sendJson(res, 200, { ok: false, error: 'scrcpy 通道未启用' });
                         return;
                     }
-                    this.scrcpyHub.configure({
-                        maxSize: body.maxSize,
-                        bitRate: body.bitRate,
-                        maxFps: body.maxFps,
-                    });
-                    sendJson(res, 200, { ok: true, status: this.scrcpyHub.status() });
+                    sendJson(res, 200, await this.configureScrcpy(body));
                     return;
+                case '/api/display/reset': {
+                    if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length) {
+                        throw new Error('恢复默认显示设置不接受额外参数。');
+                    }
+                    if (!this.scrcpyHub || !this.displayPreferences) throw new Error('显示设置尚未就绪。');
+                    const { fitWidth, ...config } = DISPLAY_DEFAULTS;
+                    const result = await this.configureScrcpy(config, { resetDisplay: true });
+                    sendJson(res, 200, { ...result, ...(result.saved ? { fitWidth } : {}) });
+                    return;
+                }
                 default:
                     sendJson(res, 404, { ok: false, error: 'Unknown API' });
             }
@@ -779,6 +898,13 @@ class StreamServer {
                 ok: false,
                 error: error.message || '操作失败',
                 code: error.code || null,
+                ...(['/api/scrcpy/config', '/api/display/reset'].includes(url.pathname) ? {
+                    status: this.scrcpyHub?.status() || null,
+                    saved: error.saved === true,
+                    applied: error.applied ?? null,
+                    ...(url.pathname === '/api/display/reset' && error.saved === true
+                        ? { fitWidth: this.displayPreferences.snapshot().fitWidth } : {}),
+                } : {}),
             });
         }
     }
@@ -859,6 +985,13 @@ class StreamServer {
             return;
         }
 
+        this.takeoverChannels.set(socket, attachTakeoverChannel({ socket, api: this.takeoverApi,
+            send: text => {
+                if (socket.readyState !== 1 || this.disposedSockets.has(socket)
+                    || (socket.bufferedAmount || 0) + Buffer.byteLength(text) > this.maxBufferedBytes) return false;
+                try { socket.send(text); return true; } catch { return false; }
+            } }));
+
         // 优先尝试 scrcpy 通道；失败则降级到 JPEG 采集。
         this.attachScrcpy(socket)
             .then((attached) => {
@@ -887,9 +1020,8 @@ class StreamServer {
                 this.attachFrames(socket);
             } else if (payload?.type === 'request-keyframe') {
                 if (!this.scrcpyStreamers.has(socket)) return;
-                // 页面解码器重同步后需要 SPS/PPS + IDR。
-                // scrcpy 用 control=false 启动，没法按需请求 IDR，
-                // 所以这里先补发缓存的 config/keyframe；没有缓存才重启流。
+                // Replay current configuration, then wait for a fresh IDR if any
+                // delta has already followed the cached keyframe.
                 const replayed = this.replayInit(socket);
                 if (!replayed) {
                     this.handleScrcpyLoss('客户端请求重同步').catch(() => {});
@@ -935,6 +1067,9 @@ class StreamServer {
         if (token !== this.lifecycle || !hub || !this.canAttachScrcpy(socket)) return false;
         if (this.scrcpyStreamers.has(socket)) return true;
 
+        clearTimeout(this.h264Decoders.get(socket)?.timer);
+        this.h264Decoders.set(socket, { configured: false, waiting: true, seq: null });
+
         // 先订阅再启流，避免漏掉开头那个 config 包（SPS/PPS）
         const unsubscribe = hub.subscribe((packet) => {
             if (packet.type === 'closed') {
@@ -978,9 +1113,7 @@ class StreamServer {
         }
         this.sendScrcpyReady(socket);
 
-        // 关键一步：补发 session / config / 最近关键帧。
-        // SPS/PPS 只在流启动那一刻发一次，之后连上的客户端收不到就永远
-        // 停在「等待 SPS/PPS…」，画面冻结在最后一帧。
+        // Replay configuration; a stale IDR must never jump to current deltas.
         this.replayInit(socket);
 
         if (token !== this.lifecycle || this.scrcpyStreamers.get(socket) !== unsubscribe || !this.canAttachScrcpy(socket)) return false;
@@ -991,7 +1124,13 @@ class StreamServer {
     /** 把初始化所需的缓存包补发给某个 socket（顺序 session → config → keyframe） */
     replayInit(socket) {
         const hub = this.scrcpyHub;
-        if (!hub || !socket) return 0;
+        if (!hub || !this.canAttachScrcpy(socket)) return 0;
+        const wasPreviewing = this.h264Decoders.get(socket)?.preview;
+        this.unsubscribers.get(socket)?.();
+        this.unsubscribers.delete(socket);
+        clearTimeout(this.h264Decoders.get(socket)?.timer);
+        this.h264Decoders.set(socket, { configured: false, waiting: true, seq: null });
+        if (wasPreviewing) this.sendScrcpyReady(socket);
         if (typeof hub.replayInitTo === 'function') {
             return hub.replayInitTo((packet) => this.sendScrcpyPacket(socket, packet));
         }
@@ -999,6 +1138,7 @@ class StreamServer {
         let sent = 0;
         for (const packet of [hub.lastSession, hub.lastConfig, hub.lastKeyFrame]) {
             if (!packet) continue;
+            if (packet.type === 'frame' && packet.seq !== hub.seq) continue;
             this.sendScrcpyPacket(socket, packet);
             sent += 1;
         }
@@ -1058,10 +1198,11 @@ class StreamServer {
     }
 
     /** JPEG 回退路径 */
-    attachFrames(socket) {
+    attachFrames(socket, { keepScrcpy = false } = {}) {
         if (this.stopped || !socket || socket.readyState !== 1 || this.disposedSockets.has(socket)) return;
         const stopScrcpy = this.scrcpyStreamers.get(socket);
-        if (stopScrcpy) {
+        if (!keepScrcpy) clearTimeout(this.h264Decoders.get(socket)?.timer);
+        if (stopScrcpy && !keepScrcpy) {
             this.scrcpyStreamers.delete(socket);
             stopScrcpy();
         }
@@ -1085,6 +1226,10 @@ class StreamServer {
     disposeSocket(socket) {
         if (this.disposedSockets.has(socket)) return;
         this.disposedSockets.add(socket);
+        clearTimeout(this.h264Decoders.get(socket)?.timer);
+        this.h264Decoders.delete(socket);
+        this.takeoverChannels.get(socket)?.();
+        this.takeoverChannels.delete(socket);
         const unsubscribe = this.unsubscribers.get(socket);
         if (unsubscribe) {
             unsubscribe();
@@ -1129,8 +1274,56 @@ class StreamServer {
         try { socket.send(text); } catch { this.disposeSocket(socket); }
     }
 
+    waitForKeyframe(socket, decoder) {
+        if (decoder.timer || decoder.preview || !this.scrcpyStreamers.has(socket)) return;
+        decoder.timer = setTimeout(() => {
+            decoder.timer = null;
+            if (this.h264Decoders.get(socket) !== decoder || !decoder.waiting
+                || !this.canAttachScrcpy(socket) || !this.scrcpyStreamers.has(socket)) return;
+            // A static screen may never produce a new IDR. Keep the video
+            // subscription, but show JPEG until a complete reference chain starts.
+            decoder.preview = true;
+            this.sendText(socket, JSON.stringify({ type: 'scrcpy-fallback', reason: '等待新关键帧' }));
+            this.attachFrames(socket, { keepScrcpy: true });
+        }, this.firstFrameTimeoutMs);
+        decoder.timer.unref?.();
+    }
+
     sendScrcpyPacket(socket, packet) {
         if (!this.canAttachScrcpy(socket)) return;
+        if (packet.type !== 'session' && !packet.data?.length) return;
+        let decoder = this.h264Decoders.get(socket);
+        if (!decoder) {
+            decoder = { configured: false, waiting: true, seq: null };
+            this.h264Decoders.set(socket, decoder);
+        }
+        if (packet.type === 'session') {
+            decoder.configured = false; decoder.waiting = true; decoder.seq = null;
+            this.waitForKeyframe(socket, decoder);
+        } else if (packet.type === 'config') {
+            decoder.configured = true; decoder.waiting = true; decoder.seq = null;
+            this.waitForKeyframe(socket, decoder);
+        } else if (packet.type === 'frame') {
+            if (!decoder.configured) return;
+            if (!packet.key && (decoder.waiting || packet.seq !== decoder.seq + 1)) {
+                decoder.waiting = true;
+                this.waitForKeyframe(socket, decoder);
+                return;
+            }
+            if (decoder.preview) {
+                this.unsubscribers.get(socket)?.();
+                this.unsubscribers.delete(socket);
+                this.sendScrcpyReady(socket);
+                // JPEG fallback closed the viewer decoder. Reconfigure before IDR.
+                for (const header of [this.scrcpyHub?.lastSession, this.scrcpyHub?.lastConfig]) {
+                    if (header) this.sendScrcpyPacket(socket, header);
+                }
+                if (!this.canAttachScrcpy(socket)) return;
+                decoder.preview = false;
+            }
+            clearTimeout(decoder.timer); decoder.timer = null;
+            decoder.waiting = false; decoder.seq = packet.seq;
+        }
         let data = packet.data;
         if (packet.type === 'session') {
             data = Buffer.alloc(12);
@@ -1172,6 +1365,7 @@ class StreamServer {
     stop() {
         if (this.stopPromise) return this.stopPromise;
         this.stopped = true;
+        this.configEpoch += 1;
         this.lifecycle += 1;
         this.stopPromise = (async () => {
             if (this.startPromise) await this.startPromise.catch(() => {});
@@ -1185,8 +1379,12 @@ class StreamServer {
         this.lifecycle += 1;
         this.cancelScrcpyProbe();
         this.stopWatchdog();
+        await this.takeoverApi?.stop();
+        for (const close of this.takeoverChannels.values()) close();
+        this.takeoverChannels.clear();
         for (const socket of [...this.unsubscribers.keys()]) this.disposeSocket(socket);
         for (const socket of [...this.scrcpyStreamers.keys()]) this.disposeSocket(socket);
+        await this.displayPreferences?.flush?.();
 
         // 关掉设备端的编码器，不然它会一直占着 SurfaceFlinger
         if (this.scrcpyHub) {
@@ -1232,6 +1430,9 @@ class StreamServer {
         return this.actualPort ? `http://${this.host}:${this.actualPort}` : null;
     }
 }
+
+
+
 
 
 

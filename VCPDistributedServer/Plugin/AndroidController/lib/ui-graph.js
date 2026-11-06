@@ -44,6 +44,17 @@ const PASSWORD_LABEL = '[password]';
 const SIGNATURE_SAMPLE = 40;
 const LABEL_SEPARATOR = ' / ';
 
+const PRESENTATION_SOURCE = Symbol('presentationSource');
+const PRESENTATION_OPTIONS = Symbol('presentationOptions');
+
+/** Original decoded XML fields, never inherited from a folded wrapper or aggregate. */
+function rawSources(raw) {
+    const attrs = raw?.attrs || {};
+    if (attrs.password === 'true' || attrs['visible-to-user'] === 'false' || attrs.displayed === 'false') {
+        return { text: '', desc: '' };
+    }
+    return { text: String(attrs.text ?? ''), desc: String(attrs['content-desc'] ?? '') };
+}
 /** 通用图标词：与控件类名同源的占位文本，对模型零信息量。 */
 const PLACEHOLDER_LABEL = new Set([
     'image', 'img', 'icon', 'button', 'btn', 'view', 'item', 'picture', 'photo',
@@ -324,7 +335,7 @@ function makeSignature(pkg, controls) {
     const payload = [
         pkg || '',
         ...controls.slice(0, SIGNATURE_SAMPLE).map((c) => JSON.stringify([
-            c.cls, c.id, c.label, c.value || '', c.flags || [],
+            c.cls, c.id, c.text || '', c.desc || '', c[MATCH_LABEL] ?? c.label, c.value || '', c.flags || [],
         ])),
     ].join('\n');
     return crypto.createHash('sha1').update(payload).digest('hex').slice(0, 12);
@@ -364,7 +375,7 @@ function provenanceInput(rawRoot, includeSystem) {
             : String(raw.attrs['content-desc'] || raw.attrs.text || '').trim();
         if (raw.tag === 'node') {
             const scope = {
-                index: scopes.length, id: String(raw.attrs['resource-id'] || ''), label,
+                index: scopes.length, id: String(raw.attrs['resource-id'] || ''), label, ...rawSources(raw),
                 cls: cls.replace(/^.*\./, ''),
                 role: roleKey(inWebView ? deriveWebRole(cls, raw.attrs, label, raw.children.length > 0)
                     : deriveUiAutomatorRole(cls)),
@@ -384,17 +395,16 @@ function provenanceInput(rawRoot, includeSystem) {
 
 /**
  * @param {string} xml
+ * Full safe controls are retained for actions and assertions. Use projectUiGraph for public output.
  * @param {{screen?: {width:number,height:number}, limit?: number, textLength?: number,
  *          includeDisabled?: boolean, includeSystem?: boolean, includeOffscreen?: boolean,
+ *          detail?: boolean, includeCoordinates?: boolean, includeShortId?: boolean,
  *          rpcTarget?: boolean}} [options]
  */
 function parseUiGraph(xml, options = {}) {
     const limit = Number.isFinite(options.limit) && options.limit > 0
         ? Math.floor(options.limit)
         : DEFAULT_LIMIT;
-    const textLength = Number.isFinite(options.textLength) && options.textLength > 0
-        ? Math.floor(options.textLength)
-        : DEFAULT_TEXT_LENGTH;
 
     const stats = {
         rawNodes: 0,
@@ -524,9 +534,9 @@ function parseUiGraph(xml, options = {}) {
             index: -1,
             level: item.level,
             selector: '',
-            label: normalizeText(item.label, textLength),
-            value: normalizeText(item.value, textLength),
-            desc: '',
+            label: item.matchLabel,
+            value: item.value,
+            ...rawSources(source.provenance.get(item.node.package)),
             id: item.id,
             shortId: shortId(item.id),
             cls: item.cls,
@@ -543,7 +553,7 @@ function parseUiGraph(xml, options = {}) {
             inViewport: screenArea && item.bounds ? intersectArea(item.bounds, screenArea) > 0 : true,
         };
         Object.defineProperties(control, {
-            [MATCH_LABEL]: { value: normalizeText(item.matchLabel, Infinity) },
+            [MATCH_LABEL]: { value: item.matchLabel },
             rawNode: { value: source.provenance.get(item.node.package) || null },
             fullClass: { value: String(item.node.cls || '') },
         });
@@ -554,10 +564,10 @@ function parseUiGraph(xml, options = {}) {
     allControls.forEach((control, index) => { control.index = index; });
     const total = allControls.length;
 
-    // selector 唯一性：同 key 一律带序号，避免「裸 key」与「#1」并存。
-    // Escape delimiters before appending an ordinal; literal Item#1 is not Item's first hit.
+    // Count every exact source across the complete actionable universe, including id-backed rows.
     const escapeKey = (key) => key.replace(/[%#]/g, (char) => char === '%' ? '%25' : '%23');
-    const keysOf = (c) => [c.id ? `id=${escapeKey(c.id)}` : null, `text=${escapeKey(c[MATCH_LABEL])}`].filter(key => key !== null);
+    const keysOf = (c) => [['id', c.id], ['text', c.text], ['desc', c.desc], ['any', c[MATCH_LABEL]]]
+        .filter(([, value]) => value.trim()).map(([kind, value]) => `${kind}=${escapeKey(value)}`);
     const counts = new Map();
     for (const c of allControls) {
         for (const key of keysOf(c)) counts.set(key, (counts.get(key) || 0) + 1);
@@ -565,16 +575,15 @@ function parseUiGraph(xml, options = {}) {
     const seen = new Map();
     for (const c of allControls) {
         const keys = keysOf(c);
-        // Text matching includes controls whose preferred public selector uses an id.
         for (const key of keys) seen.set(key, (seen.get(key) || 0) + 1);
         const key = keys[0];
-        let candidate = key;
-        if (counts.get(key) > 1 || (!c.id && !c.label)) candidate = `${key}#${seen.get(key)}`;
-        // Apply the parser's decoded condition budget, not the escaped wire length.
-        // Unrepresentable identities remain snapshot-only; never invent a positional selector.
+        const candidate = counts.get(key) > 1 ? `${key}#${seen.get(key)}` : key;
+        // counts/seen already prove uniqueness and the ordinal in the complete universe.
+        // Validate wire encoding and parser budgets without scanning that universe again.
         try {
             const parsed = parseSelector(candidate);
-            c.selector = (parsed.id ?? parsed.text) === (c.id || c[MATCH_LABEL]) ? candidate : null;
+            const field = ['id', 'text', 'desc', 'any'].find(name => Object.hasOwn(parsed, name));
+            c.selector = parsed[field] === (field === 'any' ? c[MATCH_LABEL] : c[field]) ? candidate : null;
         } catch { c.selector = null; }
     }
     const controls = allControls.slice(0, limit);
@@ -628,7 +637,7 @@ function parseUiGraph(xml, options = {}) {
 
     const graph = {
         package: pkg,
-        signature: makeSignature(pkg, controls),
+        signature: makeSignature(pkg, allControls),
         screen,
         controls,
         total,
@@ -641,6 +650,10 @@ function parseUiGraph(xml, options = {}) {
     };
     Object.defineProperties(graph, {
         matchingControls: { value: allControls }, evidenceControls: { value: evidenceControls }, scopeControls: { value: source.scopes },
+        [PRESENTATION_OPTIONS]: { value: {
+            textLength: options.textLength, detail: options.detail,
+            includeCoordinates: options.includeCoordinates, includeShortId: options.includeShortId,
+        } },
     });
     if (options.rpcTarget === true) {
         // Retain unfiltered identity evidence without serializing raw field values.
@@ -663,6 +676,40 @@ function samePage(a, b) {
 // ---------------------------------------------------------------------------
 
 /**
+ * Public-only projection. Reprojection starts from full evidence, never a clipped display string.
+ * Coordinates and short ids are opt-in; selectors and full resource ids remain consumable.
+ * Matching metadata is deliberately non-enumerable on both graph and controls array.
+ */
+function projectUiGraph(graph, options = {}) {
+    const source = graph?.[PRESENTATION_SOURCE] || graph;
+    const settings = { ...source?.[PRESENTATION_OPTIONS], ...graph?.[PRESENTATION_OPTIONS], ...options };
+    const textLength = Number.isFinite(settings.textLength) && settings.textLength > 0
+        ? Math.floor(settings.textLength) : DEFAULT_TEXT_LENGTH;
+    const coordinates = settings.includeCoordinates ?? settings.detail === true;
+    const ids = settings.includeShortId ?? settings.detail === true;
+    const limit = Number.isFinite(settings.limit) && settings.limit > 0 ? Math.floor(settings.limit) : Infinity;
+    const controls = (source?.controls || []).slice(0, limit).map((control) => {
+        const { x, y, bounds, clipped, center, labelBox, shortId: identifier, ...rest } = control;
+        const row = { ...rest, presentationOnly: true };
+        for (const field of ['label', 'text', 'desc', 'value']) row[field] = normalizeText(control[field], textLength);
+        if (coordinates) Object.assign(row, { x, y, bounds, clipped, center, labelBox });
+        if (ids) row.shortId = identifier;
+        return row;
+    });
+    const projected = { ...source, controls, presentationOnly: true,
+        truncated: (source?.total ?? controls.length) > controls.length };
+    const metadata = {};
+    for (const key of ['matchingControls', 'evidenceControls', 'scopeControls']) {
+        if (source?.[key]) metadata[key] = { value: source[key] };
+    }
+    Object.defineProperties(controls, metadata);
+    Object.defineProperties(projected, {
+        ...metadata, [PRESENTATION_SOURCE]: { value: source }, [PRESENTATION_OPTIONS]: { value: settings },
+    });
+    return projected;
+}
+
+/**
  * 画布提示语。说人话：uiautomator 只看得见视图树，看不见像素。
  * 写得含糊模型就会去点一个空壳节点，然后疑惑为什么没反应。
  */
@@ -681,18 +728,19 @@ function canvasNote(canvas) {
 }
 
 function renderView(graph, options = {}) {
-    const controls = graph?.controls || [];
-    const note = canvasNote(graph?.canvas);
+    const view = projectUiGraph(graph, options);
+    const controls = view.controls;
+    const note = canvasNote(view.canvas);
     if (!controls.length) {
         if (note) return `${note}\n(未识别到可交互控件)`;
         return '(未识别到可交互控件)';
     }
 
-    const screen = graph.screen ? `${graph.screen.width}×${graph.screen.height}` : '未知分辨率';
+    const screen = view.screen ? `${view.screen.width}×${view.screen.height}` : '未知分辨率';
     const indent = options.indent === undefined ? '  ' : String(options.indent);
     const header = [
-        `页面 ${graph.package || '(未知包名)'}  ${screen}`,
-        `控件 ${controls.length}${graph.truncated ? ` / 共 ${graph.total}（已截断，可提高 limit）` : ''}`,
+        `页面 ${view.package || '(未知包名)'}  ${screen}`,
+        `控件 ${controls.length}${view.truncated ? ` / 共 ${view.total}（已截断，可提高 limit）` : ''}`,
     ].join('  ');
 
     const lines = controls.map((control) => {
@@ -703,7 +751,8 @@ function renderView(graph, options = {}) {
         const value = control.value ? ` =${control.value}` : '';
         const label = control.label || '(无标签)';
         const addressing = control.selector === null ? '（仅限本次快照 index+snapshotId）' : '';
-        return `${pad}[${control.index}] ${label}${value}${role} (${control.x},${control.y})${ident}${flags}${addressing}`;
+        const coordinates = control.x !== undefined && control.y !== undefined ? ` (${control.x},${control.y})` : '';
+        return `${pad}[${control.index}] ${label}${value}${role}${coordinates}${ident}${flags}${addressing}`;
     });
 
     return `${note ? `${note}\n` : ''}${header}\n${lines.join('\n')}`;
@@ -730,6 +779,7 @@ module.exports = {
     parseAttributes,
     parseBounds,
     parseUiGraph,
+    projectUiGraph,
     parseSelector,
     validateSelector,
     evaluateSelector,

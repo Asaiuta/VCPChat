@@ -108,9 +108,18 @@ function createScrollUntil({ stepRuntime, prepareTargets, rpcNodeSelector, dispa
                     && item.attrs[target.kind === 'id' ? 'resource-id' : 'text'] === target.key);
                 if (hits.length > 1) fail('AMBIGUOUS_SCROLL_TARGET', '滚动目标身份不唯一；不接受序号消歧。');
                 const hit = hits[0];
-                const visible = Boolean(hit?.inContainer
-                    && intersect(hit.visibleBox, clipToScreen(safeBox, binding.screen)));
-                return { binding: { ...binding, node: { ...node, clipped: safeBox } }, visible };
+                const viewport = clipToScreen(safeBox, binding.screen);
+                const visibleBounds = hit?.inContainer ? intersect(hit.visibleBox, viewport) : null;
+                // XML bounds may already be clipped by Android. They cannot prove a
+                // percentage of the original element. Require the observed region to
+                // clear BOTH edges on the scrolling axis instead of accepting a sliver.
+                const horizontal = direction === 'left' || direction === 'right';
+                const visible = Boolean(visibleBounds && (horizontal
+                    ? visibleBounds.left > viewport.left && visibleBounds.right < viewport.right
+                    : visibleBounds.top > viewport.top && visibleBounds.bottom < viewport.bottom));
+                return { binding: { ...binding, node: { ...node, clipped: safeBox } }, visible,
+                    visibility: { contract: 'scroll-axis-interior', visibleBounds, viewport,
+                        reason: visible ? 'INTERIOR' : visibleBounds ? 'VIEWPORT_EDGE' : 'NOT_VISIBLE' } };
             } catch (error) {
                 stepRuntime.check();
                 const code = safeSampleCodes.has(error.code) ? error.code : 'SCROLL_UNTIL_SAMPLE_FAILED';
@@ -118,19 +127,20 @@ function createScrollUntil({ stepRuntime, prepareTargets, rpcNodeSelector, dispa
             }
         }
 
-        const finish = matched => {
+        const finish = sample => {
             stepRuntime.check();
-            const evidence = { strategy, swipes, targetVisible: matched };
+            const matched = sample.visible;
+            const evidence = { strategy, swipes, targetVisible: matched, visibility: sample.visibility };
             stepRuntime.verified(matched, { condition: { type: 'scrollUntil' }, evidence });
             return channelReceipt(textResult(matched
-                ? '目标已在滚动容器裁剪范围内可见；未点击。'
+                ? '目标可见区域已离开滚动轴两端边缘；未点击，不证明完整元素或无遮挡。'
                 : '滚动已停止，未验证目标可见；不证明已到达边界。', {
-                serial, strategy, direction, swipes, actionVerified: matched,
+                serial, strategy, direction, swipes, actionVerified: matched, visibility: sample.visibility,
             }), attempts, { experimental: true });
         };
 
         let current = await stepRuntime.stage('prepareMs', sample);
-        if (current.visible) return finish(true);
+        if (current.visible) return finish(current);
 
         if (strategy === 'auto' && (explicitMax || direction === 'up' || direction === 'left')) strategy = 'host';
         if (strategy !== 'host') {
@@ -154,7 +164,7 @@ function createScrollUntil({ stepRuntime, prepareTargets, rpcNodeSelector, dispa
         if (strategy === 'rpc') {
             // Readiness can take time; bind again immediately before the single write.
             current = await stepRuntime.stage('prepareMs', sample);
-            if (current.visible) return finish(true);
+            if (current.visible) return finish(current);
             const containerRPC = rpcNodeSelector(serial, current.binding.node);
             const targetRPC = { mask: 524288 | (target.kind === 'id' ? 2097152 : 1), packageName: baseline.package };
             targetRPC[target.kind === 'id' ? 'resourceId' : 'text'] = target.key;
@@ -164,14 +174,14 @@ function createScrollUntil({ stepRuntime, prepareTargets, rpcNodeSelector, dispa
                 durationMs: Math.max(0, stepRuntime.remainingMs() - 1000),
             }), false);
             current = await stepRuntime.stage('verificationMs', sample);
-            return finish(current.visible);
+            return finish(current);
         }
 
         while (swipes < maxSwipes) {
             stepRuntime.check();
             // The first host iteration also rebinds after strategy readiness waits.
             current = await stepRuntime.stage('prepareMs', sample);
-            if (current.visible) return finish(true);
+            if (current.visible) return finish(current);
             const box = current.binding.node.clipped;
             const horizontal = direction === 'left' || direction === 'right';
             const sign = direction === 'down' || direction === 'right' ? 1 : -1;
@@ -201,9 +211,9 @@ function createScrollUntil({ stepRuntime, prepareTargets, rpcNodeSelector, dispa
                 }
             });
             current = await stepRuntime.stage('verificationMs', sample);
-            if (current.visible) return finish(true);
+            if (current.visible) return finish(current);
         }
-        return finish(false);
+        return finish(current);
     };
 }
 

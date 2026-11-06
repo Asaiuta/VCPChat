@@ -23,6 +23,7 @@ function createKeyboardActions(deps) {
         && value <= META_MASK && (value & ~META_MASK) === 0;
 
     function clean(error, attempts) {
+        if (/^POLICY_/.test(error.code || '')) return error;
         const failure = fail(error.code || 'KEYBOARD_FAILED');
         failure.details = { channels: attempts.map(item => item.channel), attempts, keyboard: { experimental: true } };
         return failure;

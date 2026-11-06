@@ -18,6 +18,7 @@ const DEFAULT_MAX_BUFFER = 16 * 1024 * 1024;
 const MAX_TEXT_BYTES = 4 * 1024 * 1024;
 const { AdbError } = require('./adb-error');
 const { AdbCommandQueue, DEFAULT_MAX_QUEUE_SIZE } = require('./adb-queue');
+const { displayTarget, windowDisplaySections, displayUniqueId, displayDeviceInfo, isShellPrivateMirror } = require('./display-target');
 const HOST_READ_KEY = Symbol('adb-host-read');
 
 function normalizeAdbPath(value) {
@@ -269,6 +270,22 @@ class AdbClient {
      * 用一条 shell 一次性跑完，靠分隔符分段；解析失败不影响其它字段（各自独立容错）。
      */
     async probeScreen(serial, options = {}) {
+        if (options.fresh === true && options.display !== undefined && !displayTarget(options.display).isDefault) {
+            const target = displayTarget(options.display);
+            // Scoped probe adds `dumpsys display` so the target's uniqueId (not just its reusable logical id) is proven.
+            const command = 'dumpsys window displays || exit $?; '
+                + 'echo @@VCP_POLICY@@; dumpsys window policy || exit $?; '
+                + 'echo @@VCP_POWER@@; dumpsys power || exit $?; '
+                + 'echo @@VCP_DISPLAY@@; dumpsys display || exit $?; echo @@VCP_END@@';
+            const text = await this.runText(['shell', command], {
+                serial,
+                timeoutMs: options.timeoutMs ?? 20000,
+                maxBuffer: 16 * 1024 * 1024,
+                signal: options.signal,
+                deadlineMs: options.deadlineMs,
+            });
+            return parseScopedScreenProbe(text, target);
+        }
         if (options.fresh === true) {
             // No fallback or cache: cancellation, timeout and transport failures must propagate.
             // These dumps are sequential observations, not an atomic screenshot transaction.
@@ -282,7 +299,19 @@ class AdbClient {
                 signal: options.signal,
                 deadlineMs: options.deadlineMs,
             });
-            return parseFreshScreenProbe(text);
+            const result = parseFreshScreenProbe(text);
+            // Our own viewer's scrcpy mirror adds a content-less display on Android 14+ (PJZ110
+            // 2026-11-06: every fresh probe returned displayId=null while the viewer streamed).
+            // Only then pay one extra dumpsys display to prove the extra displays are such mirrors.
+            if (result.displayId !== null || countDisplayHeaders(text) < 2) return result;
+            const displayText = await this.runText(['shell', 'dumpsys display'], {
+                serial,
+                timeoutMs: options.timeoutMs ?? 20000,
+                maxBuffer: 16 * 1024 * 1024,
+                signal: options.signal,
+                deadlineMs: options.deadlineMs,
+            });
+            return parseFreshScreenProbeWithMirrors(text, displayText) || result;
         }
         const MARK_SIZE = '@@VCP_SIZE@@';
         const MARK_POWER = '@@VCP_POWER@@';
@@ -400,9 +429,14 @@ function parseFreshScreenProbe(text) {
     if (sections.length !== 7 || sections[1] !== 'POLICY'
         || sections[3] !== 'POWER' || sections[5] !== 'END' || sections[6].trim()) return result;
     const [windowText, , policyText, , powerText] = sections;
-    const wake = [...powerText.matchAll(/^[ \t]*mWakefulness=([^\n]*)$/gm)];
-    if (wake.length === 1 && /^(Awake|Asleep|Dozing|Dreaming)$/.test(wake[0][1].trim())) {
-        result.wakefulness = wake[0][1].trim();
+    const wake = [...powerText.matchAll(/^[ \t]*mWakefulness=([^\n]*)$/gm)].map(match => match[1].trim());
+    const wakeStates = ['Asleep', 'Awake', 'Dreaming', 'Dozing'];
+    const named = wake.filter(value => wakeStates.includes(value));
+    // PJZ110 also dumps the vendor's numeric PowerManagerInternal state. It is
+    // corroboration only: a missing, duplicate or conflicting named state stays unknown.
+    if (named.length === 1 && wake.length <= 2
+        && wake.every(value => value === named[0] || (/^[0-3]$/.test(value) && wakeStates[Number(value)] === named[0]))) {
+        result.wakefulness = named[0];
         result.awake = result.wakefulness === 'Awake';
     }
     const monitors = dumpSections(policyText, 'KeyguardStateMonitor');
@@ -410,11 +444,111 @@ function parseFreshScreenProbe(text) {
         const showing = dumpBoolean(monitors[0], 'mIsShowing');
         const restricted = dumpBoolean(monitors[0], 'mInputRestricted');
         result.keyguard = { showing, inputRestricted: restricted };
+    } else if (monitors.length === 0) {
+        // Some ROMs expose only the delegate's explicit cached keyguard fields.
+        // Never use it to override an existing incomplete or ambiguous monitor.
+        const delegates = dumpSections(policyText, 'KeyguardServiceDelegate');
+        if (delegates.length === 1) result.keyguard = {
+            showing: dumpBoolean(delegates[0], 'showing'),
+            inputRestricted: dumpBoolean(delegates[0], 'inputRestricted'),
+        };
     }
     const displays = [...windowText.matchAll(/^[ \t]*Display:[^\n]*$/gm)];
     if (displays.length !== 1 || !/^[ \t]*Display: mDisplayId=0(?: \(organized\))?[ \t]*$/.test(displays[0][0])) return result;
     result.displayId = 0;
-    const displayText = windowText.slice(displays[0].index);
+    fillDisplayState(result, windowText.slice(displays[0].index));
+    return result;
+}
+
+function countDisplayHeaders(text) {
+    const sections = String(text ?? '').replace(/\r/g, '').split(/^@@VCP_POLICY@@[ \t]*$/m);
+    return [...sections[0].matchAll(/^[ \t]*Display:[^\n]*$/gm)].length;
+}
+
+/**
+ * Default display 0 when every other display is a proven shell private mirror (see
+ * display-target.isShellPrivateMirror). Returns null (keep the fail-closed result) otherwise.
+ * Adds `ignoredDisplays`; the single-display result shape is unchanged.
+ */
+function parseFreshScreenProbeWithMirrors(text, displayText) {
+    if (/\bDUMP TIMEOUT\b/.test(String(displayText ?? ''))) return null;
+    const result = parseFreshScreenProbe(text);
+    const sections = String(text ?? '').replace(/\r/g, '').split(/^@@VCP_(POLICY|POWER|END)@@[ \t]*$/m);
+    if (sections.length !== 7) return null;
+    let parts;
+    try { parts = windowDisplaySections(sections[0]); } catch { return null; }
+    const physical = parts.filter(part => part.displayId === 0);
+    if (physical.length !== 1 || !/^[ \t]*Display: mDisplayId=0(?: \(organized\))?[ \t]*$/m.test(physical[0].text.split('\n')[0])) return null;
+    const ignored = [];
+    for (const part of parts) {
+        if (part.displayId === 0) continue;
+        if (part.displayId === null) return null;
+        const uniqueId = displayUniqueId(displayText, part.displayId);
+        if (!isShellPrivateMirror(displayDeviceInfo(displayText, uniqueId), part.text)) return null;
+        ignored.push({ displayId: part.displayId, uniqueId, reason: 'shell_private_mirror' });
+    }
+    result.displayId = 0;
+    fillDisplayState(result, physical[0].text);
+    result.ignoredDisplays = ignored;
+    return result;
+}
+
+function parseDevicePolicyAndPower(result, policyText, powerText) {
+    const wake = [...powerText.matchAll(/^[ \t]*mWakefulness=([^\n]*)$/gm)].map(match => match[1].trim());
+    const wakeStates = ['Asleep', 'Awake', 'Dreaming', 'Dozing'];
+    const named = wake.filter(value => wakeStates.includes(value));
+    if (named.length === 1 && wake.length <= 2
+        && wake.every(value => value === named[0] || (/^[0-3]$/.test(value) && wakeStates[Number(value)] === named[0]))) {
+        result.wakefulness = named[0];
+        result.awake = result.wakefulness === 'Awake';
+    }
+    const monitors = dumpSections(policyText, 'KeyguardStateMonitor');
+    if (monitors.length === 1) {
+        result.keyguard = { showing: dumpBoolean(monitors[0], 'mIsShowing'), inputRestricted: dumpBoolean(monitors[0], 'mInputRestricted') };
+    } else if (monitors.length === 0) {
+        const delegates = dumpSections(policyText, 'KeyguardServiceDelegate');
+        if (delegates.length === 1) result.keyguard = {
+            showing: dumpBoolean(delegates[0], 'showing'),
+            inputRestricted: dumpBoolean(delegates[0], 'inputRestricted'),
+        };
+    }
+}
+
+/**
+ * M4.5 P1 display-scoped probe. Other displays may exist; exactly one section must match the
+ * target logical id AND `dumpsys display` must map that id to the target uniqueId, otherwise
+ * displayId stays null (unproven) and frameContext rejects it. Wakefulness/keyguard remain
+ * device-global evidence, parsed exactly like the default probe.
+ */
+function parseScopedScreenProbe(text, target) {
+    if (/\bDUMP TIMEOUT\b/.test(String(text ?? ''))) {
+        throw new AdbError('ADB_TIMEOUT', '屏幕上下文 dumpsys 采样超时。');
+    }
+    const result = {
+        focus: { window: null, component: null, package: null, raw: '' },
+        size: null, rotation: null, displayId: null,
+        wakefulness: null, awake: null, keyguard: { showing: null, inputRestricted: null },
+        target: { displayId: target.displayId, uniqueId: target.uniqueId, generation: target.generation },
+        uniqueId: null,
+    };
+    const sections = String(text ?? '').replace(/\r/g, '').split(/^@@VCP_(POLICY|POWER|DISPLAY|END)@@[ \t]*$/m);
+    if (sections.length !== 9 || sections[1] !== 'POLICY' || sections[3] !== 'POWER'
+        || sections[5] !== 'DISPLAY' || sections[7] !== 'END' || sections[8].trim()) return result;
+    const [windowText, , policyText, , powerText, , displayDump] = sections;
+    parseDevicePolicyAndPower(result, policyText, powerText);
+    let parts;
+    try { parts = windowDisplaySections(windowText); } catch { return result; }
+    const matches = parts.filter(part => part.displayId === target.displayId);
+    if (matches.length !== 1) return result;
+    result.uniqueId = displayUniqueId(displayDump, target.displayId);
+    if (result.uniqueId !== target.uniqueId) return result;
+    result.displayId = target.displayId;
+    fillDisplayState(result, matches[0].text);
+    return result;
+}
+
+// Per-display fields; displayText starts at that display's `Display:` header.
+function fillDisplayState(result, displayText) {
     const focusLines = displayText.split('\n').filter((line) => /^[ \t]*mCurrentFocus=/.test(line));
     if (focusLines.length === 1 && /^[ \t]*mCurrentFocus=Window\{\S+[ \t]+(?:u\d+[ \t]+)?[^ \t/{}]+\/[^ \t{}]+[^}]*\}[ \t]*$/.test(focusLines[0])) {
         result.focus = parseFocusFromDumpsys(focusLines[0]);
@@ -433,7 +567,6 @@ function parseFreshScreenProbe(text) {
         const values = [...rotations[0].matchAll(/^[ \t]*mRotation=([^ \t\n]+)(?:[ \t]|$)/gm)];
         if (values.length === 1 && /^[0-3]$/.test(values[0][1])) result.rotation = Number(values[0][1]);
     }
-    return result;
 }
 
 // Preserve indentation boundaries: similarly named fields in other dump objects are not evidence.

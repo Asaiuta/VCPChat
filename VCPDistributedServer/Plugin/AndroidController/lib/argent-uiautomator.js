@@ -194,7 +194,8 @@ function deriveUiAutomatorRole(className) {
     if (lower.includes('radiobutton')) return 'RadioButton';
     if (lower.includes('checkbox')) return 'CheckBox';
     if (lower.includes('button')) return 'Button';
-    if (lower.includes('edittext') || lower.includes('textinput')) return 'TextField';
+    // AutoCompleteTextView 是 EditText 子类，必须在 textview 之前判。
+    if (lower.includes('edittext') || lower.includes('textinput') || lower.includes('autocompletetextview')) return 'TextField';
     if (lower.includes('textview') || lower === 'text') return 'StaticText';
     if (lower.includes('image')) return 'Image';
     if (lower.includes('switch')) return 'Switch';

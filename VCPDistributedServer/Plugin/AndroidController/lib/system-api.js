@@ -130,7 +130,7 @@ async function executeSystemInternal(request, deps = {}) {
     const dispatch = async tokens => {
         await authorize();
         if (typeof deps.beforeDispatch !== 'function') throw fail('INVALID_CONTEXT', '缺少受控变更入口。');
-        await deps.beforeDispatch(); check();
+        await deps.beforeDispatch(tokens); check();
         return run(tokens);
     };
     const receipt = { serial, operation, capability, group };
@@ -188,7 +188,7 @@ async function executeSystemInternal(request, deps = {}) {
 async function executeSystem(request, deps = {}) {
     try { return await executeSystemInternal(request, deps); }
     catch (error) {
-        if (request?.operation !== 'draft') throw error;
+        if (request?.operation !== 'draft' || /^POLICY_/.test(error.code || '')) throw error;
         const safeCodes = new Set(['INVALID_ARGUMENT', 'SYSTEM_NOT_AUTHORIZED', 'PERMISSION_DENIED', 'UNSUPPORTED', 'UNSUPPORTED_USER', 'ABORTED', 'ADB_TIMEOUT', 'ADB_ERROR', 'INVALID_CONTEXT', 'INVALID_RESPONSE', 'SYSTEM_ERROR']);
         throw fail(safeCodes.has(error.code) ? error.code : 'DRAFT_FAILED', '草稿操作失败或结果未确认；未回传接收人或内容。已派发的动作不保证撤销，请先检查手机再重试。');
     }

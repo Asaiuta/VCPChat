@@ -8,7 +8,7 @@ const devices = new Map();
 const COMMANDS = new Set([
     'tap', 'doubletap', 'longpress', 'swipe', 'scroll', 'scrolluntil',
     'inputtext', 'fill', 'keyevent', 'launchapp', 'killapp', 'wait', 'system',
-    'imeaction', 'erasetext', 'keycombo', 'drag', 'pinch',
+    'imeaction', 'erasetext', 'keycombo', 'drag', 'pinch', 'handoff', 'collect',
 ]);
 const OUTCOMES = new Set(['observed', 'dispatched', 'verified', 'unknown', 'failed']);
 const CHANNELS = new Set(['rpc', 'shell']);
@@ -26,6 +26,10 @@ const CODES = new Set([
     'DOUBLE_TAP_WINDOW_MISSED', 'URL_RESOLUTION_FAILED', 'URL_NOT_SUPPORTED', 'URL_DISPATCH_FAILED',
     'SYSTEM_NOT_AUTHORIZED', 'UNSUPPORTED_USER', 'UNSUPPORTED_CAPABILITY',
     'PERMISSION_DENIED', 'UNSUPPORTED', 'PROBE_FAILED', 'DRAFT_FAILED',
+    'POLICY_DENIED', 'POLICY_REJECTED', 'POLICY_CONFIRMATION_REQUIRED', 'POLICY_APPROVAL_STALE',
+    'POLICY_APPROVAL_REQUIRES_SELECTOR', 'HUMAN_INTERACTION_UNAVAILABLE',
+    'HUMAN_INTERACTION_CANCELLED', 'HUMAN_INTERACTION_FAILED',
+    'COLLECT_CONTEXT_CHANGED', 'COLLECT_EVIDENCE_INCOMPLETE',
 ]);
 
 // Read only own data properties: neither retain callers' objects nor run accessors.

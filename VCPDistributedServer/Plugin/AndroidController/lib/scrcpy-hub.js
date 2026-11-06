@@ -22,10 +22,10 @@
  */
 
 const net = require('net');
-const path = require('path');
 const fs = require('fs');
 const { spawn, execFile } = require('child_process');
 const { randomInt } = require('crypto');
+const { vendorPath } = require('./vendor-path');
 
 // scrcpy scid is a 31-bit integer. Never reuse one within this process.
 let nextScid = randomInt(0x80000000);
@@ -42,7 +42,7 @@ function allocateScid() {
 const SERVER_VERSION = '5.0.1';
 const REMOTE_JAR = '/data/local/tmp/scrcpy-server.jar';
 // 随插件分发（vendor/ 与 lib/ 同级）
-const LOCAL_JAR = path.join(__dirname, '..', 'vendor', `scrcpy-server-v${SERVER_VERSION}`);
+const LOCAL_JAR = vendorPath(`scrcpy-server-v${SERVER_VERSION}`);
 
 const FLAG_SESSION = 0x80;
 const FLAG_CONFIG = 0x40;
@@ -93,7 +93,12 @@ class ScrcpyHub {
         this._requestedSerial = options.serial;
         this.logger = options.logger || console;
 
+        validateResolutionOptions(options);
         this.maxSize = clampInt(options.maxSize, 540, 180, 2160);
+        this.maxShortEdge = options.maxShortEdge ?? null;
+        this.sourceWidth = null;
+        this.sourceHeight = null;
+        this.effectiveMaxSize = null;
         this.bitRate = clampInt(options.bitRate, 2000000, 100000, 50000000);
         this.maxFps = clampInt(options.maxFps, 30, 1, 120);
 
@@ -137,8 +142,8 @@ class ScrcpyHub {
         this._serverSession = null;
 
         // ---- 新订阅者补发用的缓存 ----
-        // SPS/PPS 只在流启动时发一次；之后才连上的客户端收不到就永远黑屏。
-        // 关键帧同理：不留最近一个 IDR，新客户端要等下一个（约 10 秒）才出画。
+        // Config and IDR are scoped to one encoder session. An IDR is replayable
+        // only while it is the latest frame; otherwise viewers wait for a fresh IDR.
         this.lastConfig = null;
         this.lastSession = null;
         this.lastKeyFrame = null;
@@ -168,6 +173,28 @@ class ScrcpyHub {
                 resolve({ ok: !error, stdout: stdout || '', stderr: stderr || (error ? error.message : '') });
             });
         });
+    }
+
+    /** Read the effective display size without changing the device's wm settings. */
+    async _readSourceSize(generation) {
+        const result = await this._adb(['shell', 'wm', 'size'], 8000).catch(() => null);
+        this._checkGeneration(generation);
+        const size = result?.ok ? parseWmSize(result.stdout) : null;
+        this.sourceWidth = size?.width ?? null;
+        this.sourceHeight = size?.height ?? null;
+        if (this.maxShortEdge === null) {
+            this.effectiveMaxSize = this.maxSize;
+        } else if (this.maxShortEdge === 0) {
+            this.effectiveMaxSize = 0;
+        } else {
+            if (!size) throw Object.assign(new Error('无法读取源屏幕尺寸，不能应用短边分辨率上限'), {
+                code: 'SCRCPY_SOURCE_SIZE_UNAVAILABLE',
+            });
+            const short = Math.min(size.width, size.height);
+            const long = Math.max(size.width, size.height);
+            // scrcpy owns encoder alignment; never round up or resize the phone.
+            this.effectiveMaxSize = Math.min(long, Math.floor(long * this.maxShortEdge / short));
+        }
     }
 
     async _ensureJar() {
@@ -235,6 +262,9 @@ class ScrcpyHub {
     }
 
     _resetSession() {
+        this.sourceWidth = null;
+        this.sourceHeight = null;
+        this.effectiveMaxSize = null;
         this.seq = 0;
         this.codec = null;
         this.width = null;
@@ -263,6 +293,8 @@ class ScrcpyHub {
                 this._checkGeneration(generation);
             }
             await this._resolveSerial();
+            this._checkGeneration(generation);
+            await this._readSourceSize(generation);
             this._checkGeneration(generation);
             await this._ensureJar();
             this._checkGeneration(generation);
@@ -299,7 +331,7 @@ class ScrcpyHub {
         const args = [
             'shell',
             `CLASSPATH=${REMOTE_JAR} app_process / com.genymobile.scrcpy.Server ${SERVER_VERSION}`
-            + ` scid=${session.scid} log_level=warn max_size=${this.maxSize} video_bit_rate=${this.bitRate}`
+            + ` scid=${session.scid} log_level=warn max_size=${this.effectiveMaxSize} video_bit_rate=${this.bitRate}`
             + ` max_fps=${this.maxFps} tunnel_forward=true audio=false control=false cleanup=false`,
         ];
 
@@ -450,13 +482,20 @@ class ScrcpyHub {
             this.lastPacketAt = Date.now();
             this.frameTimes.push(this.lastPacketAt);
             if (this.frameTimes.length > 60) this.frameTimes.shift();
-            // 只留最近的 IDR：新订阅者靠它立刻出画，不用等下一个（约 10 秒）
-            if (packet.key) this.lastKeyFrame = packet;
+            // Replaying an old IDR without its following deltas breaks references.
+            this.lastKeyFrame = packet.key && this.lastConfig ? packet : null;
         } else if (packet.type === 'config') {
             this.packetsReceived += 1;
             this.lastConfig = packet;
+            this.lastKeyFrame = null;
         } else if (packet.type === 'session') {
             this.lastSession = packet;
+            this.lastConfig = null;
+            this.lastKeyFrame = null;
+            this.codecString = null;
+            this.sps = null;
+            this.lastPacketAt = 0;
+            this.frameTimes = [];
         }
 
         for (const sink of this.subscribers) {
@@ -472,14 +511,15 @@ class ScrcpyHub {
      * 把「开始一条新流时应发的东西」按顺序补发给一个回调。
      *
      * 顺序必须是 session → config → keyframe：
-     * 页面先知道尺寸才能建解码器，再有 SPS/PPS 才能 configure，最后有关键帧才出画。
-     * 没有缓存的部分直接跳过（例如流刚启动还没收到 config）。
+     * 页面先知道尺寸才能建解码器，再有 SPS/PPS 才能 configure。
+     * 只有仍为最新帧的 IDR 可以补发；其他观众等待新的 IDR，不补发断链视频。
      */
     replayInitTo(sink) {
         if (!sink) return 0;
         let sent = 0;
         for (const packet of [this.lastSession, this.lastConfig, this.lastKeyFrame]) {
             if (!packet) continue;
+            if (packet.type === 'frame' && packet.seq !== this.seq) continue;
             try {
                 sink(packet);
                 sent += 1;
@@ -519,8 +559,13 @@ class ScrcpyHub {
 
     /** 运行期调整参数。只影响下一次 start()，不会中断当前流。 */
     configure(options = {}) {
+        validateResolutionOptions(options);
         if (Object.hasOwn(options, 'serial')) this._requestedSerial = options.serial;
-        if (Number.isFinite(options.maxSize)) this.maxSize = clampInt(options.maxSize, this.maxSize, 180, 2160);
+        if (Object.hasOwn(options, 'maxShortEdge')) this.maxShortEdge = options.maxShortEdge;
+        if (Number.isFinite(options.maxSize)) {
+            this.maxSize = clampInt(options.maxSize, this.maxSize, 180, 2160);
+            this.maxShortEdge = null;
+        }
         if (Number.isFinite(options.bitRate)) this.bitRate = clampInt(options.bitRate, this.bitRate, 100000, 50000000);
         if (Number.isFinite(options.maxFps)) this.maxFps = clampInt(options.maxFps, this.maxFps, 1, 120);
     }
@@ -598,6 +643,10 @@ class ScrcpyHub {
             effectiveFps: Number(this.effectiveFps().toFixed(2)),
             lastPacketAgeMs: this.lastPacketAt ? Date.now() - this.lastPacketAt : null,
             maxSize: this.maxSize,
+            maxShortEdge: this.maxShortEdge,
+            sourceWidth: this.sourceWidth,
+            sourceHeight: this.sourceHeight,
+            effectiveMaxSize: this.effectiveMaxSize,
             bitRate: this.bitRate,
             maxFps: this.maxFps,
             lastError: this.lastError,
@@ -616,91 +665,109 @@ class StreamParser {
     constructor(handlers) {
         this.handlers = handlers;
         this.buffer = Buffer.alloc(0);
+        this.filled = 0;
+        this.needed = 1;
         this.stage = 'dummy';
         this.codec = null;
         this.width = null;
         this.height = null;
         this.codecString = null;
+        this.packet = null;
     }
 
     push(chunk) {
-        this.buffer = this.buffer.length ? Buffer.concat([this.buffer, chunk]) : chunk;
-        this._drain();
-    }
-
-    _drain() {
-        // Every successful iteration consumes bytes or advances the handshake.
-        // Leaving complete packets here would depend on a future TCP data event.
-        while (true) {
-
-            if (this.stage === 'dummy') {
-                if (this.buffer.length < 1) return;
-                this.buffer = this.buffer.subarray(1);
-                this.stage = 'name';
-                continue;
-            }
-
-            if (this.stage === 'name') {
-                if (this.buffer.length < 64) return;
-                this.buffer = this.buffer.subarray(64);
-                this.stage = 'codec';
-                continue;
-            }
-
-            if (this.stage === 'codec') {
-                if (this.buffer.length < 4) return;
-                this.codec = `0x${this.buffer.readUInt32BE(0).toString(16)}`;
-                this.buffer = this.buffer.subarray(4);
-                this.stage = 'media';
-                continue;
-            }
-
-            // media 区
-            if (this.buffer.length < 12) return;
-
-            const flagByte = this.buffer[0];
-            const size = this.buffer.readUInt32BE(8);
-
-            // 会话包：flag 最高位为 1
-            if ((flagByte & FLAG_SESSION) !== 0) {
-                if (this.buffer.length < 12) return;
-                this.width = this.buffer.readUInt32BE(4);
-                this.height = this.buffer.readUInt32BE(8);
-                this.buffer = this.buffer.subarray(12);
-                this.handlers.onSession?.(this.width, this.height);
-                this.handlers.onHandshake?.({
-                    codec: this.codec, width: this.width, height: this.height, codecString: this.codecString, sps: null,
-                });
-                continue;
-            }
-
-            if (size > 16 * 1024 * 1024) {
-                throw new Error(`包尺寸异常 ${size}，流可能错位`);
-            }
-            if (this.buffer.length < 12 + size) return;
-
-            // 标志位只存在于 pts 的最高字节的高 3 位。
-            // 用 readUInt32BE 读出来的值再与 0x40 相与永远为 0 —— 陷阱。
-            const ptsRaw = this.buffer.readBigUInt64BE(0);
-            const isConfig = (flagByte & FLAG_CONFIG) !== 0;
-            const isKey = (flagByte & FLAG_KEYFRAME) !== 0;
-            // 低 61 位是 PTS（微秒）
-            const pts = Number(ptsRaw & 0x1fffffffffffffffn) / 1000;
-
-            const payload = this.buffer.subarray(12, 12 + size);
-            this.buffer = this.buffer.subarray(12 + size);
-
-            if (isConfig) {
-                const sps = findSps(payload);
-                if (sps) {
-                    this.codecString = codecStringFromSps(sps) || this.codecString;
+        let offset = 0;
+        while (offset < chunk.length) {
+            let part;
+            if (!this.buffer.length && chunk.length - offset >= this.needed) {
+                part = chunk.subarray(offset, offset + this.needed);
+                offset += this.needed;
+                // Only payloads escape this call. Own their bytes so a cached small
+                // config/IDR cannot retain an unrelated coalesced TCP allocation.
+                if (this.stage === 'payload') {
+                    const payload = Buffer.allocUnsafeSlow(part.length);
+                    part.copy(payload);
+                    part = payload;
                 }
-                this.handlers.onConfig?.(payload);
             } else {
-                this.handlers.onFrame?.(payload, pts, isKey);
+                if (!this.buffer.length) this.buffer = Buffer.allocUnsafeSlow(this.needed);
+                const count = Math.min(this.needed - this.filled, chunk.length - offset);
+                chunk.copy(this.buffer, this.filled, offset, offset + count);
+                this.filled += count;
+                offset += count;
+                if (this.filled < this.needed) return;
+                part = this.buffer;
+                this.buffer = Buffer.alloc(0);
+                this.filled = 0;
             }
+            this._consume(part);
         }
     }
+
+    _consume(part) {
+        if (this.stage === 'dummy') { this.stage = 'name'; this.needed = 64; return; }
+        if (this.stage === 'name') { this.stage = 'codec'; this.needed = 4; return; }
+        if (this.stage === 'codec') {
+            this.codec = `0x${part.readUInt32BE(0).toString(16)}`;
+            this.stage = 'media'; this.needed = 12;
+            return;
+        }
+        if (this.stage === 'payload') { this._emitPayload(part); return; }
+        const flags = part[0];
+        if ((flags & FLAG_SESSION) !== 0) {
+            this.width = part.readUInt32BE(4);
+            this.height = part.readUInt32BE(8);
+            this.codecString = null;
+            this.handlers.onSession?.(this.width, this.height);
+            this.handlers.onHandshake?.({ codec: this.codec, width: this.width, height: this.height,
+                codecString: null, sps: null });
+            return;
+        }
+        const size = part.readUInt32BE(8);
+        if (size > 16 * 1024 * 1024) throw new Error(`包尺寸异常 ${size}，流可能错位`);
+        this.packet = { config: (flags & FLAG_CONFIG) !== 0, key: (flags & FLAG_KEYFRAME) !== 0,
+            pts: Number(part.readBigUInt64BE(0) & 0x1fffffffffffffffn) / 1000 };
+        if (size === 0) { this._emitPayload(Buffer.alloc(0)); return; }
+        this.stage = 'payload'; this.needed = size;
+    }
+
+    _emitPayload(payload) {
+        const packet = this.packet;
+        this.packet = null;
+        this.stage = 'media'; this.needed = 12;
+        if (packet.config) {
+            const sps = findSps(payload);
+            if (sps) this.codecString = codecStringFromSps(sps) || this.codecString;
+            this.handlers.onConfig?.(payload);
+        } else this.handlers.onFrame?.(payload, packet.pts, packet.key);
+    }
+}
+
+function validateResolutionOptions(options) {
+    if (!Object.hasOwn(options, 'maxShortEdge')) return;
+    const invalid = message => Object.assign(new Error(message), { code: 'INVALID_SCRCPY_CONFIG' });
+    if (Object.hasOwn(options, 'maxSize')) throw invalid('maxShortEdge 与 maxSize 不能同时提供');
+    const value = options.maxShortEdge;
+    if (!Number.isSafeInteger(value) || (value !== 0 && (value < 180 || value > 2160))) {
+        throw invalid('maxShortEdge 必须是 0 或 180..2160 范围内的安全整数');
+    }
+}
+
+function parseWmSize(stdout) {
+    let physical = null, override = null, hasOverride = false;
+    for (const line of String(stdout).split(/\r?\n/)) {
+        const match = /^\s*(Physical|Override) size:\s*(.*?)\s*$/i.exec(line);
+        if (!match) continue;
+        const dimensions = /^(\d+)x(\d+)$/.exec(match[2]);
+        const width = Number(dimensions?.[1]), height = Number(dimensions?.[2]);
+        const size = [width, height].every(value => Number.isSafeInteger(value) && value > 0 && value <= 0x7fffffff)
+            ? { width, height } : null;
+        if (match[1].toLowerCase() === 'override') {
+            hasOverride = true;
+            override = size;
+        } else physical = size;
+    }
+    return hasOverride ? override : physical;
 }
 
 function clampInt(value, fallback, min, max) {

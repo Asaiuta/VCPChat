@@ -3,7 +3,7 @@
     "name": "AndroidController",
     "version": "1.0.0",
     "displayName": "Android 手机操控",
-    "description": "通过 adb 让 Agent 感知与操作 Android 设备。感知优先使用 UI Automator 控件树；动作支持点击、滑动、原生长按、文本输入、按键、启停应用，以及显式实验双击、滚动寻目标、拖拽、缩放和键盘组合，可纯读脱敏动作历史。M2 扩展 selector、元素图与 idle 等待均为 experimental、device 未测，不外推 M1.5 历史真机验收。附带只监听 127.0.0.1 的实时显示屏，可在 Loom 打开。支持无线调试（Android 11+ 配对）与 USB 调试。",
+    "description": "通过 adb 让 Agent 感知与操作 Android 设备。感知优先使用 UI Automator 控件树；动作支持点击、滑动、原生长按、文本输入、按键、启停应用，以及显式实验双击、滚动寻目标、拖拽、缩放和键盘组合，可纯读脱敏动作历史。支持原始树结构关系、可信逐次确认、Handoff人工交还和有界Collect；当前新增能力仅离线验证，历史真机结果不外推当前代码。附带只监听 127.0.0.1 的实时显示屏，可在 Loom 打开。支持无线调试（Android 11+ 配对）与 USB 调试。",
     "author": "绫织",
     "pluginType": "hybridservice",
     "entryPoint": {
@@ -12,7 +12,7 @@
     },
     "communication": {
         "protocol": "direct",
-        "timeout": 120000
+        "timeout": 660000
     },
     "configSchema": {
         "ADB_PATH": {
@@ -44,6 +44,11 @@
             "type": "boolean",
             "description": "感知时屏幕已灭则发送一次唤醒键；不自动解锁。关闭后息屏状态下感知只会返回空控件表。",
             "default": true
+        },
+        "INTERACTION_POLICY": {
+            "type": "string",
+            "description": "交互策略JSON对象：denyPackages拒绝对应包的读返回和写派发，readOnlyPackages只禁写，confirmEveryWrite逐次写确认。默认{}对敏感写要求宿主原生对话框逐次批准；缺可信服务即拒绝，不接受模型confirmed；deny/readOnly不能被批准覆盖。配置无效拒绝，不替代System分设备能力授权。",
+            "default": "{}"
         },
         "DISPLAY_PORT": {
             "type": "integer",
@@ -105,17 +110,22 @@
             },
             {
                 "command": "Observe",
-                "description": "感知入口。mode=ui(默认，语义表/snapshotId)|image(截图/frameId/设备坐标mapping)|arbitrate(显式arbitration，共享Jev，只建议不执行)|api(声明的只读API)。ui可limit=60/screenshot=true/stable=true；wake=never禁止唤醒，默认ifAllowed沿用配置。image可region或target=canvas；M2 experimental、device未测的target=element与region/canvas互斥，仅id或selector或index+snapshotId寻址，padding仅数字安全整数0–128默认0，拒frameId/像素。元素图返回原始elementBounds、visibleBounds、原始中心center及mapping，center不保证在可见范围；前后采样复核身份/可见布局/前台/尺寸，变化拒绝签发frameId，occlusion=unknown不证明无遮挡。仍全屏采集后主机裁剪，不降低ADB截图流量。maxWidth/format/quality/grid沿用。图像前后新鲜上下文与原始尺寸一致才签发可操作frameId；无法确认仍可查看图片但frameId=null、image.actionable=false并给reason。像素动作前复核前台/窗口/旋转/逻辑尺寸/唤醒/未锁定，未知或变化拒绝；不保证布局不变或原子派发。仅保守支持单默认显示器可解析格式，未知ROM不猜。index/像素凭据15秒过期，输入后失效；详细参数先Describe。",
+                "description": "感知入口。mode=ui(默认，语义表/snapshotId)|image(截图/frameId/设备坐标mapping)|arbitrate(显式arbitration，共享Jev，只建议不执行)|api(声明的只读API)。ui可limit=60/textLength=120（数字16–4096）/detail=false/screenshot=true/stable=true/windows=false；detail按需显示坐标及短ID，公开裁剪不改变完整匹配。stable=true比较相隔200ms完整可见原始布局与前台上下文，settled=false/unknown快照不授权index输入；不证明文案/像素静止或无遮挡。stable=false仅不二次采样。windows=true额外只读多root诊断，windowId/type/layer未知，不切换动作窗口或授权全窗口输入。wake=never禁止唤醒，默认ifAllowed沿用配置。image可region或target=canvas；M2 experimental、当前代码device未复验的target=element与region/canvas互斥，仅id或selector或index+snapshotId寻址，padding仅数字安全整数0–128默认0，拒frameId/像素。元素图返回原始elementBounds、visibleBounds、原始中心center及mapping，center不保证在可见范围；前后采样复核身份/可见布局/前台/尺寸，变化拒绝签发frameId，occlusion=unknown不证明无遮挡。仍全屏采集后主机裁剪，不降低ADB截图流量。maxWidth/format/quality/grid沿用。图像前后新鲜上下文与原始尺寸一致才签发可操作frameId；无法确认仍可查看图片但frameId=null、image.actionable=false并给reason。像素动作前复核前台/窗口/旋转/逻辑尺寸/唤醒/未锁定，未知或变化拒绝；不保证布局不变或原子派发。仅保守支持单默认显示器可解析格式，未知ROM不猜。index/像素凭据15秒过期，输入或上下文epoch变化后失效。读返回及写派发受INTERACTION_POLICY约束；无可信批准时敏感写拒绝needsConfirmation，模型confirmed无效。STALE类错误仅在读策略/预算/取消/设备状态允许时附一次新屏，否则screen=null+screenReason，保留原错误、不唤醒不重放；详细参数先Describe。",
                 "example": "command=Observe, serial=设备ID, mode=ui"
             },
             {
                 "command": "ExecuteStep",
-                "description": "执行受控动作或1–8步GUI短序列steps=[{action,expect?,waitTimeoutMs?}]，与action二选一；中间步必须expect且验证通过，未知/异常停，禁System及后续旧凭据。action为对象或JSON对象字符串，command=Wait|Tap|DoubleTap|Swipe|Scroll|ScrollUntil|Drag|Pinch|LongPress|InputText|Fill|ImeAction|EraseText|KeyCombo|KeyEvent|LaunchApp|KillApp|System。M2 selector字符串支持id/text及旧#N（一基XML顺序）、contains/regex/class/role；组合{id?,text?,contains?,regex?,class?,role?,nth?,within?}至少一个条件AND，nth为零基数字安全整数按top,left,bottom,right,index排序，裸多匹配拒绝，within一层祖先唯一；regex限安全线性语法/RE2，详见Describe。ScrollUntil仍仅精确id/text，Fill/EraseText严格不变，Drag/Pinch原始RPC身份仍唯一。普通Wait必须expect；M2 experimental、device未测的action.mode=idle单步/末步可无expect，与额外expect共用waitTimeoutMs默认5000上限30000。原生最多1500ms只调用一次best-effort hint，APK吞TimeoutException，void成功不能ui_automation_idle/verified；后续两次完整可见原始布局200ms间隔一致才layout_stable；传输未知不后备，idle失败不被expect洗绿，不输入/不唤醒/无固定sleep。expect={type:visible|absent,selector}或{type:foreground,package}。afterObserve默认false，true语义快照或对象{mode:ui|image,target?,id?,selector?,index?,snapshotId?,padding?,region?,maxWidth?,format?,quality?,grid?,limit?,screenshot?}；image+target=element沿用实验元素图参数与前后验证。timeoutMs=60000覆盖整步，等待不延长总预算。区分observed/dispatched/verified/unknown/failed，unknown不重试，verified非业务成功。新增动作仍实验，不因RPC成功声称系统识别；System须外层serial与既有授权，无任意shell。详细边界先Describe。",
+                "description": "执行受控动作或1–8步GUI短序列steps=[{action,expect?,waitTimeoutMs?}]，与action二选一；中间步必须expect且验证通过，未知/异常停，禁System及后续旧凭据。action为对象或JSON对象字符串，command=Wait|Tap|DoubleTap|Swipe|Scroll|ScrollUntil|Drag|Pinch|LongPress|InputText|Fill|ImeAction|EraseText|KeyCombo|KeyEvent|LaunchApp|KillApp|System|Handoff|Collect。M2 selector字符串支持id/text及旧#N（一基XML顺序）、contains/regex/class/role；组合{id?,text?,contains?,regex?,class?,role?,nth?,within?,childOf?,siblingOf?,hasDescendant?}至少一个条件AND，nth为零基数字安全整数按top,left,bottom,right,index排序，裸多匹配拒绝，within/childOf/siblingOf锚点唯一，hasDescendant为存在匹配后代，关系不可嵌套；regex限安全线性语法/RE2，详见Describe。ScrollUntil仍仅精确id/text，Fill/EraseText严格不变，Drag/Pinch原始RPC身份仍唯一。普通Wait必须expect；M2 experimental、当前代码device未复验的action.mode=idle单步/末步可无expect，与额外expect共用waitTimeoutMs默认5000上限30000。原生最多1500ms只调用一次best-effort hint，APK吞TimeoutException，void成功不能ui_automation_idle/verified；后续两次完整可见原始布局200ms间隔一致才layout_stable；传输未知不后备，idle失败不被expect洗绿，不输入/不唤醒/无固定sleep。expect={type:visible|absent,selector}或{type:foreground,package}。afterObserve默认false，true语义快照或对象{mode:ui|image,target?,id?,selector?,index?,snapshotId?,padding?,region?,maxWidth?,format?,quality?,grid?,limit?,screenshot?}；image+target=element沿用实验元素图参数与前后验证。timeoutMs默认60000覆盖整步/整段，含Handoff时默认及上限600000；等待不延长总预算。Handoff需reason，保持租约等人继续/停止，前后撤销凭据，不代批准敏感写；Collect需container，可maxPages=1–30/direction/until，保留页和重复条目，无进展或到限unknown，不证明列表完整。区分observed/dispatched/verified/unknown/failed，unknown不重试，verified非业务成功。新增动作仍实验，不因RPC成功声称系统识别；System须外层serial与既有授权，无任意shell。详细边界先Describe。",
                 "example": "command=ExecuteStep, serial=设备ID, action={\"command\":\"Tap\",\"id\":\"com.demo:id/open\"}, expect={\"type\":\"visible\",\"selector\":\"text=详情\"}, afterObserve=true"
             },
             {
+                "command": "RunTask",
+                "description": "实验性宿主参数化搜索闭环，不是任意App自主规划。仅接受task对象/JSON对象字符串：{serial,package,intent:search,inputs:{query},targets?:{entry?,field,submit},completion:{type:visible,id},decision:rules|shadow|jev,budget?:{timeoutMs,maxActions,maxObservations,maxModelCalls}}。显式设备、单包、display0且已在前台；targets及完成标记仅同包完整resource ID，字段必须唯一可见启用且非密码。entry可选；宿主自行进入搜索页、Fill读回、提交并独立验证新出现的完成标记。该标记只证明声明的UI状态，不证明任意业务结果或结果内容。全任务持有同一租约，总截止含模型/等待/验证/排干；观察预算覆盖内部图采样，未知写隔离停止不重放。rules无模型；shadow仅作无授权影子建议，输入值/屏幕文字不外发，不接受模型参数动作。预算默认60000ms/最多3动作/64次图采样/零模型（shadow最多3），上限300000ms/8/256/16；jev模式省略targets，由宿主从完整树生成最多8个唯一且有搜索语义的resource ID候选，Jev只能选择候选/wait/escalate，宿主连续执行并验证。默认60000ms/6动作/96采样/8模型调用，最多8轮和2次等待，模型每次最多2秒且零重试；执行前复采，失配/循环/未知写即停止。返回experimental=true及calibrated=false；概率门槛0.9/差值0.2仅实验策略，未完成真实模型与设备联合准入。仅受限搜索循环，无Skill学习、持久恢复或viewer接管。宿主落盘白名单脱敏JSONL，仅参数引用、不保存查询值/原始屏幕。返回taskId/status/code/counts/原子回执；取消/断线沿已有cancel_tool中断，依赖未排干不释放设备。需宿主注入执行器，独立插件缺服务即拒绝。",
+                "example": "command=RunTask, task={\"serial\":\"设备ID\",\"package\":\"com.demo\",\"intent\":\"search\",\"inputs\":{\"query\":\"关键词\"},\"targets\":{\"field\":\"com.demo:id/query\",\"submit\":\"com.demo:id/search_go\"},\"completion\":{\"type\":\"visible\",\"id\":\"com.demo:id/results\"}}"
+            },
+            {
                 "command": "Manage",
-                "description": "设备及显示管理。operation=connect|reconnect|disconnect|startDisplay|stopDisplay|displayStatus|actionHistory。actionHistory(serial,limit数字1–100)纯读内存脱敏元数据，不连接设备、不抢租约、不重放；connect可mode=auto|wireless|usb及address/serial；首次配对优先使用显示屏向导。startDisplay open=true复用Loom侧栏。连接管理不打断正在运行的设备动作。",
+                "description": "设备及显示管理。operation=connect|reconnect|disconnect|startDisplay|stopDisplay|displayStatus|actionHistory|recoverOwner。recoverOwner必须显式serial，仅本会话owner独立消失证明为released后解除隔离并作废旧凭据；不接受force/approval，不凭ping/reconnect或人工断言清隔离、不重放动作。actionHistory(serial,limit数字1–100)纯读内存脱敏元数据，不连接设备、不抢租约、不重放；connect可mode=auto|wireless|usb及address/serial；首次配对优先使用显示屏向导。startDisplay open=true复用Loom侧栏。连接管理不打断正在运行的设备动作。",
                 "example": "command=Manage, operation=startDisplay, open=true"
             }
         ]

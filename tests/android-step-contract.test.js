@@ -39,9 +39,16 @@ test('index requires the exact Observe snapshot, then is consumed by a successfu
     const { service, calls } = await harness();
     const observed = await service.processToolCall({ command: 'Observe' });
     await assert.rejects(service.processToolCall({ command: 'ExecuteStep', action: { command: 'Tap', index: 0 } }), /snapshotId/);
-    await assert.rejects(service.processToolCall({ command: 'ExecuteStep', action: { command: 'Tap', index: 0, snapshotId: 'wrong' } }), /快照|snapshot/);
+    let freshSnapshot;
+    await assert.rejects(service.processToolCall({ command: 'ExecuteStep', action: { command: 'Tap', index: 0, snapshotId: 'wrong' } }), error => {
+        assert.equal(error.code, 'STALE_SNAPSHOT');
+        assert.equal(error.details.screenReason, 'OBSERVED');
+        freshSnapshot = error.details.screen.snapshotId;
+        assert.notEqual(freshSnapshot, observed.details.snapshotId);
+        return true;
+    });
     assert.equal(actions(calls).length, 0);
-    const result = await service.processToolCall({ command: 'ExecuteStep', action: { command: 'Tap', index: 0, snapshotId: observed.details.snapshotId } });
+    const result = await service.processToolCall({ command: 'ExecuteStep', action: { command: 'Tap', index: 0, snapshotId: freshSnapshot } });
     assert.equal(result.details.execution.outcome, 'dispatched');
     await assert.rejects(service.processToolCall({ command: 'ExecuteStep', action: { command: 'Tap', index: 0, snapshotId: observed.details.snapshotId } }), /快照|Observe/);
     assert.equal(actions(calls).length, 1);
@@ -77,7 +84,7 @@ test('selector can acquire a current tree without a cached Observe', async () =>
 });
 
 test('failed stability resampling is unknown, never stable', async () => {
-    const { service } = await harness({ dump: (n) => n === 0 ? xml() : new Error('sample unavailable') });
+    const { service } = await harness({ dump: (n) => n === 0 ? xml() : Object.assign(new Error('sample unavailable'), { code: 'UI_ACQUISITION_FAILED' }) });
     const observed = await service.processToolCall({ command: 'Observe', stable: true });
     assert.equal(observed.details.settled, null);
     assert.equal(observed.details.stability, 'unknown');
@@ -206,7 +213,7 @@ for (const broken of ['<hierarchy><node text=broken /></hierarchy>', '<hierarchy
 
 test('absence cannot be verified using a truncated control list', async () => {
     const nodes = Array.from({ length: 501 }, (_, n) => `<node class="android.widget.Button" package="com.example" resource-id="com.example:id/b${n}" text="b${n}" clickable="true" bounds="[0,0][100,40]" />`).join('');
-    const { service } = await harness({ dump: () => `<hierarchy>${nodes}</hierarchy>` });
+    const { service } = await harness({ dump: () => `<hierarchy rotation="0">${nodes}</hierarchy>` });
     const result = await service.processToolCall({ command: 'ExecuteStep', action: { command: 'KeyEvent', key: 'home' }, waitTimeoutMs: 1, expect: { type: 'absent', selector: 'id=com.example:id/b500' } });
     assert.equal(result.details.execution.outcome, 'unknown');
 });

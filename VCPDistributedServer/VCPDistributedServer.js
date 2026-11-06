@@ -13,6 +13,8 @@ const chokidar = require('chokidar');
  const pluginManager = require('./Plugin.js');
 const GENERATED_LISTS_CONFIG_PATH = path.join(__dirname, '..', 'AppData', 'generated_lists', 'config.env');
 const MUSIC_PLAYLIST_FILE_PATH = path.join(__dirname, '..', 'AppData', 'songlist.json');
+const { createAndroidTaskExecutor } = require('../modules/services/androidTaskExecutor');
+const { createTaskTraceStore } = require('../modules/services/androidTaskTrace');
 
 // DEBUG_MODE is now passed in config
 // const DEBUG_MODE = (process.env.DebugMode || "False").toLowerCase() === "true";
@@ -85,6 +87,10 @@ class DistributedServer {
         this.workspaceService = config.workspaceService || null; // 工作区只读门面（白名单来源）
         this.jevService = config.jevService || null;
         this.systemAuthorization = config.systemAuthorization || null;
+        this.humanInteraction = config.humanInteraction || null;
+        this.androidTaskExecutor = createAndroidTaskExecutor({ jev: this.jevService,
+            traceStore: createTaskTraceStore({ directory: path.join(__dirname, '..', 'AppData', 'android-task-traces') }) });
+        this.activeToolCalls = new Map();
         this.onToolResult = typeof config.onToolResult === 'function' ? config.onToolResult : null; // 工具调用成功后的旁路通知，不影响返回结果
         this.ws = null;
         this.app = express(); // 创建 Express 应用
@@ -189,6 +195,8 @@ class DistributedServer {
             workspaceService: this.workspaceService,
             jevService: this.jevService,
             systemAuthorization: this.systemAuthorization,
+            humanInteraction: this.humanInteraction,
+            androidTaskExecutor: this.androidTaskExecutor,
         }, startupOptions);
         if (this.stopped) return;
         this.registerDiagnosticRoutes();
@@ -317,9 +325,11 @@ class DistributedServer {
         console.log(`[${this.serverName}] Attempting to connect to main server at ${connectionUrl}`);
 
         // this.ws 现在是一个纯粹的客户端实例
-        this.ws = new WebSocket(connectionUrl);
+        const socket = new WebSocket(connectionUrl);
+        this.ws = socket;
 
         this.ws.on('open', async () => {
+            if (this.ws !== socket || this.stopped) return;
             console.log(`[${this.serverName}] Successfully connected to main server.`);
             this.reconnectInterval = 5000;
             this.registerTools();
@@ -331,10 +341,12 @@ class DistributedServer {
         });
 
         this.ws.on('message', (message) => {
-            this.handleMainServerMessage(message);
+            this.handleMainServerMessage(message, socket);
         });
         
         this.ws.on('close', () => {
+            this.cancelActiveToolCalls(socket);
+            if (this.ws !== socket) return;
             console.log(`[${this.serverName}] Disconnected from main server.`);
             // 新增：清理静态占位符更新定时器
             this.clearStaticPlaceholderUpdates();
@@ -393,6 +405,7 @@ class DistributedServer {
                 type: 'register_tools',
                 data: {
                     serverName: this.serverName,
+                    capabilities: { cancelTool: true },
                     tools: manifests
                 }
             };
@@ -638,25 +651,34 @@ class DistributedServer {
         }
     }
 
-    async handleMainServerMessage(message) {
+    async handleMainServerMessage(message, socket = this.ws) {
+        if (this.stopped || socket !== this.ws) return;
         try {
             const parsedMessage = JSON.parse(message);
             if (this.debugMode) console.log(`[${this.serverName}] Received message from main server:`, parsedMessage.type);
 
             if (parsedMessage.type === 'execute_tool') {
-                await this.handleToolExecutionRequest(parsedMessage.data);
+                await this.handleToolExecutionRequest(parsedMessage.data, socket);
+            } else if (parsedMessage.type === 'cancel_tool') {
+                const call = this.activeToolCalls.get(parsedMessage.data?.requestId);
+                if (call?.socket === socket) call.controller.abort();
             }
         } catch (e) {
             console.error(`[${this.serverName}] Error parsing message from main server:`, e);
         }
     }
 
-    async handleToolExecutionRequest(data) {
+    async handleToolExecutionRequest(data, socket = this.ws) {
         const { requestId, toolName, toolArgs, _vcpContext } = data;
         if (!requestId || !toolName) {
             console.error(`[${this.serverName}] Invalid tool execution request received.`);
             return;
         }
+
+        // A duplicate in-flight ID cannot replace the cancellation owner.
+        if (this.activeToolCalls.has(requestId) || this.stopped || socket !== this.ws) return;
+        const controller = new AbortController();
+        this.activeToolCalls.set(requestId, { controller, socket });
 
         if (this.debugMode) console.log(`[${this.serverName}] Executing tool '${toolName}' for request ID: ${requestId}`);
 
@@ -706,12 +728,15 @@ class DistributedServer {
             // --- 结束：处理内部文件请求 ---
 
             // _vcpContext 来自受信任的 execute_tool 传输层，与模型生成的 toolArgs 隔离。
+            controller.signal.throwIfAborted();
             const result = await pluginManager.processToolCall(toolName, toolArgs, {
                 requestId,
+                signal: controller.signal,
                 vcpContext: _vcpContext && typeof _vcpContext === 'object'
                     ? { ..._vcpContext, requestId }
                     : { requestId }
             });
+            controller.signal.throwIfAborted();
             if (this.onToolResult) {
                 try {
                     this.onToolResult(toolName, toolArgs, result);
@@ -916,10 +941,19 @@ class DistributedServer {
                     ...describeToolError(error),
                 }
             };
+        } finally {
+            this.activeToolCalls.delete(requestId);
         }
 
-        this.sendMessage(responsePayload);
+        // A late result belongs to its original connection, never a new session.
+        if (!this.stopped && socket === this.ws) this.sendMessage(responsePayload);
         if (this.debugMode) console.log(`[${this.serverName}] Sent result for request ID: ${requestId}`);
+    }
+
+    cancelActiveToolCalls(socket) {
+        for (const call of this.activeToolCalls.values()) {
+            if (!socket || call.socket === socket) call.controller.abort();
+        }
     }
 
     sendMessage(payload) {
@@ -938,6 +972,7 @@ class DistributedServer {
         console.log(`[${this.serverName}] Stopping server...`);
         // 立即取消后续启动阶段；等待正在执行的初始化后再释放插件资源。
         this.stopped = true;
+        this.cancelActiveToolCalls();
         this.stopPromise = Promise.resolve().then(async () => {
         if (this.initializePromise) {
             await this.initializePromise.catch(error => {

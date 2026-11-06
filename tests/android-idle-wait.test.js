@@ -299,8 +299,8 @@ test('RPC waitForIdle is one-argument read-only experimental and validates numer
     assert.deepEqual(rpc.entry('waitForIdle'), { arity: [1], write: false, experimental: true });
     for (const timeout of [1, 1500, 2000]) assert.equal(rpc.validate('waitForIdle', [timeout]).ok, true);
     const client = new UiServer();
-    client._ready = true;
-    client._port = 1;
+    client.transport.ready = true;
+    client.transport.port = 1;
     let httpRequests = 0;
     client._rpc = async () => { httpRequests++; return null; };
     for (const params of [[], [1, 2], ['100'], [0], [-1], [2001], [1.1], [NaN], [Infinity], [true], [null], [undefined], [1n]]) {

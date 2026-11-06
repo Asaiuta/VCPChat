@@ -3,262 +3,442 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Android 显示屏</title>
-<!-- 内联图标：避免浏览器自动请求 /favicon.ico 造成 404 -->
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%234ea8de'/%3E%3Crect x='9' y='6' width='14' height='20' rx='2.5' fill='%230b0d10'/%3E%3C/svg%3E">
+<title>安卓显示屏 · VCPChat</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='9' y='3' width='14' height='26' rx='3' fill='none' stroke='%23e53935' stroke-width='2'/%3E%3Cpath d='M14 25h4' stroke='%23e53935' stroke-width='2'/%3E%3C/svg%3E">
 <style>
     :root {
-        --bg: #0b0d10;
-        --panel: #14181d;
-        --panel-2: #1a1f26;
-        --line: #262c33;
-        --text: #e8ecef;
-        --muted: #8b959e;
-        --accent: #4ea8de;
-        --ok: #4ade80;
-        --warn: #fbbf24;
-        --bad: #f87171;
+        color-scheme: dark;
+        --bg: #101316;
+        --panel: #171b20;
+        --panel-2: #222930;
+        --line: #2f3942;
+        --text: #f1f5f9;
+        --muted: #a1adbb;
+        --accent: #ef5350;
+        --on-accent: #171b20;
+        --ok: #81c784;
+        --warn: #e7bd69;
+        --bad: #ef8585;
+        --space-sm: 8px;
+        --space-md: 16px;
+        --space-lg: 24px;
+    }
+    @media (prefers-color-scheme: light) {
+        :root {
+            color-scheme: light;
+            --bg: #f8fafc;
+            --panel: #f1f5f9;
+            --panel-2: #e2e8f0;
+            --line: #cbd5e1;
+            --text: #0f172a;
+            --muted: #475569;
+            --accent: #2563eb;
+            --on-accent: #f8fafc;
+            --ok: #24764b;
+            --warn: #8c6117;
+            --bad: #b73030;
+        }
     }
     * { box-sizing: border-box; }
     html, body {
         margin: 0; height: 100%;
         background: var(--bg); color: var(--text);
-        font: 13px/1.5 "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
+        font: 14px/1.6 var(--vcp-ui-font-family, var(--font-family, "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif));
         overflow: hidden;
     }
-    #app { display: grid; grid-template-rows: auto 1fr auto; height: 100%; }
+    #app { display: grid; grid-template-rows: 48px minmax(0, 1fr) auto; height: 100%; }
+    #deviceNavigation { grid-row: 3; display: none; align-items: center; justify-content: center; gap: 12px; min-height: 48px; padding: 6px 12px; border-top: 1px solid var(--line); background: var(--panel); }
+    #app:has(#stage[data-stream-state="ready"]:not(.hidden)) > #deviceNavigation { display: flex; }
+    #deviceNavigation .nav-key { width: 36px; height: 32px; padding: 6px; }
+    #deviceNavigation .nav-key svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.6; }
+    #deviceNavigation #takeoverStart { margin-left: auto; }
+    #deviceNavigation[data-active="true"] .nav-key { color: var(--text); }
+    #app > header { grid-row: 1; }
+    body.settings-window #stage, body.settings-window #deviceNavigation, body.settings-window .header-actions { display: none !important; }
+    body.settings-window #settingsPage { display: block !important; }
+    body.settings-window .settings-heading h1 { font-size: 18px; }
+    #stage, #settingsPage { grid-row: 2; grid-column: 1; }
+    #takeoverMenu { position: relative; }
+    #takeoverMenu > summary { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; list-style: none; border-radius: var(--vcp-ui-radius-control, 8px); color: var(--muted); }
+    #takeoverMenu > summary::-webkit-details-marker { display: none; }
+    #takeoverMenu > summary:hover, #takeoverMenu[open] > summary { color: var(--text); background: var(--panel-2); }
+    #takeoverMenu > summary[data-active="true"] { color: var(--warn); }
+    #takeoverMenu > summary svg { width: 17px; height: 17px; }
+    #takeoverBar { position: fixed; z-index: 20; top: 52px; right: 12px; display: flex; align-items: center; flex-wrap: wrap; gap: 12px; width: min(320px, calc(100vw - 24px)); padding: 16px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--vcp-ui-radius-card, 8px); }
+        #takeoverStatus { flex: 1 1 220px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+        #takeoverStatus[data-tone="error"] { color: var(--bad); }
+        #takeoverStatus[data-tone="warning"] { color: var(--warn); }
+        #takeoverActions { display: flex; flex-wrap: wrap; gap: 8px; }
+        #takeoverFrame { width: 100%; height: 100%; min-width: 0; min-height: 0; object-fit: contain; display: block; touch-action: none; user-select: none; -webkit-user-drag: none; }
+        #takeoverFrame.fit-width { width: 100%; height: auto; flex: none; }
+        #takeoverFrame[data-interactive="true"] { cursor: crosshair; }
+        #stage.takeover-mode #screen, #stage.takeover-mode #h264, #stage.takeover-mode #emptyState { display: none !important; }
     header {
-        display: flex; align-items: center; gap: 10px;
-        padding: 8px 12px;
+        display: flex; align-items: center; gap: 12px;
+        min-height: 48px; padding: 6px 16px;
         border-bottom: 1px solid var(--line);
         background: var(--panel);
-        flex-wrap: wrap;
     }
-    .title { font-weight: 650; font-size: 12px; }
-    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
-    .dot.online { background: var(--ok); box-shadow: 0 0 8px color-mix(in srgb, var(--ok) 60%, transparent); }
+    .brand { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; }
+    .brand .dot { flex: none; }
+    .header-actions { display: flex; align-items: center; margin-left: auto; flex: none; }
+    .icon-button { display: grid; place-items: center; width: 32px; padding: 6px; border-color: transparent; }
+    .icon-button svg { width: 18px; height: 18px; }
+    #settingsPage { min-height: 0; overflow-y: auto; background: var(--bg); }
+    .settings-shell { max-width: 920px; padding: 24px; margin-inline: auto; }
+    .settings-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 24px; }
+    .settings-heading h1 { margin: 0; font-size: 20px; line-height: 1.35; }
+    .settings-tabs { display: flex; flex-wrap: wrap; gap: 16px; border-bottom: 1px solid var(--line); margin-bottom: 24px; }
+    .settings-tabs button { border: 0; border-radius: 0; padding: 8px 0 12px; color: var(--muted); }
+    .settings-tabs button[aria-selected="true"] { color: var(--text); border-bottom: 2px solid var(--accent); font-weight: 650; }
+    .controller-fields { display: grid; gap: 16px; margin: 0; padding: 0; border: 0; min-width: 0; }
+    .controller-fields label { display: grid; gap: 6px; font-size: 13px; }
+    .controller-fields small, .controller-note { color: var(--muted); font-size: 12px; line-height: 1.6; }
+    .controller-fields input:not([type="checkbox"]), .controller-fields select, .controller-fields textarea {
+        box-sizing: border-box; width: 100%; min-width: 0; padding: 8px 10px; border: 1px solid var(--line);
+        border-radius: 5px; background: var(--input-bg, var(--bg)); color: var(--text); font: inherit;
+    }
+    .controller-fields textarea { min-height: 88px; resize: vertical; }
+    .controller-fields .switch-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+    .switch-row input { appearance: none; flex: none; box-sizing: border-box; width: 34px; height: 20px; min-height: 20px; padding: 0; margin: 0; border: 1px solid var(--line);
+        border-radius: 12px; background: var(--panel-2); position: relative; cursor: pointer; }
+    .switch-row input::after { content: ''; position: absolute; width: 14px; height: 14px; top: 2px; left: 2px;
+        border-radius: 50%; background: var(--muted); }
+    .switch-row input:checked { background: var(--accent); }
+    .switch-row input:checked::after { left: 16px; background: var(--on-accent); }
+    .controller-fields :disabled { opacity: .55; cursor: default; }
+    .controller-fields details > summary { cursor: pointer; padding-block: 8px; font-weight: 600; }
+    .controller-fields details > .controller-fields { margin-top: 12px; }
+    .controller-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+    #controllerForm > .settings-section { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--line); }
+    .controller-fields select { appearance: auto; }
+    .controller-fields :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+    .section-heading { margin: 0 0 12px; font-size: 15px; line-height: 1.4; font-weight: 650; }
+    .settings-section + .settings-section { margin-top: 28px; padding-top: 24px; border-top: 1px solid var(--line); }
+    .empty-state { display: grid; justify-items: center; gap: 12px; text-align: center; padding: 24px; color: var(--muted); }
+    .empty-state p { margin: 0; max-width: 32ch; }
+    .empty-state strong { color: var(--text); font-size: 15px; font-weight: 600; }
+    .diagnostic-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; margin: 20px 0; }
+    .diagnostic-grid dt { color: var(--muted); font-size: 11px; }
+    .diagnostic-grid dd { margin: 4px 0 0; font-variant-numeric: tabular-nums; }
+    #resolutionPreview { min-height: 1.6em; font-variant-numeric: tabular-nums; }
+    .brand-icon { width: 22px; height: 28px; color: var(--accent); flex: none; }
+    .title { font-weight: 650; font-size: 13px; line-height: 1.4; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .brand > div { line-height: 1.4; }
+    .brand-caption { display: block; color: var(--muted); font-size: 10px; line-height: 1.4; letter-spacing: .04em; }
+    .connection { display: flex; align-items: center; gap: 6px; min-width: 0; margin-left: auto; }
+    #conn { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .toolbar { display: flex; gap: 8px; flex-wrap: wrap; }
+    .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); flex: none; }
+    .dot.online { background: var(--ok); }
     .dot.warn { background: var(--warn); }
     .dot.error { background: var(--bad); }
     .stat { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+    .metrics, .toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .metrics { column-gap: 12px; }
     .spacer { flex: 1; }
+    button, input, select { font: inherit; }
+    .quality-panel { padding: 0; }
+    .quality-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px 12px; align-items: end; }
+    .quality-fields label { display: grid; gap: 4px; min-width: 0; font-size: 11px; color: var(--muted); }
+    .quality-fields label:last-of-type { grid-column: 1 / -1; }
+    .quality-fields button { grid-column: 1 / -1; justify-self: end; min-width: 88px; }
+    .quality-fields select { min-width: 0; width: 100%; min-height: 32px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 5px; background: var(--bg); color: var(--text); }
+    .quality-help { margin: 8px 0 0; color: var(--muted); font-size: 12px; }
+    .quality-fields select.vcp-ui-native-select { appearance: none; padding-right: 32px !important; }
+    .quality-fields label:has(select) { position: relative; }
+    .quality-fields label:has(select)::after { content: ''; position: absolute; right: 14px; bottom: 14px; width: 6px; height: 6px; border-right: 1.5px solid var(--muted); border-bottom: 1.5px solid var(--muted); transform: rotate(45deg); pointer-events: none; }
+    #settingsPage { scrollbar-width: thin; scrollbar-color: var(--scrollbar-thumb, var(--muted)) var(--scrollbar-track, transparent); }
+    .vcp-ui-button[aria-pressed="true"] { color: var(--accent) !important; border-color: var(--accent) !important; background: color-mix(in srgb, var(--accent) 10%, transparent) !important; }
+    #qualityMessage:empty { display: none; }
     button {
-        background: transparent; color: var(--muted);
-        border: 1px solid var(--line); border-radius: 6px;
-        padding: 4px 10px; font-size: 11px; cursor: pointer;
-        font-family: inherit; transition: border-color .12s, color .12s;
+        background: transparent; color: var(--text);
+        border: 1px solid var(--line); border-radius: 5px;
+        min-height: 32px; padding: 5px 10px; font-size: 12px; cursor: pointer;
+        transition: background-color .12s, border-color .12s, color .12s;
     }
-    button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
-    button.active { border-color: var(--accent); color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
-    button:disabled { opacity: .45; cursor: default; }
-    button.primary {
-        background: var(--accent); border-color: var(--accent); color: #06121a;
-        font-weight: 600;
-    }
-    button.primary:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 85%, white); color: #06121a; }
+    button:hover:not(:disabled) { background: var(--panel-2); border-color: var(--muted); }
+    button.active { border-color: var(--accent); color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+    button:disabled { opacity: .5; cursor: default; }
+    button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
+    button.primary:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 90%, var(--text)); border-color: var(--accent); }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+    #settingsTitle:focus, #guideTitle:focus { outline: none; }
 
     #stage {
-        position: relative;
-        display: flex; align-items: center; justify-content: center;
-        overflow: hidden; padding: 12px; min-height: 0;
-        background: radial-gradient(circle at 50% 40%, #161b21 0%, #0b0d10 70%);
+        position: relative; display: flex; align-items: center; justify-content: center;
+        overflow: hidden; padding: 0; min-height: 0; background: var(--bg);
     }
-    #screen {
-        max-width: 100%; max-height: 100%;
-        object-fit: contain; border-radius: 10px;
-        box-shadow: 0 12px 40px rgba(0,0,0,.55), 0 0 0 1px var(--line);
-        display: block;
+    #screen, #h264 {
+        width: 100%; height: 100%; min-width: 0; min-height: 0; object-fit: contain; display: block;
     }
-    #screen.fit-width { width: 100%; height: auto; max-height: none; }
-
-    /* H.264 硬解走 canvas，尺寸规则与 img 保持一致 */
-    #h264 {
-        max-width: 100%; max-height: 100%;
-        object-fit: contain; border-radius: 10px;
-        box-shadow: 0 12px 40px rgba(0,0,0,.55), 0 0 0 1px var(--line);
-        display: block;
-        image-rendering: auto;
-    }
-    #h264.fit-width { width: 100%; height: auto; max-height: none; }
-
-    /* ---------- 连接向导 ---------- */
-    #wizard {
-        position: absolute; inset: 0;
-        display: flex; align-items: center; justify-content: center;
-        padding: 20px; overflow-y: auto;
-    }
+    #stage:has(.fit-width) { overflow: auto; align-items: start; }
+    #screen.fit-width, #h264.fit-width { width: 100%; height: auto; flex: none; }
+    #h264 { image-rendering: auto; }
+    #screen, #h264 { transition: opacity .2s ease-out; }
+    #stage[data-stream-state="loading"] > :is(#screen, #h264),
+    #stage[data-stream-state="error"] > :is(#screen, #h264) { opacity: 0; visibility: hidden; }
+    .stream-placeholder { position: absolute; inset: 0; z-index: 1; display: grid; align-content: center; justify-items: center; gap: 12px; padding: 32px; text-align: center; color: var(--muted); background: var(--bg); opacity: 1; transition: opacity .2s ease-out, visibility .2s; }
+    .stream-placeholder strong { color: var(--text); font-size: 15px; font-weight: 600; }
+    .stream-placeholder p { margin: 0; max-width: 30ch; font-size: 12px; }
+    .stream-spinner { width: 28px; height: 28px; color: var(--accent); animation: stream-spin 1.1s linear infinite; }
+    #stage[data-stream-state="ready"] .stream-placeholder { opacity: 0; visibility: hidden; pointer-events: none; }
+    #stage[data-stream-state="error"] .stream-spinner { display: none; }
+    #stage.takeover-mode .stream-placeholder { display: none; }
+    @keyframes stream-spin { to { transform: rotate(360deg); } }
+    /* Settings never consume or overlay the stream surface. */
+    #wizard { background: var(--bg); }
     #wizard.hidden { display: none; }
-    .card {
-        width: 100%; max-width: 440px;
-        background: var(--panel); border: 1px solid var(--line);
-        border-radius: 12px; padding: 18px 18px 16px;
-        box-shadow: 0 18px 50px rgba(0,0,0,.5);
-    }
-    .card h2 {
-        margin: 0 0 4px; font-size: 15px; font-weight: 650;
-        display: flex; align-items: center; gap: 8px;
-    }
-    .card .lead { color: var(--muted); font-size: 12px; margin: 0 0 16px; }
-    .step {
-        border-top: 1px solid var(--line);
-        padding: 14px 0 0; margin-top: 14px;
-    }
-    .step:first-of-type { border-top: none; padding-top: 0; margin-top: 0; }
-    .step-head {
-        display: flex; align-items: baseline; gap: 8px;
-        font-size: 12px; font-weight: 600; margin-bottom: 3px;
-    }
-    .step-no {
-        flex: none; width: 17px; height: 17px; border-radius: 50%;
-        border: 1px solid var(--line); color: var(--muted);
-        font-size: 10px; line-height: 15px; text-align: center; font-weight: 500;
-    }
-    .step.done .step-no { border-color: var(--ok); color: var(--ok); }
-    .step-body { color: var(--muted); font-size: 12px; margin-left: 25px; }
-    .step-body p { margin: 4px 0; }
-    .fields { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+    .connection-guide { width: 100%; max-width: 920px; margin-inline: auto; }
+    .guide-heading { margin-bottom: 28px; }
+    .guide-heading h2 { margin: 0 0 8px; font-size: 15px; line-height: 1.4; font-weight: 650; }
+    .lead { color: var(--muted); font-size: 13px; margin: 0; max-width: 66ch; }
+    .guide-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); gap: 32px; }
+    .pair-steps { display: flex; flex-direction: column; gap: 24px; min-width: 0; }
+    .step { min-width: 0; }
+    #step3 { border-left: 1px solid var(--line); padding-left: 32px; }
+    .step-head { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; font-size: 13px; font-weight: 600; }
+    .step-no { flex: none; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+    .step.done .step-no { color: var(--ok); }
+    .step-body { color: var(--muted); font-size: 12px; }
+    .step-body p { margin: 0 0 8px; max-width: 65ch; }
+    .fields { display: flex; align-items: end; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+    .field { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 0; color: var(--text); font-size: 11px; }
+    .field.short { flex: 0 0 100px; }
     input {
-        flex: 1; min-width: 0;
-        background: var(--panel-2); color: var(--text);
-        border: 1px solid var(--line); border-radius: 6px;
-        padding: 7px 9px; font-size: 12px; font-family: inherit;
+        width: 100%; min-width: 0; min-height: 34px;
+        background: var(--panel); color: var(--text);
+        border: 1px solid var(--line); border-radius: 5px; padding: 7px 9px; font-size: 12px;
     }
-    input:focus { outline: none; border-color: var(--accent); }
-    input::placeholder { color: #5e6a73; }
-    input.code-input { flex: none; width: 92px; letter-spacing: 2px; text-align: center; }
-    .btn-row { display: flex; gap: 6px; margin-top: 8px; }
-    .msg { margin-top: 8px; font-size: 11.5px; white-space: pre-wrap; word-break: break-word; }
+    input:focus { border-color: var(--accent); }
+    input::placeholder { color: var(--muted); opacity: .8; }
+    input.code-input { font-variant-numeric: tabular-nums; }
+    #pairCode { letter-spacing: 2px; }
+    .btn-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+    #manualBox { margin-top: 24px; }
+    summary { color: var(--text); cursor: pointer; font-size: 12px; width: fit-content; }
+    #manualBox[open] > summary { margin-bottom: 12px; }
+    #pairBox { margin-top: 16px; }
+    .msg { margin-top: 8px; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .msg:empty { margin: 0; }
     .msg.ok { color: var(--ok); }
     .msg.err { color: var(--bad); }
     .msg.info { color: var(--muted); }
-    .device-line {
-        display: flex; align-items: center; gap: 8px;
-        padding: 6px 9px; border-radius: 6px; background: var(--panel-2);
-        border: 1px solid var(--line); margin-top: 6px; font-size: 12px;
-    }
-    .device-line .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .badge {
-        font-size: 10px; padding: 1px 6px; border-radius: 999px;
-        border: 1px solid var(--line); color: var(--muted); flex: none;
-    }
-    .badge.ok { border-color: color-mix(in srgb, var(--ok) 50%, transparent); color: var(--ok); }
-    .badge.warn { border-color: color-mix(in srgb, var(--warn) 50%, transparent); color: var(--warn); }
-    .tip {
-        background: color-mix(in srgb, var(--accent) 10%, transparent);
-        border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
-        border-radius: 7px; padding: 8px 10px; font-size: 11.5px;
-        color: #b8d9ee; margin-top: 12px;
-    }
-    .tip code {
-        font-family: "Cascadia Code", Consolas, monospace;
-        color: var(--accent); font-size: 11px;
-    }
-
-    footer {
-        display: flex; align-items: center; gap: 14px;
-        padding: 6px 12px; border-top: 1px solid var(--line);
-        background: var(--panel); font-size: 11px; color: var(--muted);
-        font-variant-numeric: tabular-nums;
-    }
-    footer .key { color: var(--text); }
+    .device-line { display: flex; align-items: center; gap: 8px; padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 12px; }
+    .device-line .name { flex: 1; min-width: 0; overflow-wrap: anywhere; color: var(--text); }
+    .badge { font-size: 11px; color: var(--muted); flex: none; }
+    .badge.ok { color: var(--ok); }
+    .badge.warn { color: var(--warn); }
+    #deviceSummary { margin-top: 12px; font-size: 12px; color: var(--muted); }
+    .tip { border-top: 1px solid var(--line); padding-top: 16px; margin-top: 28px; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+    .tip:empty { display: none; }
+    .tip code { font-family: "Cascadia Code", Consolas, monospace; color: var(--text); }
+    #error-box { position: absolute; bottom: 16px; inset-inline: 16px; padding: 10px 12px; border: 1px solid var(--bad); background: var(--panel); color: var(--bad); font-size: 12px; overflow-wrap: anywhere; }
+    .diagnostics { font-size: 13px; }
+    #hint { max-width: 65ch; }
     .hidden { display: none !important; }
+    @media (max-width: 720px) {
+        .guide-layout { grid-template-columns: minmax(0, 1fr); gap: 24px; }
+        #step3 { border-left: 0; border-top: 1px solid var(--line); padding: 24px 0 0; }
+        .settings-shell { padding: 24px 16px; }
+    }
+    @media (max-width: 420px) {
+        .toolbar { gap: 8px; }
+        .quality-fields button { width: 100%; }
+        header { gap: 8px; padding-inline: 12px; }
+        .brand-icon { display: none; }
+    }
+    @media (prefers-reduced-motion: reduce) { button, #screen, #h264, .stream-placeholder { transition: none; } .stream-spinner { animation: none; } }
 </style>
 </head>
-<body>
+<body class="vcp-ui-scope">
 <div id="app">
     <header>
-        <span class="dot" id="dot"></span>
-        <span class="title">Android 显示屏</span>
-        <span class="stat" id="conn">未连接</span>
-        <span class="spacer"></span>
-        <span class="stat" id="res">--</span>
-        <span class="stat" id="fps">-- fps</span>
-        <span class="stat" id="lat">-- ms</span>
-        <button id="fit" title="在原始尺寸与适合宽度间切换">适合宽度</button>
-        <button id="reconnect" title="重新建立连接">重连</button>
-        <button id="setup" title="连接或切换手机">连接手机</button>
+        <div class="brand">
+            <svg class="brand-icon" viewBox="0 0 24 30" fill="none" aria-hidden="true"><rect x="5" y="2" width="14" height="26" rx="3" stroke="currentColor" stroke-width="1.5"/><path d="M10 5h4M10 25h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            <span class="title">安卓显示屏</span>
+            <span class="dot" id="dot" aria-hidden="true"></span>
+        </div>
+        <div class="header-actions">
+          <details id="takeoverMenu">
+            <summary id="takeoverMenuToggle" title="人工接管" aria-label="人工接管"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 13V5a2 2 0 0 1 4 0v7-4a2 2 0 0 1 4 0v5-2a2 2 0 0 1 4 0v5a6 6 0 0 1-6 6h-1a6 6 0 0 1-5-3l-4-6a2 2 0 0 1 3-2l1 2Z"/></svg></summary>
+            <div id="takeoverBar" aria-label="人工接管">
+                <span id="takeoverStatus" role="status" aria-live="polite" aria-atomic="true">只读画面 · 人工接管需在电脑上批准</span>
+                <div id="takeoverActions" class="hidden">
+                    <button id="takeoverRefresh" disabled>刷新快照</button>
+                    <button id="takeoverEnd" disabled>结束接管</button>
+                </div>
+            </div>
+          </details>
+            <button id="openSettings" class="icon-button" title="设置" aria-label="打开设置" aria-controls="settingsPage" aria-expanded="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="m9 3-.6 2.2-2 .9-2.1-.6-2 3.5 1.6 1.6v2.8L2.3 15l2 3.5 2.1-.6 2 .9L9 21h4l.6-2.2 2-.9 2.1.6 2-3.5-1.6-1.6v-2.8l1.6-1.6-2-3.5-2.1.6-2-.9L13 3Z"/><circle cx="11" cy="12" r="3"/></svg></button>
+        </div>
     </header>
-
-    <main id="stage">
-        <canvas id="h264" class="hidden"></canvas>
-        <img id="screen" alt="手机屏幕实时画面" class="hidden">
-
-        <div id="wizard">
-            <div class="card">
-                <h2>连接你的手机</h2>
-                <p class="lead">全程点按，不需要敲命令行。手机和电脑要在同一个 WiFi。</p>
-
-                <!-- 步骤 1 -->
-                <div class="step" id="step1">
-                    <div class="step-head"><span class="step-no">1</span>在手机上打开无线调试</div>
-                    <div class="step-body">
-                        <p>设置 → 关于手机 → 连点「版本号」7 次，回到设置进「开发者选项」，打开<strong>无线调试</strong>。</p>
-                        <p>手机和电脑要在同一个 WiFi。</p>
-                    </div>
+    <main id="stage" aria-label="安卓只读显示屏">
+        <canvas id="h264" class="hidden" role="img" aria-label="手机屏幕实时画面（只读）"></canvas>
+        <img id="screen" alt="手机屏幕实时画面（只读）" class="hidden">
+        <div id="streamPlaceholder" class="stream-placeholder hidden" role="status" aria-live="polite" aria-atomic="true">
+            <svg class="stream-spinner" viewBox="0 0 32 32" fill="none" aria-hidden="true"><circle cx="16" cy="16" r="12" stroke="currentColor" stroke-width="2" opacity=".18"/><path d="M16 4a12 12 0 0 1 12 12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+            <strong id="streamTitle">正在连接视频流</strong>
+            <p id="streamDetail">正在准备画面，首帧到达后自动显示。</p>
+            <button id="retryStream" class="hidden">重试画面</button>
+        </div>
+        <img id="takeoverFrame" alt="接管快照，操作后刷新；仅在快照有效时可点击或滑动" class="hidden" draggable="false">
+        <div id="emptyState" class="empty-state"><strong>尚未连接手机</strong><p>在设置中连接设备，画面将在这里完整显示。</p><button id="connectSettings">打开连接设置</button></div>
+        <div id="error-box" class="hidden" role="status" aria-live="polite" aria-atomic="true"></div>
+    </main>
+    <nav id="deviceNavigation" aria-label="手机导航" data-active="false">
+        <button id="takeoverBack" class="nav-key" title="返回（需先批准人工接管）" aria-label="手机返回" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 5-7 7 7 7" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        <button id="takeoverHome" class="nav-key" title="返回桌面（需先批准人工接管）" aria-label="返回手机桌面" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="7"/></svg></button>
+        <button id="takeoverRecents" class="nav-key" title="最近任务（需先批准人工接管）" aria-label="手机最近任务" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2"/></svg></button>
+        <button id="takeoverStart" disabled>开始接管</button>
+    </nav>
+    <section id="settingsPage" class="hidden" aria-labelledby="settingsTitle">
+      <div class="settings-shell">
+        <div class="settings-heading"><h1 id="settingsTitle" tabindex="-1">设置</h1><button id="closeSettings">返回画面</button></div>
+        <nav class="settings-tabs" role="tablist" aria-label="设置分类">
+            <button id="quality" role="tab" aria-selected="true" aria-controls="displayPanel" tabindex="0">画面</button>
+            <button id="setup" role="tab" aria-selected="false" aria-controls="wizard" tabindex="-1">连接</button>
+            <button id="controllerTab" role="tab" aria-selected="false" aria-controls="controllerPanel" tabindex="-1">控制器</button>
+            <button id="diagnosticsTab" role="tab" aria-selected="false" aria-controls="diagnosticsPanel" tabindex="-1">状态</button>
+        </nav>
+        <section id="displayPanel" role="tabpanel" aria-labelledby="quality">
+          <section class="settings-section" aria-labelledby="displayTitle">
+            <h2 id="displayTitle" class="section-heading">显示方式</h2>
+            <div class="toolbar">
+                <button id="fit" aria-pressed="false" title="默认完整显示；适合宽度时可滚动查看">适合宽度</button>
+                <button id="fitWindow" class="hidden" disabled title="返回画面并按手机比例收紧窗口，不裁剪画面">贴合窗口</button>
+                <button id="reconnect" title="重新建立画面连接">重连画面</button>
+            </div>
+            <p class="quality-help">默认完整显示，保留手机比例；适合宽度时可滚动查看。</p>
+          </section>
+          <section id="qualityPanel" class="quality-panel settings-section" aria-labelledby="qualityTitle">
+            <h2 id="qualityTitle" class="section-heading">视频画质</h2>
+        <div class="quality-fields">
+            <label for="qualityFps">帧率上限<select id="qualityFps"><option value="15">15 fps</option><option value="30">30 fps</option><option value="60">60 fps</option><option value="90">90 fps</option><option value="120">120 fps</option></select></label>
+            <label for="qualityBitRate">目标码率<select id="qualityBitRate"><option value="1000000">1 Mbps</option><option value="2000000">2 Mbps</option><option value="4000000">4 Mbps</option><option value="8000000">8 Mbps</option><option value="16000000">16 Mbps</option><option value="32000000">32 Mbps</option></select></label>
+            <label for="qualitySize">视频分辨率<select id="qualitySize" aria-describedby="resolutionPreview"><option value="native">原始分辨率</option><option value="short:540">540p · 短边 540 px</option><option value="short:720">720p · 短边 720 px</option><option value="short:1080">1080p · 短边 1080 px</option><option value="short:1440">1440p · 短边 1440 px</option><option value="short:2160">2160p · 短边 2160 px</option></select></label>
+            <button id="applyQuality" class="primary" disabled>应用</button>
+        </div>
+        <p id="resolutionPreview" class="quality-help" role="status" aria-live="polite">按短边选择清晰度，另一边按手机比例缩放，不拉伸、不裁切、不放大。</p>
+        <p class="quality-help">仅修改 H.264 视频，不改变手机分辨率。帧率为上限；应用会短暂重启共享视频流，影响所有查看窗口。JPEG 兼容画面不受此设置控制。</p>
+        <div id="qualityMessage" class="msg" role="status" aria-live="polite"></div>
+        <div class="controller-actions"><button id="resetDisplay" disabled>恢复默认显示设置</button></div>
+        <p class="quality-help">恢复完整显示、30 fps、2 Mbps、长边 540 px；保存后即时应用，所有查看窗口共享。</p>
+          </section>
+        </section>
+        <section id="wizard" class="hidden" role="tabpanel" aria-labelledby="setup">
+            <div class="connection-guide">
+                <div class="guide-heading">
+                    <h2 id="guideTitle" tabindex="-1">连接手机</h2>
+                    <p class="lead">此窗口仅供查看，不接收触控。人类看到的原始屏幕不受 AI 包过滤规则影响。</p>
+                    <div class="btn-row"><button id="returnToScreen" class="hidden">返回画面</button></div>
                 </div>
-
-                <!-- 步骤 2：自动扫描为主 -->
-                <div class="step" id="step2">
-                    <div class="step-head"><span class="step-no">2</span>扫描并配对（只需一次）</div>
-                    <div class="step-body">
-                        <p>点下面按钮自动找手机。找到后手机上会显示 <strong>6 位配对码</strong>，<strong>只需要填这 6 位</strong>，不用管 IP 和端口。</p>
-                        <div class="btn-row">
-                            <button class="primary" id="doScan">扫描附近的手机</button>
-                        </div>
-                        <div class="msg" id="scanMsg"></div>
-                        <div id="scanList"></div>
-
-                        <!-- 只有需要配对码时才出现的输入区 -->
-                        <div id="pairBox" class="hidden">
-                            <p style="margin-top:10px">输入手机上显示的 6 位配对码：</p>
-                            <div class="fields">
-                                <input id="pairCode" class="code-input" placeholder="6 位码" inputmode="numeric" maxlength="6" autocomplete="off">
-                                <button class="primary" id="doPair">配对</button>
+                <div class="guide-layout">
+                    <div class="pair-steps">
+                        <section class="step" id="step1" aria-labelledby="step1Title">
+                            <h2 class="step-head" id="step1Title"><span class="step-no" aria-hidden="true">01</span>打开无线调试</h2>
+                            <div class="step-body">
+                                <p>手机与电脑连接同一 Wi-Fi，在「开发者选项」中打开「无线调试」。</p>
+                                <details><summary>找不到开发者选项？</summary><p>设置 → 关于手机 → 连点「版本号」7 次，再返回设置。</p></details>
                             </div>
-                            <div class="msg" id="pairMsg"></div>
-                        </div>
+                        </section>
+                        <section class="step" id="step2" aria-labelledby="step2Title">
+                            <h2 class="step-head" id="step2Title"><span class="step-no" aria-hidden="true">02</span>首次使用：扫描与配对</h2>
+                            <div class="step-body">
+                                <p>在手机上打开「使用配对码配对设备」，再扫描并输入手机显示的 6 位码。</p>
+                                <div class="btn-row"><button id="doScan">扫描附近的手机</button></div>
+                                <div class="msg" id="scanMsg" role="status" aria-live="polite" aria-atomic="true"></div>
+                                <div id="scanList" role="list" aria-label="发现的设备"></div>
+                                <div id="pairBox" class="hidden">
+                                    <div class="fields">
+                                        <label class="field short" for="pairCode">6 位配对码<input id="pairCode" class="code-input" placeholder="000000" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="off" aria-describedby="pairMsg"></label>
+                                        <button class="primary" id="doPair">配对</button>
+                                    </div>
+                                    <div class="msg" id="pairMsg" role="status" aria-live="polite" aria-atomic="true"></div>
+                                </div>
+                            </div>
+                        </section>
                     </div>
-                </div>
-
-                <!-- 步骤 3：连接（全自动） -->
-                <div class="step" id="step3">
-                    <div class="step-head"><span class="step-no">3</span>连接</div>
-                    <div class="step-body">
-                        <p>配对后点这里，自动连上已配对的手机。</p>
-                        <div class="btn-row">
-                            <button class="primary" id="doConnect">连接</button>
-                            <button id="refresh">刷新设备</button>
+                    <section class="step" id="step3" aria-labelledby="step3Title">
+                        <h2 class="step-head" id="step3Title"><span class="step-no" aria-hidden="true">03</span>连接已配对的设备</h2>
+                        <div class="step-body">
+                            <p>已配对可直接连接；仅查看现有设备时，使用刷新。</p>
+                            <div class="btn-row"><button class="primary" id="doConnect">连接设备</button><button id="refresh">刷新设备</button></div>
+                            <div class="msg" id="connMsg" role="status" aria-live="polite" aria-atomic="true"></div>
+                            <div id="deviceSummary" role="status" aria-live="polite" aria-atomic="true">尚未读取设备</div>
+                            <div id="deviceList" role="list" aria-label="设备及就绪状态"></div>
+                            <details id="manualBox">
+                                <summary>手动填写地址</summary>
+                                <p>填写无线调试页的 IP；连接端口留空时自动扫描。</p>
+                                <div class="fields">
+                                    <label class="field" for="connAddr">手机 IP<input id="connAddr" placeholder="192.168.1.10" autocomplete="off" spellcheck="false"></label>
+                                    <label class="field short" for="connPort">连接端口（可选）<input id="connPort" class="code-input" placeholder="自动" inputmode="numeric" maxlength="5"></label>
+                                </div>
+                                <div class="fields"><label class="field" for="pairAddr">配对地址（可选）<input id="pairAddr" placeholder="手机配对框中的 IP:端口" autocomplete="off" spellcheck="false"></label></div>
+                            </details>
                         </div>
-                        <div class="msg" id="connMsg"></div>
-                        <div id="deviceList"></div>
-
-                        <details id="manualBox" style="margin-top:10px">
-                            <summary style="cursor:pointer;font-size:11.5px">自动发现失败？手动填地址</summary>
-                            <p style="margin:8px 0 4px">只填手机 IP 就行，<strong>端口会自动扫</strong>（无线调试的端口每次随机，猜不出来）。</p>
-                            <div class="fields">
-                                <input id="connAddr" placeholder="192.168.137.178" autocomplete="off" spellcheck="false">
-                                <input id="connPort" class="code-input" placeholder="自动" inputmode="numeric" maxlength="5">
-                            </div>
-                            <div class="fields">
-                                <input id="pairAddr" placeholder="配对用 IP:端口（可选，手机上显示的）" autocomplete="off" spellcheck="false">
-                            </div>
-                        </details>
-                    </div>
+                    </section>
                 </div>
-
                 <div class="tip" id="tipBox"></div>
             </div>
-        </div>
-
-        <div id="error-box" class="hidden"></div>
-    </main>
-
-    <footer>
-        <span>帧序号 <span class="key" id="seq">--</span></span>
-        <span>尺寸 <span class="key" id="bytes">--</span></span>
-        <span>间隔 <span class="key" id="interval">--</span></span>
-        <span class="spacer"></span>
-        <span id="hint">画面为只读镜像，操作请通过 AndroidController 工具</span>
-    </footer>
+        </section>
+        <section id="controllerPanel" class="hidden" role="tabpanel" aria-labelledby="controllerTab">
+          <h2 class="section-heading">控制器偏好</h2>
+          <p class="controller-note">这些设置作用于本机安卓控制器。保存后重启 VCPChat 生效，当前设备连接与任务继续使用原配置。</p>
+          <form id="controllerForm">
+            <fieldset id="controllerFields" class="controller-fields" disabled>
+              <label class="switch-row" for="controllerAutoWake"><span>自动唤醒屏幕<br><small>感知时允许点亮屏幕，不自动解锁。</small></span><input id="controllerAutoWake" type="checkbox" role="switch" data-config="AUTO_WAKE"></label>
+              <label for="controllerClipboard">剪贴板粘贴方式<select id="controllerClipboard" data-config="CLIPBOARD_PASTE"><option value="keyevent">粘贴按键（推荐）</option><option value="rpc">设备服务粘贴（兼容排查）</option><option value="off">关闭剪贴板粘贴</option></select><small>非 ASCII 输入可能替换手机剪贴板，不自动恢复。</small></label>
+              <section class="settings-section">
+                <h2 class="section-heading">应用交互权限</h2>
+                <div class="controller-fields">
+                  <label for="controllerDenyPackages">禁止访问的应用<textarea id="controllerDenyPackages" spellcheck="false" placeholder="com.example.private"></textarea><small>每行一个完整包名。禁止 AI 读取或操作这些应用。</small></label>
+                  <label for="controllerReadOnlyPackages">仅允许读取的应用<textarea id="controllerReadOnlyPackages" spellcheck="false" placeholder="com.example.reader"></textarea><small>每行一个完整包名。禁止访问规则优先。</small></label>
+                  <label class="switch-row" for="controllerConfirmWrite"><span>每次操作前确认<br><small>关闭后，敏感操作仍需逐次确认。</small></span><input id="controllerConfirmWrite" type="checkbox" role="switch"></label>
+                </div>
+              </section>
+              <details>
+                <summary>连接与高级选项</summary>
+                <div class="controller-fields">
+                  <label for="controllerAdbPath">ADB 可执行文件<input id="controllerAdbPath" data-config="ADB_PATH" type="text" maxlength="4096" placeholder="adb" spellcheck="false"><small>留空使用 PATH 中的 adb；也可填写 adb.exe 的完整路径。</small></label>
+                  <label for="controllerDevice">默认设备<input id="controllerDevice" data-config="DEVICE_SERIAL" type="text" maxlength="160" spellcheck="false" placeholder="设备序列号或 IP:端口"><small>留空自动选择已授权设备。这里不会立即切换或连接手机。</small></label>
+                  <label for="controllerTimeout">ADB 命令超时（毫秒）<input id="controllerTimeout" data-config="ADB_TIMEOUT_MS" type="number" min="100" max="300000" step="100"></label>
+                  <label for="controllerPort">显示服务端口<input id="controllerPort" data-config="DISPLAY_PORT" type="number" min="0" max="65535" step="1"><small>仅本机可访问；0 表示自动分配。</small></label>
+                  <label class="switch-row" for="controllerUiServer"><span>常驻控件服务<br><small>关闭后使用兼容采集，感知速度会降低。</small></span><input id="controllerUiServer" data-config="UI_SERVER" type="checkbox" role="switch"></label>
+                </div>
+              </details>
+              <details>
+                <summary>兼容画面</summary>
+                <p class="controller-note">H.264 不可用时使用；不影响“画面”中的视频画质设置。</p>
+                <div class="controller-fields">
+                  <label for="controllerFormat">图像格式<select id="controllerFormat" data-config="STREAM_FORMAT"><option value="jpeg">JPEG（推荐）</option><option value="png">PNG</option></select></label>
+                  <label for="controllerQuality">JPEG 质量<input id="controllerQuality" data-config="STREAM_QUALITY" type="number" min="10" max="95" step="1"><small>10–95；选择 PNG 时不使用此项。</small></label>
+                  <label for="controllerInterval">刷新间隔（毫秒）<input id="controllerInterval" data-config="STREAM_INTERVAL_MS" type="number" min="20" max="5000" step="1"><small>间隔越短，手机发热和带宽占用可能越高。</small></label>
+                  <label for="controllerWidth">最大宽度（像素）<input id="controllerWidth" data-config="STREAM_MAX_WIDTH" type="number" min="180" max="2160" step="1"></label>
+                  <label for="controllerCapture">采集方式<select id="controllerCapture" data-config="STREAM_CAPTURE_MODE"><option value="auto">自动（推荐）</option><option value="png">PNG 兼容采集</option></select></label>
+                </div>
+              </details>
+            </fieldset>
+            <div class="settings-section"><button id="openSystemAuthorization" type="button">打开系统能力授权</button><p class="controller-note">按设备管理系统读取、导航、设置与草稿能力；授权仍在全局设置中保存。</p></div>
+            <div id="controllerMessage" class="msg" role="status" aria-live="polite"></div>
+            <div class="controller-actions"><button id="reloadController" type="button" title="放弃未保存的更改，读取文件中的设置">重新读取</button><button id="saveController" type="submit" class="primary" disabled>保存控制器设置</button></div>
+          </form>
+        </section>
+        <section id="diagnosticsPanel" class="diagnostics hidden" role="tabpanel" aria-labelledby="diagnosticsTab">
+            <h2 class="section-heading">画面状态</h2>
+            <span id="conn" role="status" aria-live="polite" aria-atomic="true">等待连接</span>
+            <dl class="diagnostic-grid">
+                <div><dt>实际视频分辨率</dt><dd id="res">--</dd></div>
+                <div><dt>帧率</dt><dd id="fps">-- fps</dd></div>
+                <div><dt>传输延迟</dt><dd id="lat">-- ms</dd></div>
+                <div><dt>帧序号</dt><dd id="seq">--</dd></div>
+                <div><dt>帧大小</dt><dd id="bytes">--</dd></div>
+                <div><dt>帧间隔</dt><dd id="interval">--</dd></div>
+            </dl>
+            <p id="hint" class="quality-help">只读原始屏幕 · 不受 AI 包过滤影响</p>
+        </section>
+      </div>
+    </section>
 </div>
 
 <script>
@@ -266,6 +446,22 @@
     'use strict';
 
     const $ = (id) => document.getElementById(id);
+    const settingsOnly = location.pathname === '/settings';
+    document.body.classList.toggle('settings-window', settingsOnly);
+    if (settingsOnly) {
+        document.title = '安卓显示屏设置 · VCPChat';
+        document.querySelector('header .title').textContent = '安卓显示屏设置';
+        $('closeSettings').textContent = '关闭设置';
+    }
+    document.querySelectorAll('button:not([role="tab"]):not(.title-bar-button)').forEach(button => {
+        button.classList.add(button.id === 'openSettings' ? 'vcp-ui-icon-button' : 'vcp-ui-button');
+        button.dataset.size = 'sm';
+        button.dataset.variant = button.id === 'openSettings' ? 'ghost'
+            : button.classList.contains('primary') ? 'primary' : 'outline';
+    });
+    document.querySelectorAll('input:not([type="checkbox"])').forEach(input => input.classList.add('vcp-ui-native-input'));
+    document.querySelectorAll('textarea').forEach(input => input.classList.add('vcp-ui-native-textarea'));
+    document.querySelectorAll('select').forEach(select => select.classList.add('vcp-ui-native-select'));
     const els = {
         dot: $('dot'), conn: $('conn'), res: $('res'), fps: $('fps'), lat: $('lat'),
         screen: $('screen'), h264: $('h264'), wizard: $('wizard'), errorBox: $('error-box'),
@@ -275,8 +471,18 @@
         doScan: $('doScan'), scanMsg: $('scanMsg'), scanList: $('scanList'), pairBox: $('pairBox'),
         connAddr: $('connAddr'), connPort: $('connPort'), doConnect: $('doConnect'),
         refresh: $('refresh'), connMsg: $('connMsg'), deviceList: $('deviceList'),
+        deviceSummary: $('deviceSummary'), returnToScreen: $('returnToScreen'),
         tipBox: $('tipBox'), step1: $('step1'), step2: $('step2'), step3: $('step3'),
         manualBox: $('manualBox'),
+        quality: $('quality'), qualityPanel: $('qualityPanel'), qualityFps: $('qualityFps'),
+        qualityBitRate: $('qualityBitRate'), qualitySize: $('qualitySize'),
+        applyQuality: $('applyQuality'), qualityMessage: $('qualityMessage'), fitWindow: $('fitWindow'),
+        settingsPage: $('settingsPage'), openSettings: $('openSettings'), closeSettings: $('closeSettings'),
+        diagnosticsTab: $('diagnosticsTab'), emptyState: $('emptyState'), resolutionPreview: $('resolutionPreview'),
+        streamPlaceholder: $('streamPlaceholder'), streamTitle: $('streamTitle'), streamDetail: $('streamDetail'), retryStream: $('retryStream'),
+        takeoverStatus: $('takeoverStatus'), takeoverStart: $('takeoverStart'), takeoverActions: $('takeoverActions'),
+        takeoverRefresh: $('takeoverRefresh'), takeoverBack: $('takeoverBack'), takeoverHome: $('takeoverHome'),
+        takeoverRecents: $('takeoverRecents'), takeoverEnd: $('takeoverEnd'), takeoverFrame: $('takeoverFrame'),
     };
 
     const FRAME_MAGIC = 0x56434d31;
@@ -299,20 +505,34 @@
     let latencySamples = [];
     let lastFrameAt = 0;
     let staleTimer = null;
+    let streamNoticeTimer = null;
+    let resyncTimer = null;
     let resyncing = false;     // 防止停滞自愈反复触发
     let lastPacketAt = 0;      // 最后收到任何二进制画面数据的时间
     let lastResyncAt = 0;      // 上次重同步时间，用于退避
     let objectUrl = null;
     let fitWidth = false;
+    let fitSaving = false;
+    const preferenceChannel = typeof BroadcastChannel === 'function' ? new BroadcastChannel('android-display-preferences') : null;
+    let statusPublishedAt = 0;
+    function publishViewerStatus() {
+        if (settingsOnly || !preferenceChannel) return;
+        const fields = Object.fromEntries(['conn', 'res', 'fps', 'lat', 'seq', 'bytes', 'interval'].map(id => [id, $(id).textContent]));
+        preferenceChannel.postMessage({ type: 'viewer-status', fields });
+        statusPublishedAt = Date.now();
+    }
+    if (preferenceChannel) preferenceChannel.onmessage = event => {
+        if (!settingsOnly && event.data?.type === 'display-mode-changed') void loadDisplayPreferences();
+        if (!settingsOnly && event.data?.type === 'status-request') publishViewerStatus();
+        if (settingsOnly && event.data?.type === 'viewer-status') {
+            for (const id of ['conn', 'res', 'fps', 'lat', 'seq', 'bytes', 'interval']) {
+                const text = event.data.fields?.[id];
+                if (typeof text === 'string' && text.length < 512) $(id).textContent = text;
+            }
+        }
+    };
     let devices = [];
     let hasPaired = false;
-
-    // 自动接管：启动后无需点击，轮询直到连上或放弃
-    const AUTO_CONNECT_ROUNDS = 4;
-    const AUTO_CONNECT_DELAY_MS = 2500;
-    let autoConnecting = false;
-    let autoConnectingStopped = false;
-    let autoAttempts = 0;
 
     // H.264 通道状态
     let useH264 = false;
@@ -329,6 +549,7 @@
     function setDot(state, text) {
         els.dot.className = `dot ${state || ''}`.trim();
         els.conn.textContent = text;
+        els.dot.title = text;
     }
     function say(el, text, kind = 'info') {
         el.textContent = text || '';
@@ -348,47 +569,336 @@
             return data;
         }).catch((error) => ({ ok: false, error: `连不上服务：${error.message}` }));
     }
+    let connectionActions = 0;
+    const busyConnectionButtons = new Set();
     async function withBusy(button, task) {
+        if (takeoverLocked() || button.disabled) return;
         const label = button.textContent;
+        connectionActions += 1;
+        busyConnectionButtons.add(button);
+        renderTakeover();
         button.disabled = true;
         button.textContent = '处理中…';
         try { return await task(); }
-        finally { button.disabled = false; button.textContent = label; }
+        finally { connectionActions -= 1; busyConnectionButtons.delete(button); button.textContent = label; renderTakeover(); }
     }
+
+    // ---------- 人工接管：仅使用独立截图凭据，不使用实时视频坐标 ----------
+    const takeover = {
+        phase: 'readonly', token: null, epoch: null, serial: null, expiresAt: 0,
+        frame: null, loaded: false, pending: null, gesture: null,
+        frameTimer: null, sessionTimer: null, revision: 0, sequence: 0,
+    };
+    const takeoverListeners = [];
+    function listenTakeover(target, type, listener) {
+        target.addEventListener(type, listener);
+        takeoverListeners.push(() => target.removeEventListener(type, listener));
+    }
+    function takeoverLocked() { return takeover.phase !== 'readonly'; }
+    function takeoverOnline() { return socket?.readyState === 1; }
+    function takeoverUsable() {
+        return takeover.phase === 'active' && takeoverOnline() && !takeover.pending
+            && takeover.loaded && takeover.frame && Date.now() < takeover.frame.expiresAt
+            && Date.now() < takeover.expiresAt;
+    }
+    function takeoverMessage(text, tone = '') {
+        els.takeoverStatus.textContent = text;
+        els.takeoverStatus.dataset.tone = tone;
+    }
+    function renderTakeover() {
+        const locked = takeoverLocked();
+        const active = takeover.phase === 'active';
+        if (locked && $('takeoverMenu')) $('takeoverMenu').open = true;
+        $('takeoverMenuToggle').dataset.active = String(locked);
+        $('takeoverMenuToggle').title = locked ? '人工接管进行中' : '人工接管';
+        $('deviceNavigation').dataset.active = String(active);
+        [[els.takeoverBack, '返回'], [els.takeoverHome, '返回桌面'], [els.takeoverRecents, '最近任务']].forEach(([button, label]) => {
+            button.title = takeoverUsable() ? label : `${label}（需先批准人工接管并等待有效快照）`;
+        });
+        els.takeoverStart.classList.toggle('hidden', locked);
+        els.takeoverStart.disabled = !takeoverOnline() || connectionActions > 0 || qualityLoading || qualitySaving
+            || !els.settingsPage.classList.contains('hidden');
+        els.takeoverActions.classList.toggle('hidden', !locked);
+        els.takeoverRefresh.disabled = !active || !!takeover.pending || !takeoverOnline();
+        els.takeoverEnd.disabled = !active || !!takeover.pending || !takeoverOnline();
+        [els.takeoverBack, els.takeoverHome, els.takeoverRecents].forEach(button => { button.disabled = !takeoverUsable(); });
+        els.takeoverFrame.dataset.interactive = String(!!takeoverUsable());
+        els.openSettings.disabled = locked;
+        [els.fit, els.reconnect, els.doScan, els.doPair, els.doConnect, els.refresh, els.returnToScreen,
+            els.pairAddr, els.pairCode, els.connAddr, els.connPort].forEach(control => { control.disabled = locked || busyConnectionButtons.has(control); });
+        lockQuality(qualityLoading || qualitySaving);
+        els.fit.disabled = locked || fitSaving || qualitySaving;
+        if (locked) els.fitWindow.disabled = true;
+        else if (window.androidDisplay?.fitWindow) els.fitWindow.disabled = false;
+        $('stage').classList.toggle('takeover-mode', locked);
+        $('stage').setAttribute('aria-label', locked ? '安卓接管快照，操作后刷新' : '安卓只读显示屏');
+    }
+    function clearTakeoverFrame() {
+        clearTimeout(takeover.frameTimer);
+        takeover.frameTimer = null;
+        takeover.frame = null;
+        takeover.loaded = false;
+        takeover.gesture = null;
+        els.takeoverFrame.onload = null;
+        els.takeoverFrame.onerror = null;
+        els.takeoverFrame.removeAttribute('src');
+        els.takeoverFrame.classList.add('hidden');
+    }
+    function resetTakeover(text = '只读画面 · 接管已结束；不会自动恢复 AI', tone = '') {
+        takeover.revision += 1;
+        clearTimeout(takeover.pending?.timer);
+        clearTimeout(takeover.sessionTimer);
+        takeover.pending = null;
+        takeover.sessionTimer = null;
+        clearTakeoverFrame();
+        takeover.phase = 'readonly';
+        takeover.token = null;
+        takeover.epoch = null;
+        takeover.serial = null;
+        takeover.expiresAt = 0;
+        takeoverMessage(text, tone);
+        renderTakeover();
+    }
+    function closeTakeoverSocket(text) {
+        closedByUs = true;
+        cleanupSocket();
+        stopStaleWatch();
+        resetTakeover(text, 'error');
+        setDot('error', '接管连接已关闭，请手动重连');
+    }
+    function setTakeoverPending(kind, requestId = null) {
+        const pending = { kind, requestId, timer: null };
+        pending.timer = setTimeout(() => {
+            if (takeover.pending !== pending) return;
+            closeTakeoverSocket('接管请求超时，连接已关闭并撤销；输入不会重发。请手动重连。');
+        }, kind === 'start' || kind === 'binding' ? 90000 : 20000);
+        takeover.pending = pending;
+        takeover.gesture = null;
+        renderTakeover();
+    }
+    function sendTakeover(kind, extra = {}) {
+        if (!takeoverOnline() || takeover.pending) return false;
+        const requestId = `viewer-${Date.now()}-${++takeover.sequence}`;
+        const payload = { type: `takeover-${kind}`, requestId, ...extra };
+        if (kind !== 'start') Object.assign(payload, { token: takeover.token, epoch: takeover.epoch });
+        setTakeoverPending(kind, requestId);
+        try { socket.send(JSON.stringify(payload)); }
+        catch { closeTakeoverSocket('接管请求未能发送，连接已关闭；不会重发输入。'); return false; }
+        return true;
+    }
+    async function startTakeover() {
+        if (takeoverLocked() || !takeoverOnline() || connectionActions > 0 || qualityLoading || qualitySaving
+            || !els.settingsPage.classList.contains('hidden')) return;
+        takeover.phase = 'binding';
+        const revision = ++takeover.revision;
+        setTakeoverPending('binding');
+        takeoverMessage('正在确认当前投屏设备…');
+        const status = await api('/status');
+        if (revision !== takeover.revision || takeover.phase !== 'binding' || !takeoverOnline()) return;
+        clearTimeout(takeover.pending.timer);
+        takeover.pending = null;
+        const serial = [status?.display?.serial, status?.scrcpy?.serial]
+            .find(value => typeof value === 'string' && value.trim());
+        if (status?.ok === false || !serial) {
+            resetTakeover('无法确认当前投屏设备 serial，未请求接管。请检查连接。', 'error');
+            return;
+        }
+        takeover.serial = serial;
+        takeover.phase = 'starting';
+        takeoverMessage(`等待电脑上的原生批准 · ${serial} · 尚不可操作`);
+        sendTakeover('start', { serial });
+    }
+    function installTakeoverFrame(frame) {
+        clearTakeoverFrame();
+        if (!frame) { renderTakeover(); return false; }
+        if (!((typeof frame.frameId === 'string' && frame.frameId.length > 0) || Number.isSafeInteger(frame.frameId))
+            || !Number.isSafeInteger(frame.width) || frame.width < 1
+            || !Number.isSafeInteger(frame.height) || frame.height < 1
+            || !Number.isFinite(frame.expiresAt) || frame.expiresAt <= Date.now()
+            || typeof frame.dataUrl !== 'string' || !/^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/=\r\n]+$/.test(frame.dataUrl)) {
+            renderTakeover();
+            return false;
+        }
+        takeover.frame = { ...frame };
+        const current = takeover.frame;
+        els.takeoverFrame.onload = () => {
+            if (takeover.frame !== current) return;
+            takeover.loaded = els.takeoverFrame.naturalWidth === current.width
+                && els.takeoverFrame.naturalHeight === current.height && Date.now() < current.expiresAt;
+            if (!takeover.loaded) takeoverMessage('快照尺寸不符或已过期，请刷新快照后操作。', 'error');
+            renderTakeover();
+        };
+        els.takeoverFrame.onerror = () => {
+            if (takeover.frame !== current) return;
+            clearTakeoverFrame();
+            takeoverMessage('快照加载失败，请刷新快照；没有发送操作。', 'error');
+            renderTakeover();
+        };
+        els.takeoverFrame.classList.toggle('fit-width', fitWidth);
+        els.takeoverFrame.classList.remove('hidden');
+        els.takeoverFrame.src = current.dataUrl;
+        takeover.frameTimer = setTimeout(() => {
+            if (takeover.frame !== current) return;
+            takeover.loaded = false;
+            takeover.gesture = null;
+            takeoverMessage('接管快照已过期 · 请刷新快照后操作', 'warning');
+            renderTakeover();
+        }, Math.max(0, current.expiresAt - Date.now()));
+        renderTakeover();
+        return true;
+    }
+    function handleTakeoverResult(payload) {
+        const pending = takeover.pending;
+        if (!pending || !pending.requestId || payload.requestId !== pending.requestId) return;
+        clearTimeout(pending.timer);
+        takeover.pending = null;
+        if (payload.ok !== true) {
+            const detail = [payload.code, payload.error || '接管请求失败'].filter(Boolean).join(' · ');
+            if (payload.ended === true || pending.kind === 'start') resetTakeover(detail, 'error');
+            else {
+                clearTakeoverFrame();
+                takeoverMessage(`${detail}；请刷新快照或结束接管，不会重发输入。`, 'error');
+                renderTakeover();
+            }
+            return;
+        }
+        if (pending.kind === 'end') {
+            if (payload.ended !== true) { closeTakeoverSocket('结束接管未得到确认，已关闭连接撤销。'); return; }
+            resetTakeover();
+            return;
+        }
+        if (pending.kind === 'start') {
+            if (typeof payload.token !== 'string' || !payload.token || !Number.isSafeInteger(payload.epoch)
+                || payload.serial !== takeover.serial || !Number.isFinite(payload.expiresAt) || payload.expiresAt <= Date.now()) {
+                closeTakeoverSocket('接管授权响应无效，已关闭连接撤销。');
+                return;
+            }
+            takeover.token = payload.token;
+            takeover.epoch = payload.epoch;
+            takeover.expiresAt = payload.expiresAt;
+            takeover.phase = 'active';
+            takeover.sessionTimer = setTimeout(() => closeTakeoverSocket('接管授权已到期，连接已关闭；不会自动重新接管。'),
+                Math.max(0, takeover.expiresAt - Date.now()));
+        }
+        const validFrame = installTakeoverFrame(payload.frame);
+        if (pending.kind === 'input') {
+            const execution = typeof payload.execution === 'string' ? payload.execution : payload.execution?.outcome;
+            const text = execution === 'dispatched' ? '操作已派发，设备结果未验证'
+                : execution === 'unknown' ? '操作执行结果未知；不要重复操作'
+                : execution === 'failed' ? '操作执行失败' : '操作响应缺少执行状态；不要重复操作';
+            takeoverMessage(`${text} · ${payload.warning || (validFrame ? '接管快照，操作后刷新' : '快照不可用，请刷新后操作')}`,
+                execution === 'failed' || !['dispatched', 'unknown', 'failed'].includes(execution) ? 'error'
+                    : execution === 'unknown' || !validFrame ? 'warning' : '');
+        } else takeoverMessage(validFrame ? `接管快照，操作后刷新 · ${takeover.serial}`
+            : '快照不可用，请刷新快照后操作', validFrame ? '' : 'warning');
+        renderTakeover();
+    }
+    function inputTakeover(action) {
+        if (!takeoverUsable()) return;
+        const frameId = takeover.frame.frameId;
+        takeover.loaded = false;
+        takeover.gesture = null;
+        takeoverMessage('操作请求中… · 等待执行状态与新快照');
+        sendTakeover('input', { frameId, action });
+    }
+    // getBoundingClientRect includes scrolling and CSS/browser scaling; contain excludes letterboxing.
+    function takeoverPoint(event) {
+        if (!takeoverUsable()) return null;
+        const rect = els.takeoverFrame.getBoundingClientRect();
+        const { width, height } = takeover.frame;
+        const scale = Math.min(rect.width / width, rect.height / height);
+        if (!Number.isFinite(scale) || scale <= 0) return null;
+        const left = rect.left + (rect.width - width * scale) / 2;
+        const top = rect.top + (rect.height - height * scale) / 2;
+        const x = (event.clientX - left) / scale;
+        const y = (event.clientY - top) / scale;
+        if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 || x >= width || y >= height) return null;
+        return { x: Math.min(width - 1, Math.floor(x)), y: Math.min(height - 1, Math.floor(y)),
+            geometry: [rect.left, rect.top, rect.width, rect.height].join(',') };
+    }
+    if ($('takeoverMenu')) {
+        listenTakeover($('takeoverMenu'), 'toggle', () => {
+            if (takeoverLocked()) $('takeoverMenu').open = true;
+        });
+        listenTakeover($('takeoverMenuToggle'), 'click', event => {
+            if (takeoverLocked()) event.preventDefault();
+        });
+    }
+    listenTakeover(els.takeoverStart, 'click', startTakeover);
+    listenTakeover(els.takeoverRefresh, 'click', () => {
+        if (takeover.phase !== 'active' || takeover.pending || !takeoverOnline()) return;
+        takeover.loaded = false;
+        takeoverMessage('正在刷新接管快照…');
+        sendTakeover('refresh');
+    });
+    listenTakeover(els.takeoverEnd, 'click', () => {
+        if (takeover.phase !== 'active' || takeover.pending || !takeoverOnline()) return;
+        takeover.loaded = false;
+        takeoverMessage('正在结束接管…');
+        sendTakeover('end');
+    });
+    [[els.takeoverBack, 'back'], [els.takeoverHome, 'home'], [els.takeoverRecents, 'recents']].forEach(([button, key]) => {
+        listenTakeover(button, 'click', () => inputTakeover({ command: 'KeyEvent', key }));
+    });
+    listenTakeover(els.takeoverFrame, 'pointerdown', event => {
+        takeover.gesture = null;
+        if (event.isPrimary !== true || event.button !== 0) return;
+        const point = takeoverPoint(event);
+        if (!point) return;
+        event.preventDefault();
+        takeover.gesture = { ...point, pointerId: event.pointerId, at: Date.now(), frame: takeover.frame,
+            clientX: event.clientX, clientY: event.clientY };
+    });
+    listenTakeover(els.takeoverFrame, 'pointerup', event => {
+        const start = takeover.gesture;
+        takeover.gesture = null;
+        if (!start || event.isPrimary !== true || event.button !== 0 || event.pointerId !== start.pointerId
+            || start.frame !== takeover.frame) return;
+        const end = takeoverPoint(event);
+        const duration = Date.now() - start.at;
+        if (!end || end.geometry !== start.geometry || duration < 0 || duration > 1500) return;
+        event.preventDefault();
+        if (Math.hypot(event.clientX - start.clientX, event.clientY - start.clientY) < 8) {
+            if (duration <= 500) inputTakeover({ command: 'Tap', x: end.x, y: end.y });
+        } else inputTakeover({ command: 'Swipe', x1: start.x, y1: start.y, x2: end.x, y2: end.y,
+            duration: Math.max(100, Math.min(1500, Math.round(duration))) });
+    });
+    ['pointercancel', 'pointerleave', 'lostpointercapture'].forEach(type => {
+        listenTakeover(els.takeoverFrame, type, () => { takeover.gesture = null; });
+    });
+    listenTakeover(els.takeoverFrame, 'contextmenu', event => event.preventDefault());
+    listenTakeover(window, 'blur', () => { takeover.gesture = null; });
+    listenTakeover(document, 'visibilitychange', () => { takeover.gesture = null; });
 
     // ---------- 设备 ----------
     function renderDevices() {
-        els.deviceList.innerHTML = '';
-        if (!devices.length) return;
+        els.deviceList.replaceChildren();
+        const ready = devices.filter((device) => device.state === 'device');
+        els.returnToScreen.classList.toggle('hidden', !ready.length);
+        els.deviceSummary.textContent = devices.length > 1
+            ? `${ready.length} 台设备就绪。多设备请由连接管理选择；此列表不切换投屏，当前设备身份尚未提供。`
+            : ready.length ? '1 台设备就绪；当前投屏设备身份尚未提供。'
+            : devices.length ? '设备尚未就绪' : '未发现已连接设备';
         for (const device of devices) {
             const row = document.createElement('div');
             row.className = 'device-line';
-
+            row.setAttribute('role', 'listitem');
             const name = document.createElement('span');
             name.className = 'name';
             name.textContent = device.model ? `${device.model} · ${device.serial}` : device.serial;
             name.title = device.serial;
-
             const badge = document.createElement('span');
             const state = device.state || 'unknown';
             badge.className = `badge ${state === 'device' ? 'ok' : state === 'unauthorized' ? 'warn' : ''}`;
-            badge.textContent = state === 'device' ? '已连接'
-                : state === 'unauthorized' ? '待授权'
+            badge.textContent = state === 'device' ? '已授权 · 就绪'
+                : state === 'unauthorized' ? '待调试授权'
                 : state === 'offline' ? '离线' : state;
-
             row.append(name, badge);
-
-            if (state === 'device') {
-                const use = document.createElement('button');
-                use.textContent = '看画面';
-                use.addEventListener('click', () => startStreaming());
-                row.append(use);
-            }
             els.deviceList.append(row);
         }
     }
 
-    async function refreshDevices({ quiet = false } = {}) {
+    async function refreshDevices({ quiet = false, reveal = true } = {}) {
         const result = await api('/api/devices');
         if (!result.ok) {
             if (!quiet) say(els.connMsg, result.error || '读取设备失败', 'err');
@@ -399,12 +909,8 @@
 
         const ready = devices.filter((d) => d.state === 'device');
         if (ready.length) {
-            // 有可用设备就自动切到画面，用户不需要再点一次
-            hideWizard();
-            startStreaming();
-            const first = ready[0];
-            els.connAddr.value = first.serial.replace(/:\d+$/, '');
-            if (!quiet) say(els.connMsg, `已连接 ${first.model || first.serial}`, 'ok');
+            if (reveal) await startStreaming();
+            if (!quiet) say(els.connMsg, `${ready.length} 台设备就绪`, 'ok');
         } else if (!quiet) {
             const unauthorized = devices.find((d) => d.state === 'unauthorized');
             if (unauthorized) {
@@ -419,9 +925,8 @@
 
     // ---------- 扫描 / 配对 / 连接 ----------
     els.doScan.addEventListener('click', () => withBusy(els.doScan, async () => {
-        stopAutoConnect();   // 用户手动扫描，接管自动循环
         say(els.scanMsg, '正在扫描…（手机上如果开着配对框，这时能被发现）', 'info');
-        els.scanList.innerHTML = '';
+        els.scanList.replaceChildren();
 
         const result = await api('/api/discover', { waitMs: 6000 });
         if (!result.ok) {
@@ -434,6 +939,7 @@
             for (const item of result.connect) {
                 const row = document.createElement('div');
                 row.className = 'device-line';
+                row.setAttribute('role', 'listitem');
                 const name = document.createElement('span');
                 name.className = 'name';
                 name.textContent = item.address;
@@ -462,7 +968,6 @@
             const connected = await autoConnect();
             if (connected) {
                 els.scanMsg.textContent = '';
-                hideWizard();
             }
             return;
         }
@@ -494,8 +999,7 @@
             renderDevices();
         }
         if (devices.some((d) => d.state === 'device')) {
-            hideWizard();
-            startStreaming();
+            await startStreaming();
         }
         return true;
     }
@@ -545,16 +1049,329 @@
         await refreshDevices({ quiet: true });
     }));
 
-    els.refresh.addEventListener('click', () => withBusy(els.refresh, () => refreshDevices()));
+    els.refresh.addEventListener('click', () => withBusy(els.refresh, () => refreshDevices({ reveal: false })));
+    els.returnToScreen.addEventListener('click', () => startStreaming());
 
-    els.setup.addEventListener('click', () => {
-        els.wizard.classList.remove('hidden');
-        els.screen.classList.add('hidden');
-        refreshDevices({ quiet: true });
+    const settingsTabs = [els.quality, els.setup, $('controllerTab'), els.diagnosticsTab];
+    const settingsPanels = [$('displayPanel'), els.wizard, $('controllerPanel'), $('diagnosticsPanel')];
+    let settingsTab = 0;
+    function showSettings(index = settingsTab) {
+        if (takeoverLocked()) return;
+        const wasHidden = els.settingsPage.classList.contains('hidden');
+        settingsTab = index;
+        els.settingsPage.classList.remove('hidden');
+        $('stage').classList.add('hidden');
+        els.openSettings.setAttribute('aria-expanded', 'true');
+        settingsTabs.forEach((tab, i) => {
+            tab.setAttribute('aria-selected', String(i === index));
+            tab.tabIndex = i === index ? 0 : -1;
+            settingsPanels[i].classList.toggle('hidden', i !== index);
+        });
+        if (wasHidden) {
+            qualityLoaded = false;
+            els.settingsPage.scrollTop = 0;
+            $('settingsTitle').focus();
+        }
+        if (index === 0) loadQuality();
+        else if (index === 1) refreshDevices({ quiet: true, reveal: false });
+        else if (index === 2) void loadController();
+        else if (settingsOnly) preferenceChannel?.postMessage({ type: 'status-request' });
+        renderTakeover();
+    }
+    function closeSettingsPage() {
+        if (settingsOnly) { window.close(); return; }
+        const wasOpen = !els.settingsPage.classList.contains('hidden');
+        els.settingsPage.classList.add('hidden');
+        $('stage').classList.remove('hidden');
+        els.openSettings.setAttribute('aria-expanded', 'false');
+        renderTakeover();
+        if (wasOpen) {
+            els.openSettings.focus();
+            void fitNativeWindow();
+        }
+    }
+    els.openSettings.addEventListener('click', () => {
+        if (takeoverLocked()) return;
+        if (!settingsOnly && window.androidDisplay?.openSettings) { void window.androidDisplay.openSettings('display'); return; }
+        if (els.settingsPage.classList.contains('hidden')) showSettings();
+        else closeSettingsPage();
+    });
+    els.closeSettings.addEventListener('click', closeSettingsPage);
+    $('connectSettings').addEventListener('click', () => {
+        if (!settingsOnly && window.androidDisplay?.openSettings) void window.androidDisplay.openSettings('connection');
+        else showSettings(1);
+    });
+    settingsTabs.forEach((tab, index) => {
+        tab.addEventListener('click', () => showSettings(index));
+        tab.addEventListener('keydown', event => {
+            const next = event.key === 'ArrowRight' ? (index + 1) % settingsTabs.length
+                : event.key === 'ArrowLeft' ? (index + settingsTabs.length - 1) % settingsTabs.length
+                : event.key === 'Home' ? 0 : event.key === 'End' ? settingsTabs.length - 1 : null;
+            if (next === null) return;
+            event.preventDefault();
+            showSettings(next);
+            settingsTabs[next].focus();
+        });
+    });
+    document.addEventListener('click', event => {
+        if (!$('takeoverMenu').contains(event.target)) $('takeoverMenu').open = false;
+    });
+    document.addEventListener('keydown', event => {
+        if (event.key === 'Escape' && $('takeoverMenu').open) {
+            event.preventDefault();
+            $('takeoverMenu').open = false;
+            $('takeoverMenuToggle').focus();
+            return;
+        }
+        if (event.key === 'Escape' && !els.settingsPage.classList.contains('hidden')) {
+            event.preventDefault();
+            closeSettingsPage();
+        }
     });
 
-    function hideWizard() {
-        els.wizard.classList.add('hidden');
+    // Native-only preferences: file paths and policies never become device HTTP APIs.
+    let controllerLoaded = false, controllerBusy = false, controllerRevision = null;
+    function lockController(busy) {
+        controllerBusy = busy;
+        $('controllerFields').disabled = busy || !controllerLoaded;
+        $('saveController').disabled = busy || !controllerLoaded;
+        $('reloadController').disabled = busy || !window.androidDisplay?.readControllerSettings;
+    }
+    function projectController(result) {
+        const values = result.values;
+        const policy = JSON.parse(values.INTERACTION_POLICY);
+        document.querySelectorAll('[data-config]').forEach(input => {
+            if (input.type === 'checkbox') input.checked = values[input.dataset.config] === true;
+            else input.value = String(values[input.dataset.config] ?? '');
+        });
+        $('controllerDenyPackages').value = (policy.denyPackages || []).join('\n');
+        $('controllerReadOnlyPackages').value = (policy.readOnlyPackages || []).join('\n');
+        $('controllerConfirmWrite').checked = policy.confirmEveryWrite === true;
+        controllerRevision = result.revision;
+        controllerLoaded = true;
+        say($('controllerMessage'), result.pendingRestart?.length
+            ? '已保存的设置与当前运行配置不同，重启 VCPChat 后生效。'
+            : '已读取当前设置。修改后保存，重启 VCPChat 生效。');
+    }
+    async function loadController(force = false) {
+        if (controllerBusy || (controllerLoaded && !force)) return;
+        if (!window.androidDisplay?.readControllerSettings) {
+            say($('controllerMessage'), '请从 VCPChat 的安卓独立窗口打开此设置；浏览器仅提供画面设置与连接功能。');
+            lockController(false);
+            return;
+        }
+        lockController(true);
+        try {
+            const result = await window.androidDisplay.readControllerSettings();
+            if (!result?.ok) throw new Error(result?.error || '读取控制器设置失败。');
+            projectController(result);
+        } catch (error) { say($('controllerMessage'), error.message, 'err'); }
+        finally { lockController(false); }
+    }
+    $('reloadController').addEventListener('click', () => { void loadController(true); });
+    $('controllerForm').querySelectorAll('input[type="number"]').forEach(input => { input.required = true; });
+    $('controllerForm').addEventListener('invalid', event => {
+        const details = event.target.closest('details');
+        if (details) details.open = true;
+    }, true);
+    $('controllerForm').addEventListener('submit', async event => {
+        event.preventDefault();
+        if (controllerBusy || !controllerLoaded || !$('controllerForm').reportValidity()) return;
+        const values = {};
+        document.querySelectorAll('[data-config]').forEach(input => {
+            values[input.dataset.config] = input.type === 'checkbox' ? input.checked
+                : input.type === 'number' ? Number(input.value) : input.value.trim();
+        });
+        const packages = id => $(id).value.split(/\r?\n/).map(value => value.trim()).filter(Boolean);
+        values.INTERACTION_POLICY = JSON.stringify({ denyPackages: packages('controllerDenyPackages'),
+            readOnlyPackages: packages('controllerReadOnlyPackages'), confirmEveryWrite: $('controllerConfirmWrite').checked });
+        lockController(true);
+        try {
+            const result = await window.androidDisplay.saveControllerSettings({ revision: controllerRevision, values });
+            if (!result?.ok) throw new Error(result?.error || '保存失败，请重试。');
+            projectController(result);
+            say($('controllerMessage'), result.pendingRestart?.length ? '设置已保存。重启 VCPChat 后生效。' : '设置已保存，与当前运行配置一致。', 'ok');
+        } catch (error) { say($('controllerMessage'), error.message, 'err'); }
+        finally { lockController(false); }
+    });
+    $('openSystemAuthorization').addEventListener('click', async () => {
+        try {
+            const result = await window.androidDisplay.openSystemAuthorization();
+            if (!result?.ok) throw new Error(result?.error || '无法打开系统能力授权。');
+        } catch (error) { say($('controllerMessage'), error.message, 'err'); }
+    });
+    $('openSystemAuthorization').disabled = !window.androidDisplay?.openSystemAuthorization;
+
+    // ---------- 显示设置 ----------
+    let qualityLoading = false;
+    let qualitySaving = false;
+    let qualityAvailable = false;
+    let qualityLoaded = false;
+    const qualityFields = [els.qualityFps, els.qualityBitRate, els.qualitySize];
+    let qualitySource = null;
+    function resolutionConfig() {
+        const value = els.qualitySize.value;
+        if (value === 'native') return { maxShortEdge: 0 };
+        if (/^short:\d+$/.test(value)) return { maxShortEdge: Number(value.slice(6)) };
+        if (/^long:\d+$/.test(value)) return { maxSize: Number(value.slice(5)) };
+        return null;
+    }
+    function updateResolutionPreview() {
+        const config = resolutionConfig();
+        if (!config) return;
+        if (!qualitySource) {
+            els.resolutionPreview.textContent = config.maxShortEdge === 0
+                ? '原始像素输出，不缩放；实际视频尺寸见「状态」。'
+                : '源尺寸尚未就绪；连接后按原比例缩放，不拉伸、不裁切、不放大。实际视频尺寸见「状态」。';
+            return;
+        }
+        const { width, height } = qualitySource;
+        const scale = config.maxShortEdge === 0 ? 1 : Math.min(1, config.maxShortEdge
+            ? config.maxShortEdge / Math.min(width, height) : config.maxSize / Math.max(width, height));
+        const outputWidth = Math.max(2, Math.round(width * scale / 2) * 2);
+        const outputHeight = Math.max(2, Math.round(height * scale / 2) * 2);
+        els.resolutionPreview.textContent = `源尺寸 ${width} × ${height} · 预计 ${outputWidth} × ${outputHeight}`
+            + (scale === 1 ? '（原始尺寸，不放大）' : '（等比缩放）')
+            + '。编码对齐可能略有差异，实际视频尺寸见「状态」。';
+    }
+    els.qualitySize.addEventListener('change', updateResolutionPreview);
+    function showQualityConfig(status) {
+        qualitySource = Number.isSafeInteger(status?.sourceWidth) && status.sourceWidth > 0
+            && Number.isSafeInteger(status?.sourceHeight) && status.sourceHeight > 0
+            ? { width: status.sourceWidth, height: status.sourceHeight } : null;
+        for (const [select, key, unit] of [[els.qualityFps, 'maxFps', 'fps'], [els.qualityBitRate, 'bitRate', 'bps']]) {
+            const value = status?.[key];
+            if (!Number.isSafeInteger(value) || value < 1) continue;
+            if (![...select.options].some(option => option.value === String(value))) {
+                select.add(new Option(`${value} ${unit}`, String(value)));
+            }
+            select.value = String(value);
+        }
+        els.qualitySize.querySelectorAll('[data-custom]').forEach(option => option.remove());
+        const shortEdge = status?.maxShortEdge;
+        let sizeValue;
+        if (shortEdge === 0) sizeValue = 'native';
+        else if (Number.isSafeInteger(shortEdge) && shortEdge >= 180 && shortEdge <= 2160) sizeValue = `short:${shortEdge}`;
+        else if (Number.isSafeInteger(status?.maxSize) && status.maxSize >= 180 && status.maxSize <= 2160) sizeValue = `long:${status.maxSize}`;
+        if (sizeValue) {
+            if (![...els.qualitySize.options].some(option => option.value === sizeValue)) {
+                const option = new Option(sizeValue.startsWith('long:')
+                    ? `旧配置 · 长边 ≤ ${status.maxSize} px`
+                    : `自定义 · 短边 ${shortEdge} px`, sizeValue);
+                option.dataset.custom = 'true';
+                els.qualitySize.add(option);
+            }
+            els.qualitySize.value = sizeValue;
+        }
+        updateResolutionPreview();
+    }
+    function lockQuality(locked) {
+        locked = locked || takeoverLocked();
+        qualityFields.forEach(field => { field.disabled = locked || !qualityAvailable; });
+        els.applyQuality.disabled = locked || !qualityAvailable;
+        $('resetDisplay').disabled = locked || !qualityAvailable;
+        els.fit.disabled = locked || fitSaving;
+    }
+    async function loadQuality() {
+        if (qualityLoading || qualitySaving || qualityLoaded) return;
+        qualityLoading = true;
+        qualityAvailable = false;
+        lockQuality(true);
+        say(els.qualityMessage, '读取当前配置…');
+        try {
+            const result = await api('/api/scrcpy');
+            qualityAvailable = result.ok === true && result.available === true;
+            if (qualityAvailable) {
+                showQualityConfig(result.status);
+                qualityLoaded = true;
+                say(els.qualityMessage, '修改后点击应用；配置保存后，重新打开或重启仍会保留。');
+            } else say(els.qualityMessage, result.error || 'H.264 通道不可用，当前仅支持 JPEG 回退。', 'err');
+        } finally { qualityLoading = false; lockQuality(false); renderTakeover(); }
+    }
+    async function applyQuality(reset = false) {
+        if (takeoverLocked() || qualitySaving || fitSaving || !qualityAvailable) return;
+        const resolution = resolutionConfig();
+        const config = { maxFps: Number(els.qualityFps.value), bitRate: Number(els.qualityBitRate.value), ...resolution };
+        const size = resolution?.maxShortEdge ?? resolution?.maxSize;
+        if (!Number.isSafeInteger(config.maxFps) || config.maxFps < 1 || config.maxFps > 120
+            || !Number.isSafeInteger(config.bitRate) || config.bitRate < 100000 || config.bitRate > 50000000
+            || !Number.isSafeInteger(size) || (size !== 0 && (size < 180 || size > 2160))) {
+            say(els.qualityMessage, '请选择有效的帧率、码率和画面尺寸。', 'err');
+            return;
+        }
+        qualitySaving = true;
+        lockQuality(true);
+        say(els.qualityMessage, '正在应用，视频流可能短暂中断…');
+        try {
+            const result = await api(reset ? '/api/display/reset' : '/api/scrcpy/config', reset ? {} : config);
+            if (result.status) showQualityConfig(result.status);
+            if (reset && result.saved === true && typeof result.fitWidth === 'boolean') {
+                applyFitMode(result.fitWidth);
+                preferenceChannel?.postMessage({ type: 'display-mode-changed' });
+            }
+            if (!result.ok) {
+                const detail = result.saved === true
+                    ? result.applied === 'fallback'
+                        ? '；配置已保存，正在使用兼容画面，视频通道将尝试恢复。'
+                        : '；配置已保存，但本次应用被取消。'
+                    : '；设置未保存，请修正问题后重试。';
+                say(els.qualityMessage, `${result.error || '应用失败'}${detail}`, 'err');
+            } else if (result.applied === 'active-stream') {
+                say(els.qualityMessage, `${result.saved ? '配置已保存，' : '配置仅在本次运行生效，'}已重启视频流并应用；实际帧率仍取决于手机和画面变化。`, 'ok');
+            } else say(els.qualityMessage, `${result.saved ? '配置已保存' : '配置仅在本次运行生效'}，将在下次启动 H.264 时生效；当前 JPEG 不变。`);
+        } finally { qualitySaving = false; lockQuality(false); renderTakeover(); }
+    }
+    els.applyQuality.addEventListener('click', () => { void applyQuality(); });
+    $('resetDisplay').addEventListener('click', () => { void applyQuality(true); });
+
+    // Window fitting stays on the bounded native bridge.
+    let fittedRatio = null;
+    let fitRevision = 0;
+    async function fitNativeWindow(force = false) {
+        if (takeoverLocked() || !window.androidDisplay?.fitWindow || !els.settingsPage.classList.contains('hidden')) return;
+        const h264Visible = !els.h264.classList.contains('hidden');
+        const width = h264Visible ? els.h264.width : els.screen.naturalWidth;
+        const height = h264Visible ? els.h264.height : els.screen.naturalHeight;
+        if (!width || !height) return;
+        const ratio = width / height;
+        if (!force && fittedRatio !== null && Math.abs(ratio - fittedRatio) < 0.01) return;
+        fittedRatio = ratio;
+        const revision = ++fitRevision;
+        const settingsHidden = els.settingsPage.classList.contains('hidden');
+        els.fitWindow.disabled = true;
+        try {
+            // Remeasure native titlebar chrome after a bounded layout correction.
+            for (let pass = 0; pass < 3 && revision === fitRevision; pass++) {
+                if (takeoverLocked() || settingsHidden !== els.settingsPage.classList.contains('hidden')) break;
+                const chromeHeight = Math.round(innerHeight - $('stage').clientHeight);
+                if (!await window.androidDisplay.fitWindow({ width, height, chromeHeight })) break;
+                let layoutTimer;
+                try {
+                    await Promise.race([
+                        new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))),
+                        new Promise(resolve => { layoutTimer = setTimeout(resolve, 120); }),
+                    ]);
+                } finally { clearTimeout(layoutTimer); }
+                if (Math.round(innerHeight - $('stage').clientHeight) === chromeHeight) break;
+            }
+        } catch (error) {
+            fittedRatio = null;
+            console.warn('无法贴合显示窗口：', error.message);
+        } finally {
+            if (revision === fitRevision) els.fitWindow.disabled = takeoverLocked();
+        }
+    }
+    if (window.androidDisplay?.fitWindow) {
+        els.fitWindow.classList.remove('hidden');
+        els.fitWindow.disabled = false;
+        els.fitWindow.addEventListener('click', () => {
+            if (settingsOnly) { void window.androidDisplay?.requestViewerAction?.('fit'); return; }
+            closeSettingsPage(); void fitNativeWindow(true);
+        });
+        els.screen.addEventListener('load', () => fitNativeWindow());
+        const sizeObserver = new MutationObserver(() => fitNativeWindow());
+        sizeObserver.observe(els.h264, { attributes: true, attributeFilter: ['width', 'height'] });
+        window.addEventListener('beforeunload', () => sizeObserver.disconnect(), { once: true });
     }
 
     // ---------- 画面流 ----------
@@ -563,14 +1380,69 @@
         return `${scheme}//${location.host}/stream`;
     }
 
-    function startStreaming() {
-        hideWizard();
-        els.screen.classList.remove('hidden');
-        connect();
+    let firstFrameTimer = null;
+    function beginStreamLoading() {
+        clearTimeout(firstFrameTimer);
+        $('stage').dataset.streamState = 'loading';
+        $('stage').setAttribute('aria-busy', 'true');
+        els.emptyState.classList.add('hidden');
+        els.streamPlaceholder.classList.remove('hidden');
+        els.streamPlaceholder.removeAttribute('aria-hidden');
+        els.streamTitle.textContent = '正在连接视频流';
+        els.streamDetail.textContent = '正在准备画面，首帧到达后自动显示。';
+        els.retryStream.classList.add('hidden');
+        firstFrameTimer = setTimeout(() => failStreamLoading('等待首帧超时', '手机可能尚未授权投屏，或编码器没有输出。可以重试画面，或在设置中检查连接。'), 15000);
+    }
+    function failStreamLoading(title, detail) {
+        if ($('stage').dataset.streamState === 'ready') return;
+        clearTimeout(firstFrameTimer);
+        firstFrameTimer = null;
+        $('stage').dataset.streamState = 'error';
+        $('stage').setAttribute('aria-busy', 'false');
+        els.streamTitle.textContent = title;
+        els.streamDetail.textContent = detail;
+        els.retryStream.classList.remove('hidden');
+    }
+    function revealStreamFrame(kind) {
+        if (takeoverLocked()) return;
+        const firstReady = $('stage').dataset.streamState !== 'ready';
+        clearTimeout(firstFrameTimer);
+        firstFrameTimer = null;
+        els.screen.classList.toggle('hidden', kind !== 'jpeg');
+        els.h264.classList.toggle('hidden', kind !== 'h264');
+        $('stage').dataset.streamState = 'ready';
+        $('stage').setAttribute('aria-busy', 'false');
+        els.streamPlaceholder.setAttribute('aria-hidden', 'true');
+        void fitNativeWindow(firstReady);
+    }
+    els.retryStream.addEventListener('click', () => els.reconnect.click());
+    els.screen.addEventListener('load', () => {
+        if (!useH264 && objectUrl && els.screen.getAttribute('src') === objectUrl && els.screen.naturalWidth > 0) revealStreamFrame('jpeg');
+    });
+    els.screen.addEventListener('error', () => {
+        els.screen.classList.add('hidden');
+        failStreamLoading('画面解码失败', '未能显示视频帧，请重试画面。');
+    });
+    async function startStreaming() {
+        if (settingsOnly) {
+            try {
+                const accepted = await window.androidDisplay?.requestViewerAction?.('reconnect');
+                if (accepted === true) closeSettingsPage();
+                else say(els.connMsg, '设备已连接，但主窗口暂不可用。请重新打开显示屏。', 'err');
+            } catch {
+                say(els.connMsg, '设备已连接，但无法通知主窗口。请重新打开显示屏。', 'err');
+            }
+            return;
+        }
+        if (takeoverLocked()) return;
+        closeSettingsPage();
+        els.emptyState.classList.add('hidden');
+        if (!socket || socket.readyState > 1) connect();
     }
 
     function connect() {
         cleanupSocket();
+        beginStreamLoading();
         setDot('warn', '连接中…');
 
         let ws;
@@ -578,34 +1450,47 @@
             ws = new WebSocket(toWsUrl());
         } catch (error) {
             setDot('error', '无法连接');
+            failStreamLoading('无法连接视频流', '显示服务未能建立连接，请重试画面。');
             return;
         }
         ws.binaryType = 'arraybuffer';
         socket = ws;
 
         ws.onopen = () => {
+            if (socket !== ws) return;
             retryIndex = 0;
             setDot('online', '已连接');
             els.errorBox.classList.add('hidden');
             startStaleWatch();
             ws.send(JSON.stringify({ type: 'hello', at: Date.now() }));
+            renderTakeover();
         };
 
         ws.onmessage = (event) => {
+            if (socket !== ws) return;
             if (typeof event.data === 'string') { handleText(event.data); return; }
             handleBinary(event.data);
         };
 
         ws.onclose = (event) => {
+            if (socket !== ws) return;
+            clearTimeout(firstFrameTimer);
+            firstFrameTimer = null;
             stopStaleWatch();
+            const wasTakeover = takeoverLocked();
+            resetTakeover(wasTakeover ? '接管连接已断开，授权已清除；输入不会重发，请手动重连。' : '只读画面 · 连接已断开', wasTakeover ? 'error' : '');
             if (closedByUs) return;
             setDot(event.code === 1000 ? '' : 'error', `已断开 (${event.code})`);
+            if (wasTakeover) { closedByUs = true; return; }
             scheduleReconnect();
         };
 
         ws.onerror = () => {
+            if (socket !== ws) return;
+            if (takeoverLocked()) { closeTakeoverSocket('接管连接出错，已关闭连接撤销；输入不会重发。'); return; }
             els.errorBox.textContent = 'WebSocket 连接失败，请确认 AndroidController 插件仍在运行。';
             els.errorBox.classList.remove('hidden');
+            failStreamLoading('视频连接失败', '请确认 AndroidController 插件仍在运行，然后重试画面。');
         };
     }
 
@@ -629,6 +1514,12 @@
     function handleText(raw) {
         let payload;
         try { payload = JSON.parse(raw); } catch { return; }
+
+        if (payload?.type === 'takeover-result') { handleTakeoverResult(payload); return; }
+        if (payload?.type === 'takeover-ended') {
+            resetTakeover(`接管已结束 · ${payload.code || '服务端已撤销'} · 不会自动恢复 AI`, 'warning');
+            return;
+        }
 
         if (payload?.type === 'scrcpy-ready') {
             setupH264(payload);
@@ -699,8 +1590,7 @@
         }
 
         useH264 = true;
-        els.screen.classList.add('hidden');
-        els.h264.classList.remove('hidden');
+        if ($('stage').dataset.streamState !== 'ready') els.h264.classList.add('hidden');
 
         if (!info?.codecString) {
             // codecString 依赖 SPS，通常要等第一个 config 包。
@@ -728,8 +1618,7 @@
         const wasH264 = useH264;
         useH264 = false;
         h264Interrupted = false;
-        els.h264.classList.add('hidden');
-        els.screen.classList.remove('hidden');
+        if ($('stage').dataset.streamState !== 'ready') els.screen.classList.add('hidden');
         closeDecoder();
         decodedSeq = -1;
         // 服务端临时降级已订阅 JPEG，不能回发永久客户端模式选择。
@@ -737,7 +1626,8 @@
         if (!wasH264) return;
         els.errorBox.textContent = `${reason}，已切到兼容模式。画面会自己恢复，不用刷新。`;
         els.errorBox.classList.remove('hidden');
-        setTimeout(() => els.errorBox.classList.add('hidden'), 4000);
+        clearTimeout(streamNoticeTimer);
+        streamNoticeTimer = setTimeout(() => { streamNoticeTimer = null; els.errorBox.classList.add('hidden'); }, 4000);
     }
 
     /** 重建解码器：让后续关键帧能重新对上，不清 canvas（画面先留住） */
@@ -755,10 +1645,10 @@
         const info = h264Info;
         if (!info?.codecString) return;
         try {
-            decoder = new VideoDecoder({
+            const instance = new VideoDecoder({
                 output: (frame) => {
-                    renderFrame(frame);
-                    frame.close();
+                    try { if (decoder === instance && useH264) renderFrame(frame); }
+                    finally { frame.close(); }
                 },
                 error: (error) => {
                     els.errorBox.textContent = `解码失败：${error.message}`;
@@ -766,6 +1656,7 @@
                     fallbackToJpeg('H.264 解码出错');
                 },
             });
+            decoder = instance;
         } catch (error) {
             fallbackToJpeg(`无法创建解码器：${error.message}`);
         }
@@ -891,6 +1782,7 @@
         }
 
         if (flags & H264_FLAG_CONFIG) {
+            h264Seq = -1;
 
             const nals = splitNals(payload);
             const sps = nals.find((n) => (n[0] & 0x1f) === 7);
@@ -928,6 +1820,10 @@
             return;
         }
         // H.264 和 JPEG 各自独立计数，不能共用 decodedSeq
+        if (!(flags & H264_FLAG_KEY)) {
+            if (h264Seq < 0) return;
+            if (seq > h264Seq + 1) { resetDecoderForResync(); return; }
+        }
         if (h264Seq >= 0 && seq <= h264Seq) return;
         h264Seq = seq;
 
@@ -963,6 +1859,7 @@
         }
         const ctx = canvas.getContext('2d');
         ctx.drawImage(frame, 0, 0);
+        revealStreamFrame('h264');
 
         els.res.textContent = `${frame.displayWidth}×${frame.displayHeight}`;
         els.bytes.textContent = formatBytes(h264Bytes);
@@ -1011,8 +1908,14 @@
         pendingBlob = blob;
 
         const url = URL.createObjectURL(blob);
+        const frameSocket = socket;
         const img = new Image();
         img.onload = () => {
+            if (socket !== frameSocket || pendingBlob !== blob || useH264 || takeoverLocked()) {
+                URL.revokeObjectURL(url);
+                if (pendingBlob === blob) pendingBlob = null;
+                return;
+            }
             const previous = objectUrl;
             els.screen.src = url;
             objectUrl = url;
@@ -1023,7 +1926,12 @@
             pendingBlob = null;
             recordFrame(now);
         };
-        img.onerror = () => { URL.revokeObjectURL(url); pendingBlob = null; };
+        img.onerror = () => {
+            URL.revokeObjectURL(url);
+            if (socket !== frameSocket || pendingBlob !== blob) return;
+            pendingBlob = null;
+            failStreamLoading('画面解码失败', '收到的视频帧无法解码，请重试画面。');
+        };
         img.src = url;
     }
 
@@ -1035,6 +1943,7 @@
     }
 
     function recordFrame(now) {
+        if (now - statusPublishedAt >= 1000) publishViewerStatus();
         // 连接瞬间服务端会把积压帧一口气推过来，间隔只有几毫秒，
         // 直接算会得出 600+ fps 的假数字。低于 500ms 的窗口不更新读数。
         if (lastFrameAt) els.interval.textContent = `${now - lastFrameAt} ms`;
@@ -1085,11 +1994,17 @@
             resyncing = true;
             lastResyncAt = now;
             resetDecoderForResync();
-            setTimeout(() => { resyncing = false; }, 5000);
+            clearTimeout(resyncTimer);
+            resyncTimer = setTimeout(() => { resyncTimer = null; resyncing = false; }, 5000);
         }, 1000);
     }
     function stopStaleWatch() {
         if (staleTimer) { clearInterval(staleTimer); staleTimer = null; }
+        clearTimeout(streamNoticeTimer);
+        clearTimeout(resyncTimer);
+        streamNoticeTimer = null;
+        resyncTimer = null;
+        resyncing = false;
     }
     function formatBytes(size) {
         if (size < 1024) return `${size} B`;
@@ -1097,9 +2012,13 @@
         return `${(size / 1024 / 1024).toFixed(1)} MB`;
     }
     function cleanupSocket() {
+        clearTimeout(firstFrameTimer);
+        firstFrameTimer = null;
+        resetTakeover('只读画面 · 接管授权已清除');
+        stopStaleWatch();
         if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
         if (socket) {
-            try { socket.onclose = null; socket.onerror = null; socket.close(); } catch { /* 忽略 */ }
+            try { socket.onopen = null; socket.onmessage = null; socket.onclose = null; socket.onerror = null; socket.close(); } catch { /* 忽略 */ }
             socket = null;
         }
         pendingBlob = null;
@@ -1111,30 +2030,64 @@
         h264ConfigBytes = null;
         h264Seq = -1;
         decodedSeq = -1;
+        renderTakeover();
     }
 
-    els.fit.addEventListener('click', () => {
-        fitWidth = !fitWidth;
+    function applyFitMode(value) {
+        fitWidth = value;
         els.screen.classList.toggle('fit-width', fitWidth);
         els.h264.classList.toggle('fit-width', fitWidth);
+        els.takeoverFrame.classList.toggle('fit-width', fitWidth);
         els.fit.classList.toggle('active', fitWidth);
+        els.fit.setAttribute('aria-pressed', String(fitWidth));
+    }
+    async function loadDisplayPreferences() {
+        const result = await api('/api/display/preferences');
+        if (result.ok && typeof result.fitWidth === 'boolean') applyFitMode(result.fitWidth);
+        else say(els.qualityMessage, result.error || '显示方式读取失败，暂用完整显示。', 'err');
+    }
+    els.fit.addEventListener('click', async () => {
+        if (takeoverLocked() || fitSaving || qualitySaving) return;
+        fitSaving = true;
+        els.fit.disabled = true;
+        try {
+            const result = await api('/api/display/preferences', { fitWidth: !fitWidth });
+            if (result.ok && typeof result.fitWidth === 'boolean') {
+                applyFitMode(result.fitWidth);
+                preferenceChannel?.postMessage({ type: 'display-mode-changed' });
+                say(els.qualityMessage, '显示方式已保存。');
+            } else say(els.qualityMessage, result.error || '显示方式保存失败，未更改。', 'err');
+        } finally { fitSaving = false; els.fit.disabled = takeoverLocked(); }
     });
 
+    window.addEventListener('android-display-viewer-action', event => {
+        if (settingsOnly || takeoverLocked()) return;
+        if (event.detail?.action === 'fit') void fitNativeWindow(true);
+        else if (event.detail?.action === 'reconnect') els.reconnect.click();
+    });
     els.reconnect.addEventListener('click', () => {
+        if (settingsOnly) { void window.androidDisplay?.requestViewerAction?.('reconnect'); return; }
+        if (takeoverLocked()) return;
         retryIndex = 0; closedByUs = false; decodedSeq = -1;
         lastFrameAt = 0; frameTimes = []; latencySamples = [];
-        startStreaming();
+        closeSettingsPage();
+        els.emptyState.classList.add('hidden');
+        connect();
     });
 
     // ---------- 启动 ----------
     (async function boot() {
+        const section = new URL(location.href).searchParams.get('section');
+        const childTab = section === 'connection' ? 1 : section === 'controller' ? 2 : section === 'status' ? 3 : 0;
+        if (settingsOnly) showSettings(childTab);
         const status = await api('/api/adb');
         if (!status.available) {
-            els.tipBox.innerHTML = '找不到 adb。请确认已安装 Android platform-tools，'
-                + '或在插件 <code>config.env</code> 里设置 <code>ADB_PATH</code>。';
+            els.tipBox.textContent = '找不到 adb。请安装 Android platform-tools，或在插件 config.env 中设置 ADB_PATH。';
             els.tipBox.style.borderColor = 'color-mix(in srgb, var(--bad) 40%, transparent)';
             say(els.connMsg, status.error || 'adb 不可用', 'err');
             setDot('error', 'adb 不可用');
+            els.emptyState.querySelector('strong').textContent = 'ADB 不可用';
+            els.emptyState.querySelector('p').textContent = '在连接设置中查看安装说明与服务错误。';
             return;
         }
         // addresses 现在是 [{address, interface}]，只有网卡地址才是手机能连的
@@ -1145,80 +2098,28 @@
         const primary = addrs[0] || '未知';
         const rest = addrs.slice(1);
 
-        els.tipBox.innerHTML = `本机 IP：<code>${primary}</code>`
-            + (rest.length ? `（另有 ${rest.length} 个虚拟网卡地址已忽略）` : '')
-            + `<br>手机要和电脑连同一个 WiFi。IP 不用手填 —— 点「扫描」会自动发现。`;
+        els.tipBox.textContent = `本机 IP：${primary}`
+            + (rest.length ? `（另有 ${rest.length} 个网卡地址）` : '')
+            + '。手机与电脑需连接同一 Wi-Fi；扫描可自动发现地址。';
 
+        await loadDisplayPreferences();
+        if (settingsOnly) {
+            if (childTab !== 1) await refreshDevices({ quiet: true, reveal: false });
+            return;
+        }
         // 已有设备就直接看画面，不打扰用户
         await refreshDevices({ quiet: true });
         if (devices.some((d) => d.state === 'device')) return;
 
-        els.wizard.classList.remove('hidden');
-        setDot('warn', '正在找手机…');
-        startAutoConnect();
+        setDot('', '等待连接手机');
     })();
-
-    /**
-     * 启动后的自动接管。
-     *
-     * 目标：用户什么都不点就能进画面。轮询几轮，期间保持扫描状态提示；
-     * 全都失败才显示向导让用户手动操作。用户点「扫描」会中断这个循环。
-     */
-    async function startAutoConnect() {
-        if (autoConnecting) return;
-        autoConnecting = true;
-        autoAttempts = 0;
-
-        try {
-            while (!autoConnectingStopped && autoAttempts < AUTO_CONNECT_ROUNDS) {
-                autoAttempts += 1;
-                const suffix = autoAttempts > 1 ? `（第 ${autoAttempts} 次）` : '';
-                say(els.scanMsg, `正在自动搜索手机…${suffix}`, 'info');
-                setDot('warn', '正在找手机…');
-
-                try {
-                    const result = await api('/api/connect', {});
-                    if (result.ok) {
-                        say(els.scanMsg, result.message || '已连接', 'ok');
-                        setDot('online', '已连接');
-                        const list = await api('/api/devices').catch(() => null);
-                        if (list?.ok) {
-                            devices = Array.isArray(list.devices) ? list.devices : [];
-                            renderDevices();
-                        }
-                        if (devices.some((d) => d.state === 'device')) {
-                            hideWizard();
-                            startStreaming();
-                            return;
-                        }
-                    }
-                } catch { /* 单轮失败继续重试 */ }
-
-                if (autoAttempts < AUTO_CONNECT_ROUNDS && !autoConnectingStopped) {
-                    await new Promise((r) => setTimeout(r, AUTO_CONNECT_DELAY_MS));
-                }
-            }
-
-            if (!autoConnectingStopped) {
-                setDot('', '等待连接手机');
-                say(els.scanMsg,
-                    '还没找到手机。确认无线调试已打开、手机和电脑同一 WiFi，'
-                    + '然后点「扫描附近的手机」，或手动填写地址。',
-                    'err');
-            }
-        } finally {
-            autoConnecting = false;
-        }
-    }
-
-    function stopAutoConnect() {
-        autoConnectingStopped = true;
-    }
 
     window.addEventListener('beforeunload', () => {
         closedByUs = true;
         cleanupSocket();
         stopStaleWatch();
+        preferenceChannel?.close();
+        takeoverListeners.splice(0).forEach(remove => remove());
         if (objectUrl) URL.revokeObjectURL(objectUrl);
     });
 })();

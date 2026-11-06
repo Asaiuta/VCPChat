@@ -86,15 +86,21 @@ test('sequence rejects future pixel or index credentials before first action', a
     assert.equal(inputs(h).length, 0);
 });
 
-test('sequence total deadline returns in-flight progress and keeps lease until drained', async () => {
-    let release;
+test('sequence total deadline returns in-flight progress and keeps lease until drained', async t => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+    let entered, release;
+    const ready = new Promise(resolve => { entered = resolve; });
     const gate = new Promise(resolve => { release = resolve; });
-    const h = await harness({ run: async args => { if (args[1] === 'input') await gate; } });
+    const h = await harness({ run: async args => { if (args[1] === 'input') { entered(); await gate; } } });
     try {
-        await assert.rejects(run(h, [key(), key()], { timeoutMs: 20 }), error => error.code === 'STEP_DEADLINE' && error.execution.sequence.steps[0].outcome === 'unknown');
+        const rejected = assert.rejects(run(h, [key(), key()], { timeoutMs: 20 }), error => error.code === 'STEP_DEADLINE' && error.execution.sequence.steps[0].outcome === 'unknown');
+        await ready;
+        assert.equal(inputs(h).length, 1, 'the deadline must expire with input actually in flight');
+        t.mock.timers.tick(20);
+        await rejected;
         await assert.rejects(run(h, [key()]), { code: 'DEVICE_BUSY' });
     } finally { release(); }
-    await new Promise(resolve => setTimeout(resolve, 0));
+    await new Promise(resolve => setImmediate(resolve));
 });
 
 test('sequence invalid action parameters stop without replaying prior verified steps', async () => {

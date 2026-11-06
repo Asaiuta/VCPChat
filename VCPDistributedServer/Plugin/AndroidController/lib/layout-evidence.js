@@ -2,6 +2,7 @@
 
 const { createHash } = require('node:crypto');
 const { parseBounds } = require('./ui-graph');
+const contextEvidence = require('./context');
 
 function intersect(a, b) {
     if (!a || !b) return null;
@@ -30,18 +31,13 @@ function rawEntries(graph, screen) {
 }
 
 function screenContext(probe) {
-    const { focus, size } = probe || {};
-    if (probe?.wakefulness !== 'Awake' || !focus?.package || !focus.component
-        || /systemui|keyguard/i.test(focus.package) || probe.keyguard?.showing === true
-        || probe.keyguard?.inputRestricted === true || !Number.isSafeInteger(size?.width) || size.width < 1
-        || !Number.isSafeInteger(size?.height) || size.height < 1) return null;
-    return JSON.stringify([focus.package, focus.component, focus.window || null, size.width, size.height]);
+    return contextEvidence.contextKey(contextEvidence.frameContext(probe));
 }
 
 function layoutEvidence(graph, probe) {
     const baseContext = screenContext(probe);
-    const context = baseContext ? JSON.stringify([baseContext, graph?.rawRoot?.attrs?.rotation ?? null]) : null;
-    if (!context || !graph?.rawRoot || graph.keyguard) return { complete: false, context, digest: '' };
+    const context = baseContext;
+    if (!contextEvidence.graphMatchesContext(graph, contextEvidence.frameContext(probe))) return { complete: false, context, digest: '' };
     const entries = rawEntries(graph, probe.size);
     if (entries.some(item => item.path.split('/').length >= 200)) return { complete: false, context, digest: '' };
     const nodes = entries.filter(item => item.visible);
@@ -51,6 +47,28 @@ function layoutEvidence(graph, probe) {
         attrs['resource-id'] || '', bounds, visible, attrs.enabled, attrs.clickable, attrs['long-clickable'], attrs.scrollable,
         attrs.checkable, attrs.checked, attrs.selected, attrs.focusable, attrs.focused, attrs.password]);
     return { complete: true, context, digest: createHash('sha256').update(JSON.stringify(evidence)).digest('hex') };
+}
+
+// Internal fixed-fixture diagnostics only; never emit text, resource ids, class names or context strings.
+function m2IdleDiagnostic(graph, probe, evidence) {
+    const fixture = 'com.vcpchat.m15fixture';
+    if (!screenContext(probe) || probe.focus.package !== fixture
+        || ![`${fixture}/.MainActivity`, `${fixture}/${fixture}.MainActivity`].includes(probe.focus.component)) return null;
+    const entries = rawEntries(graph, probe.size);
+    const geometry = entries.map(({ path, bounds, visible }) => ({ path, bounds, visibleBounds: visible }));
+    const color = entries.filter(item => item.attrs.package === fixture && item.attrs['resource-id'] === `${fixture}:id/m2_color`);
+    return {
+        complete: evidence?.complete === true,
+        digest: /^[a-f0-9]{64}$/.test(evidence?.digest || '') ? evidence.digest : null,
+        rawNodeCount: entries.length,
+        visibleNodeCount: entries.filter(item => item.visible).length,
+        geometryDigest: createHash('sha256').update(JSON.stringify(geometry)).digest('hex'),
+        geometry: geometry.slice(0, 128),
+        geometryTruncated: geometry.length > 128,
+        colorNodeCount: color.length,
+        colorGeometry: color.slice(0, 8).map(({ path, bounds, visible }) => ({ path, bounds, visibleBounds: visible })),
+        colorGeometryTruncated: color.length > 8,
+    };
 }
 
 function elementEvidence(graph, node, screen) {
@@ -67,4 +85,4 @@ function elementEvidence(graph, node, screen) {
         attrs['resource-id'] || '', node.id || '', node.bounds, node.label, node.value, node.flags]) };
 }
 
-module.exports = { rawEntries, screenContext, layoutEvidence, elementEvidence };
+module.exports = { rawEntries, screenContext, layoutEvidence, elementEvidence, m2IdleDiagnostic };

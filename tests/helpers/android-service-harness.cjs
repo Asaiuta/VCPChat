@@ -3,6 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const { UiServer } = require('../../VCPDistributedServer/Plugin/AndroidController/lib/ui-server');
 const { createRequire } = require('node:module');
 
 const entry = path.resolve(__dirname, '../../VCPDistributedServer/Plugin/AndroidController/AndroidControllerService.js');
@@ -17,10 +18,9 @@ async function harness(options = {}) {
         async devices() { return [{ serial: 'A', state: 'device' }, { serial: 'B', state: 'device' }]; },
         async probeScreen(serial, options = {}) {
             calls.push(['probe', serial]);
-            if (options.fresh) return { focus: { package: 'com.example', component: 'com.example/.Main', window: 'Window{test u0 com.example/.Main}' },
+            return { focus: { package: 'com.example', component: 'com.example/.Main', window: 'Window{test u0 com.example/.Main}' },
                 size: { width: 100, height: 200 }, wakefulness: 'Awake', rotation: 0, displayId: 0,
                 keyguard: { showing: false, inputRestricted: false } };
-            return { focus: { package: 'com.example' }, size: { width: 100, height: 200 }, wakefulness: 'Awake' };
         },
         async screenSize() { return { width: 100, height: 200 }; },
         async currentFocus(serial) { calls.push(['focus', serial]); return { package: options.foreground || 'com.example', component: 'com.example/.Main' }; },
@@ -47,35 +47,40 @@ async function harness(options = {}) {
     // 常驻 UI 采集服务替身：默认「起不来」，保持既有回退语义，但不再真的 spawn adb。
     // 记录 start 次数，供「配置关掉时连尝试都不该有」这类断言使用。
     const uiServer = { started: 0, stopped: 0, dumped: 0 };
-    function UiServerStub() {
+    function UiServerStub(serverOptions = {}) {
         const spec = options.uiServer || {};
+        this.carrierIdentity = spec.carrier || null;
         this.start = async () => {
             uiServer.started += 1;
             if (spec.start) return spec.start(uiServer.started);
-            return spec.ok === true ? { ok: true, port: 9008 } : { ok: false, reason: 'stub-unavailable' };
+            return spec.ok === true ? { ok: true, port: 9008, carrier: this.carrierIdentity } : { ok: false, reason: 'stub-unavailable', carrier: this.carrierIdentity };
         };
-        this.invoke = async (method, params, request) => {
-            calls.push(['rpc', method, params, request]);
-            if (spec.invoke) return spec.invoke(method, params, request);
-            return method === 'getText' ? (spec.text ?? '') : true;
+        const transport = {
+            generation: 1,
+            isReady: () => typeof spec.ready === 'function' ? spec.ready() : spec.ok === true,
+            async call(method, params, timeoutMs, signal) {
+                const request = { timeoutMs, signal };
+                calls.push(['rpc', method, params, request]);
+                if (spec.invoke) return spec.invoke(method, params, request);
+                return method === 'getText' ? (spec.text ?? '') : true;
+            },
+            async stop() {
+                this.generation++;
+                uiServer.stopped += 1;
+                return spec.stop?.(serverOptions.serial);
+            },
         };
-        // 与真实 UiServer 同形：没有只读探针，能力只由实际观测到的失败学习。
-        this._capabilities = null;
-        this.isReady = () => spec.ok === true;
-        this.noteCapability = (method, verdict) => {
-            if (verdict !== 'unavailable') return;
-            this._capabilities = { ...(this._capabilities || {}), [method]: verdict };
-        };
-        this.capability = method => {
-            const value = this._capabilities?.[method];
-            return value === 'available' || value === 'unavailable' ? value : 'unknown';
-        };
-        this.stop = async () => { uiServer.stopped += 1; };
+        const session = new UiServer({ transport });
+        this.invoke = session.invoke.bind(session);
+        this.isReady = session.isReady.bind(session);
+        this.noteCapability = session.noteCapability.bind(session);
+        this.capability = session.capability.bind(session);
+        this.stop = session.stop.bind(session);
         this.dump = async () => {
             uiServer.dumped += 1;
-            if (spec.ok !== true) throw new Error('stub not ready');
+            if (!transport.isReady()) throw new Error('stub not ready');
             const currentXml = spec.xml;
-                        return { xml: typeof currentXml === 'function' ? await currentXml(uiServer.dumped) : currentXml || xml() };
+            return { xml: typeof currentXml === 'function' ? await currentXml(uiServer.dumped) : currentXml || xml() };
         };
     }
     const frames = {
@@ -84,12 +89,13 @@ async function harness(options = {}) {
     };
     Object.assign(frames, options.frames || {});
         let api;
+        let takeoverApi;
     const overrides = {
         './lib/adb': { AdbClient: function () { return client; }, AdbError: class extends Error {} },
         './lib/ui-server': { UiServer: UiServerStub, UiServerError: class extends Error {} },
         './lib/frame-hub': { FrameHub: function () { return frames; } },
         './lib/scrcpy-hub': { ScrcpyHub: function () { return hub; } },
-        './lib/stream-server': { StreamServer: function (serverOptions) { api = serverOptions.deviceApi; return options.streamServer || { async start() {}, async stop() {}, async changeDevice(select) { return select(); }, url() { return options.displayUrl || null; } }; } },
+        './lib/stream-server': { StreamServer: function (serverOptions) { api = serverOptions.deviceApi; takeoverApi = serverOptions.takeoverApi; return options.streamServer || { async start() {}, async stop() {}, async changeDevice(select) { return select(); }, url() { return options.displayUrl || null; } }; } },
         './lib/vision': options.vision || {
             DEFAULT_MAX_WIDTH: 1080,
             async buildVisionFrame() { return { sourceWidth: 100, sourceHeight: 200, width: 100, height: 200, byteLength: 1, dataUrl: 'data:image/jpeg;base64,AA==', mapping: { region: {} } }; },
@@ -99,12 +105,12 @@ async function harness(options = {}) {
     };
     const module = { exports: {} };
     vm.runInNewContext(fs.readFileSync(entry, 'utf8'), {
-        module, exports: module.exports,
+        module, exports: module.exports, __dirname: path.dirname(entry), __filename: entry,
         require(name) { return Object.hasOwn(overrides, name) ? overrides[name] : realRequire(name); },
         console, Buffer, process, Date, setTimeout, clearTimeout, AbortController,
     }, { filename: entry });
     await module.exports.initialize({ config: { DEVICE_SERIAL: client.serial, ...(options.config || {}) }, services: options.services, logger: { log() {}, warn() {} } });
-    return { service: module.exports, client, api, calls, uiServer, get dumpCount() { return dumps; } };
+    return { service: module.exports, client, api, takeoverApi, calls, uiServer, get dumpCount() { return dumps; } };
 }
 
 module.exports = { harness, xml };

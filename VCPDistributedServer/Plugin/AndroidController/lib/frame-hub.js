@@ -50,6 +50,7 @@ class FrameHub extends EventEmitter {
         this.latest = null;          // { buffer, mime, width, height, capturedAt, seq }
         this.seq = 0;
         this.inFlight = null;        // 单飞：capture() 期间共享的 Promise
+        this.pendingCaptures = new Set();
         this.generation = 0;
         this.timer = null;
         this.retryTimer = null;
@@ -139,7 +140,13 @@ class FrameHub extends EventEmitter {
             if (this.inFlight === flight) this.inFlight = null;
         });
         this.inFlight = flight;
-        return flight;
+        return this._trackCapture(flight);
+    }
+
+    _trackCapture(operation) {
+        this.pendingCaptures.add(operation);
+        operation.finally(() => this.pendingCaptures.delete(operation)).catch(() => {});
+        return operation;
     }
 
     /** 单次采集：raw 优先，失败自动降级 PNG */
@@ -148,7 +155,7 @@ class FrameHub extends EventEmitter {
             try {
                 return await this._captureRaw(options);
             } catch (error) {
-                if (this.captureMode !== MODE_AUTO) throw error;
+                if (this.stopped || this.captureMode !== MODE_AUTO) throw error;
                 // 有些设备/ROM 的 raw 输出格式不是 RGBA_8888，或直接不给 raw
                 if (options.generation === this.generation && !this.stopped) {
                     this.fallbackCount += 1;
@@ -172,12 +179,16 @@ class FrameHub extends EventEmitter {
     async captureOneShot(options = {}) {
         if (this.stopped) throw new Error('FrameHub 已停止。');
         if (!this.adb) throw new Error('FrameHub 尚未绑定 AdbClient。');
+        return this._trackCapture(this._captureOneShot(options));
+    }
+
+    async _captureOneShot(options) {
         const opts = { ...options, serial: options.serial ?? this.adb.serial ?? '', publish: false };
         if (this.effectiveMode === MODE_RAW) {
             try {
                 return await this._captureRaw(opts);
             } catch (error) {
-                if (this.captureMode !== MODE_AUTO) throw error;
+                if (this.stopped || this.captureMode !== MODE_AUTO) throw error;
                 return await this._capturePng(opts);
             }
         }
@@ -194,6 +205,7 @@ class FrameHub extends EventEmitter {
         let lastShortfall = null;
 
         for (let attempt = 0; attempt < 3; attempt += 1) {
+            if (this.stopped) throw new Error('FrameHub 已停止。');
             if (generation === this.generation && !this.stopped) this.lastReadRetries = attempt;
             const raw = await this.adb.execOutBinary(
                 ['exec-out', 'screencap'],
@@ -286,6 +298,7 @@ class FrameHub extends EventEmitter {
 
     /** PNG 采集：兼容性最好，但设备端编码慢（2.4 秒） */
     async _capturePng(options = {}) {
+        if (this.stopped) throw new Error('FrameHub 已停止。');
         const generation = options.generation ?? this.generation;
         const maxWidth = clampInt(options.maxWidth, this.maxWidth, 180, 4320);
         const format = options.format === 'png' ? 'png' : options.format === 'jpeg' ? 'jpeg' : this.format;
@@ -417,6 +430,7 @@ class FrameHub extends EventEmitter {
         }
         this.subscribers.clear();
         this.latest = null;
+        return Promise.allSettled([...this.pendingCaptures]).then(() => undefined);
     }
 
     /** 实测有效帧率：最近发布帧之间的实际时间间隔。 */

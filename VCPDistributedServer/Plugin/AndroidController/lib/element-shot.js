@@ -2,8 +2,10 @@
 
 const { screenContext, elementEvidence } = require('./layout-evidence');
 
-function createElementShot({ runtime, vision, prepareTarget, getRecord, captureGraph, resolveSelector, intOf, validateSelector, graphLayout }) {
+function createElementShot({ runtime, vision, prepareTarget, getRecord, captureGraph, resolveSelector, intOf, validateSelector, graphLayout, freshProbe }) {
     const fail = (code, message) => { throw runtime.failure(code, message); };
+    const probeContext = (client, serial) => freshProbe ? freshProbe(client, serial, { propagateErrors: true })
+        : client.probeScreen(serial, { fresh: true, signal: runtime.executionSignal(), timeoutMs: Math.min(10000, runtime.remainingMs()) });
     function validate(args) {
         if (args.target !== 'element') {
             if (args.padding !== undefined) fail('INVALID_ARGUMENT', 'padding 仅用于 target=element。');
@@ -21,8 +23,7 @@ function createElementShot({ runtime, vision, prepareTarget, getRecord, captureG
     }
     async function prepare({ client, serial, size, args }) {
         validate(args);
-        const before = await client.probeScreen(serial);
-        before.size = await client.screenSize(serial, { force: true });
+        const before = await probeContext(client, serial);
         const context = screenContext(before);
         if (!context || JSON.stringify(before.size) !== JSON.stringify(size)) fail('INVALID_ELEMENT_TARGET', '未确认当前前台、未锁定与屏幕尺寸。');
         const binding = await prepareTarget({ ...args, serial, rpcTarget: true, safeRead: true }, '元素截图');
@@ -34,12 +35,13 @@ function createElementShot({ runtime, vision, prepareTarget, getRecord, captureG
             identity: evidence.identity, layout: args.index !== undefined ? graphLayout(graph) : null, limit: getRecord(serial).limit };
     }
     async function verify({ client, serial, size, args, baseline }) {
-        const probe = await client.probeScreen(serial);
-        probe.size = await client.screenSize(serial, { force: true });
+        const probe = await probeContext(client, serial);
         if (screenContext(probe) !== baseline.context || JSON.stringify(probe.size) !== JSON.stringify(size)) fail('ELEMENT_CONTEXT_CHANGED', '截图期间前台或屏幕尺寸变化。');
-        const graph = await captureGraph(serial, { limit: baseline.limit, screen: size, rpcTarget: true, deadlineMs: Date.now() + runtime.remainingMs() });
-        const after = await client.probeScreen(serial);
-        after.size = await client.screenSize(serial, { force: true });
+        const graph = await captureGraph(serial, { limit: baseline.limit, screen: size, rpcTarget: true, deadlineMs: Date.now() + runtime.remainingMs() }).catch(error => {
+            if (['CONTEXT_UNPROVEN', 'UI_CONTEXT_CHANGED'].includes(error.code)) fail('ELEMENT_CONTEXT_CHANGED', '末次布局采样期间前台或屏幕上下文变化/不明。');
+            throw error;
+        });
+        const after = await probeContext(client, serial);
         if (screenContext(after) !== baseline.context || (graph.rawRoot?.attrs?.rotation ?? null) !== baseline.rotation) {
             fail('ELEMENT_CONTEXT_CHANGED', '末次采样期间前台、屏幕尺寸或旋转变化。');
         }

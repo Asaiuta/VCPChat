@@ -1,7 +1,9 @@
 'use strict';
 
-const FIELDS = new Set(['id', 'text', 'contains', 'regex', 'class', 'role', 'nth', 'within']);
-const CONDITIONS = ['id', 'text', 'contains', 'regex', 'class', 'role'];
+const CONDITIONS = ['id', 'text', 'desc', 'any', 'contains', 'regex', 'class', 'role'];
+const RELATIONS = ['within', 'childOf', 'siblingOf', 'hasDescendant'];
+const FIELDS = new Set([...CONDITIONS, 'nth', ...RELATIONS]);
+const EXACT_FIELDS = new Set(['id', 'text', 'desc', 'any']);
 const MAX_PATTERN_LENGTH = 512;
 const MAX_REGEX_TEXT_LENGTH = 16384;
 const MAX_CONDITION_LENGTH = 4096;
@@ -146,16 +148,16 @@ function compileRegex(source) {
 /** Parse to a frozen selector. Throws TypeError with code ANDROID_SELECTOR_INVALID. */
 function parseSelector(input, allowWithin = true) {
     if (input && typeof input === 'object' && PARSED.has(input)) {
-        if (!allowWithin && input.within) invalid('within may not be nested');
+        if (!allowWithin && RELATIONS.some(key => input[key])) invalid('relations may not be nested');
         return input;
     }
     let legacyOrdinal;
     if (typeof input === 'string') {
-        const match = /^(id|text|contains|regex|class|role)=([\s\S]*)$/.exec(input.trim());
+        const match = /^(id|text|desc|any|contains|regex|class|role)=([\s\S]*)$/.exec(input);
         if (!match) invalid('expected a condition=value string or a selector object');
         const [, kind] = match;
         let key = match[2];
-        if (kind === 'id' || kind === 'text') {
+        if (EXACT_FIELDS.has(kind)) {
             const ordinal = /#(\d+)$/.exec(key);
             if (ordinal) {
                 legacyOrdinal = Number(ordinal[1]);
@@ -175,16 +177,15 @@ function parseSelector(input, allowWithin = true) {
         if (!descriptor || !('value' in descriptor)) invalid('selector fields must be data properties');
         const value = descriptor.value;
         if (CONDITIONS.includes(key)) {
-            const legacyEmptyLabel = key === 'text' && value === '' && legacyOrdinal !== undefined;
-            if (typeof value !== 'string' || (!value.trim() && !legacyEmptyLabel)) invalid(`${key} must be a non-empty string`);
+            if (typeof value !== 'string' || !value.trim()) invalid(`${key} must be a non-empty string`);
             if (value.length > MAX_CONDITION_LENGTH) invalid(`${key} exceeds ${MAX_CONDITION_LENGTH} characters`);
             output[key] = key === 'role' ? value.toLowerCase() : value;
         } else if (key === 'nth') {
             if (!Number.isSafeInteger(value) || value < 0) invalid('nth must be a non-negative numeric safe integer');
             output.nth = value;
         } else {
-            if (!allowWithin) invalid('within may not be nested');
-            output.within = parseSelector(value, false);
+            if (!allowWithin) invalid('relations may not be nested');
+            output[key] = parseSelector(value, false);
         }
     }
     if (!CONDITIONS.some((key) => Object.hasOwn(output, key))) invalid('at least one matching condition is required');
@@ -200,15 +201,17 @@ function validateSelector(input) {
 }
 
 function matches(control, selector, budget) {
-    const label = String(control[MATCH_LABEL] ?? control.label ?? '');
+    const text = String(control.text ?? '');
     if (selector.id !== undefined && control.id !== selector.id) return false;
-    if (selector.text !== undefined && label !== selector.text) return false;
-    if (selector.contains !== undefined && !label.includes(selector.contains)) return false;
+    if (selector.text !== undefined && text !== selector.text) return false;
+    if (selector.desc !== undefined && String(control.desc ?? '') !== selector.desc) return false;
+    if (selector.any !== undefined && String(control[MATCH_LABEL] ?? control.label ?? '') !== selector.any) return false;
+    if (selector.contains !== undefined && !text.includes(selector.contains)) return false;
     if (selector.regex !== undefined) {
-        if (label.length > MAX_REGEX_TEXT_LENGTH) invalid('label exceeds regex input budget');
-        budget.remaining -= Math.max(1, selector.regex.length) * Math.max(1, label.length);
+        if (text.length > MAX_REGEX_TEXT_LENGTH) invalid('raw text exceeds regex input budget');
+        budget.remaining -= Math.max(1, selector.regex.length) * Math.max(1, text.length);
         if (budget.remaining < 0) invalid('query exceeds total regex work budget');
-        if (!selector[REGEX_MATCHER](label)) return false;
+        if (!selector[REGEX_MATCHER](text)) return false;
     }
     if (selector.class !== undefined && control.cls !== selector.class && control.fullClass !== selector.class) return false;
     return selector.role === undefined || control.role === selector.role;
@@ -225,31 +228,43 @@ function screenOrder(a, b) {
 
 function controlsOf(source, options = {}) {
     if (options.includeDisabled === true && source?.evidenceControls) return source.evidenceControls;
-    if (Array.isArray(source)) return source.matchingControls || source;
-    if (source?.truncated && !source.matchingControls) invalid('truncated graph lacks complete matching evidence');
-    const controls = source?.matchingControls || source?.controls;
+    const complete = source?.matchingControls;
+    if (complete) return complete;
+    if (source?.presentationOnly || source?.truncated) invalid('public projection lacks complete matching evidence');
+    const controls = Array.isArray(source) ? source : source?.controls;
     if (!Array.isArray(controls)) invalid('graph lacks matching evidence');
+    if (controls.some(control => control?.presentationOnly)) invalid('public controls lack complete matching evidence');
     return controls;
 }
 
 function select(controls, selector, scopes = controls, budget = { remaining: MAX_REGEX_WORK }) {
     let candidates = controls;
-    if (selector.within) {
-        const parents = select(scopes, selector.within, scopes, budget);
-        if (parents.length !== 1 || !parents[0].rawNode) {
-            const error = new Error('within requires a unique parent with original-tree evidence');
-            error.ambiguous = parents.length > 1;
+    const descendantOf = (node, parent) => {
+        for (let ancestor = node?.parent; ancestor; ancestor = ancestor.parent) {
+            if (--budget.remaining < 0) invalid('query exceeds relation work budget');
+            if (ancestor === parent) return true;
+        }
+        return false;
+    };
+    for (const relation of RELATIONS) {
+        if (!selector[relation]) continue;
+        const anchors = select(scopes, selector[relation], scopes, budget);
+        // hasDescendant is an existential predicate; duplicate matching descendants
+        // do not make a single parent ambiguous. Anchor relations require one node.
+        if ((relation !== 'hasDescendant' && anchors.length !== 1) || anchors.some(anchor => !anchor.rawNode)) {
+            const error = new Error(`${relation} requires complete original-tree anchor evidence`);
+            error.ambiguous = anchors.length > 1;
             throw error;
         }
-        const parent = parents[0].rawNode;
         candidates = candidates.filter((control) => {
-            if (!control.rawNode) invalid('within candidate lacks original-tree evidence');
-            let ancestor = control.rawNode?.parent;
-            while (ancestor) {
-                if (ancestor === parent) return true;
-                ancestor = ancestor.parent;
-            }
-            return false;
+            if (--budget.remaining < 0) invalid('query exceeds relation work budget');
+            const node = control.rawNode;
+            if (!node) invalid('relation candidate lacks original-tree evidence');
+            if (relation === 'hasDescendant') return anchors.some(anchor => descendantOf(anchor.rawNode, node));
+            const anchor = anchors[0].rawNode;
+            if (relation === 'childOf') return node.parent === anchor;
+            if (relation === 'siblingOf') return node !== anchor && node.parent && node.parent === anchor.parent;
+            return descendantOf(node, anchor);
         });
     }
     const hits = candidates.filter((control) => matches(control, selector, budget));
@@ -281,18 +296,11 @@ function evaluateSelector(source, query, options = {}) {
 }
 
 /**
- * Returns all hits unless nth/#N explicitly chooses one. within uses original-tree scopes:
- * pruned parents retain own text/content-desc; emitted hosts use their aggregated label.
- * The legacy retrieval-only {text:''} query remains available, never as a valid selector.
+ * Exact text/desc use only original node fields; any uses the full aggregate label.
+ * within preserves these same source rules on original-tree ancestor scopes.
  */
 function findControls(source, query) {
-    try {
-        if (isPlainObject(query) && Reflect.ownKeys(query).length === 1
-            && Object.getOwnPropertyDescriptor(query, 'text')?.value === '') {
-            return controlsOf(source).filter((control) => control.label === '');
-        }
-        return evaluateSelector(source, query).hits;
-    } catch { return []; }
+    return evaluateSelector(source, query).hits;
 }
 
 function resolveSelector(source, query) {

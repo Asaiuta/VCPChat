@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * 常驻 UI 树采集服务。
+ * 常驻 UI 树采集服务 —— 会话层。
  *
  * 解决的瓶颈：`exec-out uiautomator dump --compressed /dev/tty` 每调用一次
  * 都要冷启一个 dalvik VM、重连 UiAutomation、并等 `waitForIdle`。真机实测
@@ -14,113 +14,91 @@
  * 不出现在应用列表里，卸载就是删文件。同一页面实测 p50 61ms / p95 122ms /
  * 40/40 成功，输出仍是标准 uiautomator XML。
  *
+ * 分层（2026-11-04 拆出传输层）：
+ * - `ui-transport.js` 只管「怎么够到端点」：app_process、forward、HTTP 收发。
+ *   已安装 App 直连仅在端点语义/能力/错误契约等价时可复用会话层；设备后端需另验。
+ * - 本文件管「发什么、允不允许发、失败算哪一类」：方法白名单、参数形状、
+ *   能力记账、回退决策。三条不变量都在这里守住。
+ *
  * 关键取舍：
  * - 端口动态挑选。9008 是上游默认值，容易与他人设备或前一个实例撞上，
- *   所以先让内核分配，占用则退化到候选段，forward 失败再换一次。
+ *   所以先让内核分配，占用则退化到候选段，forward 失败再换一次。（在传输层。）
  * - 任何一步失败都抛 UiServerError，由调用方回退到 CLI 路径。
  *   这里绝不返回半截 XML —— 空树会被上层误读成「界面确实是空的」。
  * - 就绪判定用 ping，不用「进程起来了」这种弱信号：app_process 先输出日志、
- *   后监听端口，中间有几百毫秒的空窗。
+ *   后监听端口，中间有几百毫秒的空窗。（在传输层。）
  */
 
-const fs = require('fs');
-const path = require('path');
-const { execFile, spawn } = require('child_process');
-const net = require('net');
-const http = require('http');
 const { isKnown, validate } = require('./rpc-methods');
+const { UiServerError } = require('./ui-error');
+const {
+    AdbTransport,
+    rpcOptions,
+    DEFAULT_RPC_TIMEOUT_MS,
+    DEFAULT_READY_TIMEOUT_MS,
+} = require('./ui-transport');
 
-const VENDOR_APK = 'u2-server-0.5.0.apk';
-const REMOTE_APK = '/data/local/tmp/u2-server-0.5.0.apk';
-const CONSOLE_CLASS = 'com.github.uiautomator2.Console';
-const RPC_PATH = '/jsonrpc/0';
-
-// dump 实测 p95 = 122ms。给 4s 是留足冷启动与树特别深时的余量，
-// 又远小于旧路径 25s 的超时，卡死能被快速识别并回退。
-const DEFAULT_RPC_TIMEOUT_MS = 4000;
-const MAX_RPC_TIMEOUT_MS = 120000;
-const MAX_RPC_RESPONSE_BYTES = 8 * 1024 * 1024;
 // 控件树深度上限。Android 层级实测远小于此值（复杂页 130 节点/约 12 层），
 // 留足余量但不依赖服务端对 0 的解释 —— 0 在 uiautomator2 下只返回根节点。
 const DEFAULT_DUMP_MAX_DEPTH = 200;
-// 方法名集合只有一处定义（lib/rpc-methods.js）。这里不接受任意方法名，
-// 也绝不做反射透传 —— 那正是「白名单」二字的本意。参数形状由调用方在同一张表上校验。
-// 能力探针的预算。它只打一次，且失败不影响主流程，所以取一个「宁可问不成也不拖住」的值。
-
-// 实测从拉起进程到 ping 通 ~1s。15s 覆盖无线调试抖动与首次 dex 优化。
-const DEFAULT_READY_TIMEOUT_MS = 15000;
-const PING_INTERVAL_MS = 200;
-
-// 0 表示交给内核分配；其余是冲突时的退化候选。
-const PORT_CANDIDATES = [0, 9008, 9009, 9010, 9011, 9012, 9013, 9014, 9015];
-
-let rpcSeq = 0;
-
-class UiServerError extends Error {
-    constructor(code, message, details = {}) {
-        super(message);
-        this.name = 'UiServerError';
-        this.code = code;
-        Object.assign(this, details);
-    }
-}
-
-function sleep(ms) {
-    return new Promise((resolve) => { setTimeout(resolve, ms); });
-}
-
-function vendorApkPath() {
-    return path.resolve(__dirname, '../vendor', VENDOR_APK);
-}
-
-function rpcOptions(options, defaultTimeoutMs) {
-    const invalid = (message) => new UiServerError('UI_SERVER_INVALID_ARGUMENT', message, { dispatched: false, drained: true });
-    if (!options || typeof options !== 'object' || Array.isArray(options)) throw invalid('RPC options must be an object');
-    const timeoutMs = options.timeoutMs === undefined ? defaultTimeoutMs : options.timeoutMs;
-    if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_RPC_TIMEOUT_MS) {
-        throw invalid(`timeoutMs must be an integer from 1 to ${MAX_RPC_TIMEOUT_MS}`);
-    }
-    const signal = options.signal;
-    if (signal !== undefined && (!signal || typeof signal.aborted !== 'boolean'
-        || typeof signal.addEventListener !== 'function' || typeof signal.removeEventListener !== 'function')) {
-        throw invalid('signal must be an AbortSignal');
-    }
-    return { timeoutMs, signal };
-}
-
 
 class UiServer {
+    /**
+     * @param {object} options
+     * @param {string} [options.adbPath]
+     * @param {string} [options.serial]
+     * @param {object} [options.transport] 直接注入传输层（测试与未来直连形态用）
+     */
     constructor(options = {}) {
-        this.adbPath = options.adbPath || 'adb';
-        this.serial = options.serial;
-        this.remoteApk = options.remoteApk || REMOTE_APK;
-        this.localApk = options.localApk || vendorApkPath();
-        this.readyTimeoutMs = Number.isFinite(options.readyTimeoutMs)
-            ? options.readyTimeoutMs
-            : DEFAULT_READY_TIMEOUT_MS;
         this.rpcTimeoutMs = Number.isFinite(options.rpcTimeoutMs)
             ? options.rpcTimeoutMs
             : DEFAULT_RPC_TIMEOUT_MS;
-        this._proc = null;
-        this._ready = false;
-        this._port = null;
-        this._starting = null;
-        this._stopping = null;
-        this._generation = 0;
+        this.readyTimeoutMs = Number.isFinite(options.readyTimeoutMs)
+            ? options.readyTimeoutMs
+            : DEFAULT_READY_TIMEOUT_MS;
+        // 传输层可替换：现在只有 AdbTransport。会话层只依赖它的
+        // start/stop/call/isReady 四个方法，不依赖 adb 三个字。
+        this.transport = options.transport || new AdbTransport({
+            adbPath: options.adbPath,
+            serial: options.serial,
+            logger: options.logger,
+            rpcTimeoutMs: this.rpcTimeoutMs,
+            readyTimeoutMs: this.readyTimeoutMs,
+        });
         // Observed failures belong to one service generation; absence means unknown.
         this._unavailableMethods = new Set();
+        this._capabilityGeneration = this.transport.generation;
     }
 
     get port() {
-        return this._port;
+        return this.transport.port;
     }
 
     isReady() {
-        return this._ready === true && Number.isInteger(this._port);
+        return this.transport.isReady();
+    }
+
+    get carrierIdentity() { return this.transport.carrierIdentity; }
+
+    get ownerIdentity() { return this.transport.ownerIdentity || null; }
+
+    quarantineOwner(reason) { return this.transport.quarantineOwner?.(reason) || this.ownerIdentity; }
+
+    async recoverOwner() {
+        if (!this.transport.recoverOwner) throw new UiServerError('UI_SERVER_OWNER_UNPROVEN', '传输层不支持owner退出验证');
+        return this.transport.recoverOwner();
+    }
+
+    _syncCapabilityGeneration() {
+        if (this._capabilityGeneration !== this.transport.generation) {
+            this._unavailableMethods.clear();
+            this._capabilityGeneration = this.transport.generation;
+        }
     }
 
     /** Failure history is not a positive capability probe. */
     capability(method) {
+        this._syncCapabilityGeneration();
         return this._unavailableMethods.has(method) ? 'unavailable' : 'unknown';
     }
 
@@ -131,166 +109,20 @@ class UiServer {
      * 按整组一刀切会把还能用的那一半一起封掉。
      * 只接受 unavailable，避免把已判死的通道又改回可用。
      */
-    noteCapability(method, verdict) {
-        if (verdict === 'unavailable') this._unavailableMethods.add(method);
+    noteCapability(method, verdict, generation = this.transport.generation) {
+        this._syncCapabilityGeneration();
+        if (generation === this.transport.generation && verdict === 'unavailable') this._unavailableMethods.add(method);
     }
 
     /** 拉起并等到 ping 通。失败返回 { ok:false, reason }，不抛 —— 调用方要能静默回退。 */
     async start() {
-        if (this._stopping) {
-            await this._stopping;
-            return this.start();
-        }
-        if (this.isReady()) return { ok: true, reused: true, port: this._port };
-        if (this._starting) return this._starting;
-        const generation = ++this._generation;
-        const starting = this._doStart(generation).finally(() => {
-            if (this._starting === starting) this._starting = null;
-        });
-        this._starting = starting;
-        return starting;
+        return this.transport.start();
     }
 
-    _assertGeneration(generation) {
-        if (generation !== this._generation) {
-            throw new UiServerError('UI_SERVER_STOPPED', 'UI 服务启动已被停止');
-        }
-    }
-
-    async _doStart(generation) {
-        let port = null;
-        let proc = null;
-        let ready = false;
-        let forwardOwned = false;
-        try {
-            // Unexpected process exit invalidates readiness but leaves its forward allocated.
-            const staleProc = this._proc;
-            const stalePort = this._port;
-            this._proc = null;
-            this._port = null;
-            if (staleProc && !staleProc.killed) {
-                try { staleProc.kill(); } catch { /* Already exited. */ }
-            }
-            if (Number.isInteger(stalePort)) await this._removeForward(stalePort);
-            this._assertGeneration(generation);
-            if (!fs.existsSync(this.localApk)) {
-                return { ok: false, reason: `内置 apk 缺失：${this.localApk}` };
-            }
-            await this._ensureApk(generation);
-            this._assertGeneration(generation);
-            port = await this._pickPort(generation);
-            this._assertGeneration(generation);
-            if (!port) return { ok: false, reason: '找不到可用本地端口' };
-            await this._forward(port);
-            forwardOwned = true;
-            this._assertGeneration(generation);
-            this._port = port;
-            proc = this._spawnServer(port, generation);
-            const alive = await this._waitReady(generation);
-            this._assertGeneration(generation);
-            if (!alive) {
-                return { ok: false, reason: `服务在 ${this.readyTimeoutMs}ms 内未响应 ping` };
-            }
-            this._ready = true;
-            ready = true;
-            return { ok: true, port };
-        } catch (error) {
-            return { ok: false, reason: error.message };
-        } finally {
-            if (!ready) {
-                if (this._proc === proc) this._proc = null;
-                if (proc && !proc.killed) {
-                    try { proc.kill(); } catch { /* Already exited. */ }
-                }
-                if (this._port === port) this._port = null;
-                if (forwardOwned) await this._removeForward(port);
-            }
-        }
-    }
-
-    async _ensureApk(generation) {
-        // 3.7MB 每次重推太浪费，先问设备在不在。
-        //
-        // 命令末尾必须有 `|| echo ABSENT`：`[ -f X ] && echo PRESENT` 在文件不存在时
-        // 退出码是 1，而 _exec 把任何非零退出码当失败抛出 —— 结果是首次接入永远
-        // "推送失败"、start() 永远 ok:false、上层静默回退 CLI，常驻服务形同不存在。
-        // 真机实测（PJZ110 / Android 17，2026-11-02）：缺 apk 时 exit=1，补了 `||` 才 exit=0。
-        const check = await this._exec(['shell', `[ -f ${this.remoteApk} ] && echo PRESENT || echo ABSENT`], 15000);
-        this._assertGeneration(generation);
-        if (String(check.stdout).includes('PRESENT')) return;
-        await this._exec(['push', this.localApk, this.remoteApk], 120000);
-    }
-
-    async _pickPort(generation) {
-        for (const candidate of PORT_CANDIDATES) {
-            const port = await this._probePort(candidate);
-            this._assertGeneration(generation);
-            if (port) return port;
-        }
-        return null;
-    }
-
-    /** 绑定再释放，确认端口此刻空闲。返回实际端口或 null。 */
-    _probePort(port) {
-        return new Promise((resolve) => {
-            const probe = net.createServer();
-            const settle = (value) => {
-                probe.removeAllListeners();
-                try { probe.close(() => {}); } catch { /* 已关闭 */ }
-                resolve(value);
-            };
-            probe.once('error', () => settle(null));
-            try {
-                probe.listen(port, '127.0.0.1', () => {
-                    const assigned = probe.address()?.port;
-                    try { probe.close(() => resolve(Number.isInteger(assigned) ? assigned : null)); } catch {
-                        resolve(null);
-                    }
-                });
-            } catch {
-                settle(null);
-            }
-        });
-    }
-
-    async _forward(port) {
-        await this._exec(['forward', '--no-rebind', `tcp:${port}`, `tcp:${port}`], 15000);
-    }
-
-    async _removeForward(port) {
-        await this._exec(['forward', '--remove', `tcp:${port}`], 10000).catch(() => null);
-    }
-
-    _spawnServer(port, generation) {
-        const args = [
-            '-s', this.serial,
-            'shell',
-            `CLASSPATH=${this.remoteApk} app_process / ${CONSOLE_CLASS} -p ${port}`,
-        ];
-        const proc = spawn(this.adbPath, args, {
-            windowsHide: true,
-            stdio: ['ignore', 'ignore', 'ignore'],
-        });
-        const invalidate = () => {
-            if (this._generation === generation && this._proc === proc) this._ready = false;
-        };
-        proc.on('error', invalidate);
-        proc.on('exit', invalidate);
-        this._proc = proc;
-        return proc;
-    }
-
-    async _waitReady(generation) {
-        const deadline = Date.now() + this.readyTimeoutMs;
-        while (Date.now() < deadline) {
-            this._assertGeneration(generation);
-            const alive = await this._rpc('ping', [], Math.min(1500, this.rpcTimeoutMs))
-                .then(() => true).catch(() => false);
-            this._assertGeneration(generation);
-            if (alive) return true;
-            await sleep(PING_INTERVAL_MS);
-        }
-        return false;
+    stop() {
+        // 新进程可能是重装 APK / 换 ROM 之后拉的，能力结论不能跨代沿用。
+        this._unavailableMethods.clear();
+        return this.transport.stop();
     }
 
     /**
@@ -312,6 +144,8 @@ class UiServer {
         const maxDepth = Number.isFinite(requestedMaxDepth) && requestedMaxDepth > 0
             ? requestedMaxDepth
             : DEFAULT_DUMP_MAX_DEPTH;
+        // Vendor DEX: true returns only the active root; false also enumerates window roots.
+        // Multiple roots are not a structured window/occlusion contract for host consumers.
         const rootInActive = options.rootInActive !== false;
 
         const result = await this._rpc('dumpWindowHierarchy', [compressed, maxDepth, rootInActive], timeoutMs, signal, startedAt + timeoutMs);
@@ -320,48 +154,6 @@ class UiServer {
             throw new UiServerError('UI_SERVER_BAD_PAYLOAD', '服务返回的不是控件树 XML', { dispatched: true, drained: true });
         }
         return { xml };
-    }
-
-    stop() {
-        if (this._stopping) return this._stopping;
-        ++this._generation;
-        this._ready = false;
-        // 新进程可能是重装 APK / 换 ROM 之后拉的，能力结论不能跨代沿用。
-        this._unavailableMethods.clear();
-
-        const starting = this._starting;
-        const stopping = (async () => {
-            await starting;
-            const proc = this._proc;
-            const port = this._port;
-            this._proc = null;
-            this._port = null;
-            if (proc && !proc.killed) {
-                try { proc.kill(); } catch { /* Already exited. */ }
-            }
-            if (Number.isInteger(port)) await this._removeForward(port);
-        })().finally(() => {
-            if (this._stopping === stopping) this._stopping = null;
-        });
-        this._stopping = stopping;
-        return stopping;
-    }
-
-    _exec(args, timeoutMs = 20000) {
-        return new Promise((resolve, reject) => {
-            execFile(this.adbPath, ['-s', this.serial, ...args], {
-                timeout: timeoutMs,
-                windowsHide: true,
-                maxBuffer: 16 * 1024 * 1024,
-            }, (error, stdout, stderr) => {
-                if (error) {
-                    reject(new UiServerError('UI_SERVER_ADB_FAILED',
-                        `adb ${args[0]} 失败：${String(stderr || error.message).trim().slice(0, 300)}`));
-                    return;
-                }
-                resolve({ stdout: String(stdout || ''), stderr: String(stderr || '') });
-            });
-        });
     }
 
     /**
@@ -382,147 +174,23 @@ class UiServer {
         if (!shape.ok) throw invalid(shape.reason);
         const { timeoutMs, signal } = rpcOptions(options, this.rpcTimeoutMs);
         if (!this.isReady()) throw new UiServerError('UI_SERVER_NOT_READY', 'UI 服务未就绪', { dispatched: false, drained: true });
-        return this._rpc(method, params, timeoutMs, signal, startedAt + timeoutMs);
+        const generation = this.transport.generation;
+        try {
+            return await this._rpc(method, params, timeoutMs, signal, startedAt + timeoutMs);
+        } catch (error) {
+            if (method === 'pasteClipboard' && error.code === 'UI_SERVER_RPC_ERROR' && error.drained === true) {
+                this.noteCapability(method, 'unavailable', generation);
+            }
+            throw error;
+        }
     }
 
+    /**
+     * 一次 RPC 的转发接缝。校验与就绪判定在 invoke，收发在传输层，
+     * 这里只把两者接上 —— 保留这一层是为了有唯一的替换点（测试可整体替换）。
+     */
     _rpc(method, params, timeoutMs = this.rpcTimeoutMs, signal, deadline = Date.now() + timeoutMs) {
-        return new Promise((resolve, reject) => {
-            let dispatched = false;
-            let drained = false;
-            const failure = (code, message, details = {}) => new UiServerError(code, message, {
-                dispatched, drained: !dispatched || drained, ...details,
-            });
-            if (!Number.isInteger(this._port)) {
-                reject(failure('UI_SERVER_NOT_READY', 'UI 服务端口未分配'));
-                return;
-            }
-            if (signal?.aborted) {
-                reject(failure('UI_SERVER_ABORTED', `RPC ${method} 已取消`));
-                return;
-            }
-            const id = String(++rpcSeq);
-            let body;
-            try {
-                body = JSON.stringify({ jsonrpc: '2.0', id, method, params });
-            } catch (error) {
-                reject(failure('UI_SERVER_INVALID_ARGUMENT', `RPC 参数无法序列化：${error.message}`));
-                return;
-            }
-            if (Date.now() >= deadline) {
-                reject(failure('UI_SERVER_TIMEOUT', `RPC ${method} 超时（${timeoutMs}ms）`));
-                return;
-            }
-            if (signal?.aborted) {
-                reject(failure('UI_SERVER_ABORTED', `RPC ${method} 已取消`));
-                return;
-            }
-            let settled = false;
-            let timer = null;
-            let req;
-            let response;
-            const finish = (fn, value) => {
-                if (settled) return;
-                settled = true;
-                if (timer) clearTimeout(timer);
-                signal?.removeEventListener('abort', onAbort);
-                fn(value);
-            };
-            const fail = (code, message, details) => {
-                finish(reject, failure(code, message, details));
-                response?.destroy?.();
-                req?.destroy();
-            };
-            const onAbort = () => fail('UI_SERVER_ABORTED', `RPC ${method} 已取消`);
-            const checkBudget = () => {
-                if (Date.now() < deadline) return true;
-                fail('UI_SERVER_TIMEOUT', `RPC ${method} 超时（${timeoutMs}ms）`);
-                return false;
-            };
-            try {
-                req = http.request({
-                    hostname: '127.0.0.1', port: this._port, path: RPC_PATH, method: 'POST',
-                    // charset 不是可选项：不带它，设备端按 ISO-8859-1 解请求体、按 ASCII
-                    // 编响应体，于是每个非 ASCII 字符按 UTF-8 字节裂成 U+FFFD。
-                    // 真机实测（PJZ110）：`绫织` 无 charset 返回 6 个 U+FFFD；
-                    // 加上 charset=utf-8 后原样往返（e7bbab e7bb87）。
-                    // setText 把「绫织M1验收」写成 12 个 U+FFFD、setClipboard 写坏剪贴板，
-                    // 都是这一个头的事，不是 ROM 不支持中文。
-                    headers: {
-                        'Content-Type': 'application/json; charset=utf-8',
-                        'Content-Length': Buffer.byteLength(body),
-                    },
-                }, (res) => {
-                    response = res;
-                    res.on('error', (error) => fail('UI_SERVER_RPC_FAILED', `RPC 响应失败：${error.message}`));
-                    res.on('aborted', () => fail('UI_SERVER_RPC_FAILED', 'RPC 响应中断'));
-                    res.on('close', () => {
-                        if (!settled) fail('UI_SERVER_RPC_FAILED', 'RPC 响应未完整结束');
-                    });
-                    if (!Number.isInteger(res.statusCode) || res.statusCode < 200 || res.statusCode >= 300) {
-                        fail('UI_SERVER_HTTP_ERROR', `RPC HTTP ${res.statusCode}`, { statusCode: res.statusCode });
-                        return;
-                    }
-                    const declaredBytes = Number(res.headers?.['content-length']);
-                    if (declaredBytes > MAX_RPC_RESPONSE_BYTES) {
-                        fail('UI_SERVER_RESPONSE_TOO_LARGE', 'RPC 响应超过 8 MiB');
-                        return;
-                    }
-                    const chunks = [];
-                    let bytes = 0;
-                    res.on('data', (chunk) => {
-                        if (settled) return;
-                        const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-                        bytes += data.length;
-                        if (bytes > MAX_RPC_RESPONSE_BYTES) {
-                            fail('UI_SERVER_RESPONSE_TOO_LARGE', 'RPC 响应超过 8 MiB');
-                            return;
-                        }
-                        chunks.push(data);
-                    });
-                    res.on('end', () => {
-                        if (settled) return;
-                        let parsed;
-                        try { parsed = JSON.parse(Buffer.concat(chunks, bytes).toString('utf8')); } catch {
-                            fail('UI_SERVER_BAD_JSON', `RPC 响应无法解析（${bytes}B）`);
-                            return;
-                        }
-                        const own = (key) => Object.prototype.hasOwnProperty.call(parsed, key);
-                        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)
-                            || parsed.jsonrpc !== '2.0' || parsed.id !== id || own('result') === own('error')) {
-                            fail('UI_SERVER_BAD_RESPONSE', 'RPC 响应信封无效');
-                            return;
-                        }
-                        if (own('error')) {
-                            const error = parsed.error;
-                            if (!error || typeof error !== 'object' || Array.isArray(error)
-                                || !Number.isInteger(error.code) || typeof error.message !== 'string') {
-                                fail('UI_SERVER_BAD_RESPONSE', 'RPC error 结构无效');
-                                return;
-                            }
-                            drained = true;
-                            fail('UI_SERVER_RPC_ERROR', `RPC ${method} 报错：${error.message.slice(0, 300)}`, {
-                                rpcCode: error.code, dispatched: error.code !== -32601 && error.code !== -32602,
-                            });
-                            return;
-                        }
-                        drained = true;
-                        if (!checkBudget()) return;
-                        finish(resolve, parsed.result);
-                    });
-                });
-                req.on('error', (error) => fail('UI_SERVER_RPC_FAILED', `RPC ${method} 连接失败：${error.message}`));
-                signal?.addEventListener('abort', onAbort, { once: true });
-                if (signal?.aborted) { onAbort(); return; }
-                if (!checkBudget()) return;
-                timer = setTimeout(() => fail('UI_SERVER_TIMEOUT', `RPC ${method} 超时（${timeoutMs}ms）`), deadline - Date.now());
-                // Once write starts, a transport failure cannot establish non-execution.
-                dispatched = true;
-                req.write(body);
-                req.end();
-            } catch (error) {
-                fail('UI_SERVER_RPC_FAILED', `RPC ${method} 连接失败：${error.message}`);
-            }
-        });
+        return this.transport.call(method, params, timeoutMs, signal, deadline);
     }
 }
 
