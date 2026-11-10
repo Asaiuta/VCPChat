@@ -1,6 +1,6 @@
 # VCPChat 项目文件目录结构
 
-> 自动生成于：2026-10-26 03:08:09  
+> 自动生成于：2026-11-10 14:47:33  
 
 > 项目根目录：`H:\VCP\VCPMain\VCPChat`  
 
@@ -10,24 +10,24 @@
 
 ## 文件统计
 
-- **总目录数**：233
-- **总文件数**：1639
+- **总目录数**：245
+- **总文件数**：1746
 - **文件类型数**：21
 
 | 类型 | 扩展名 | 数量 |
 | :--- | :--- | ---: |
-| JavaScript | `.js` | 1013 |
-| CSS | `.css` | 155 |
-| JSON | `.json` | 149 |
-| Rust | `.rs` | 116 |
-| Markdown | `.md` | 63 |
-| HTML | `.html` | 47 |
-| Python | `.py` | 26 |
-| TOML | `.toml` | 9 |
-| Batch Script | `.bat` | 9 |
+| JavaScript | `.js` | 1099 |
+| CSS | `.css` | 159 |
+| JSON | `.json` | 153 |
+| Rust | `.rs` | 115 |
+| Markdown | `.md` | 67 |
+| HTML | `.html` | 49 |
+| Python | `.py` | 28 |
+| JavaScript (CommonJS) | `.cjs` | 12 |
+| Batch Script | `.bat` | 10 |
+| .example | `.example` | 9 |
+| TOML | `.toml` | 8 |
 | Plain Text | `.txt` | 8 |
-| .example | `.example` | 8 |
-| JavaScript (CommonJS) | `.cjs` | 7 |
 | VBScript | `.vbs` | 7 |
 | YAML | `.yml` | 6 |
 | .ini | `.ini` | 4 |
@@ -37,7 +37,7 @@
 | Shell Script | `.sh` | 2 |
 | C# | `.cs` | 1 |
 | .lock | `.lock` | 1 |
-| **合计** | - | **1639** |
+| **合计** | - | **1746** |
 
 ## 目录结构树
 
@@ -310,6 +310,7 @@ VCPChat/
 │   ├── desktop.js
 │   ├── README.md
 │   ├── VCPdesktop介绍文档.md
+│   ├── 挂件运行时与远控参考.md
 │   ├── 提示词示例.md
 │   └── 桌面图标与启动API指南.md
 ├── Dicemodules/
@@ -398,6 +399,48 @@ VCPChat/
 │   │   ├── style.css
 │   │   ├── tool-result.cjs
 │   │   └── ui.js
+│   ├── srpg/
+│   │   ├── src/
+│   │   │   ├── ui/
+│   │   │   │   ├── action-process.js
+│   │   │   │   ├── battle.js
+│   │   │   │   ├── chat-messages.js
+│   │   │   │   ├── designer-tab.js
+│   │   │   │   ├── dom.js
+│   │   │   │   ├── editors.js
+│   │   │   │   ├── files.js
+│   │   │   │   ├── llm-flow.js
+│   │   │   │   ├── panel.js
+│   │   │   │   ├── profiles-tab.js
+│   │   │   │   ├── settings.js
+│   │   │   │   └── story-flow.js
+│   │   │   ├── ai-api.js
+│   │   │   ├── commander.js
+│   │   │   ├── commands.js
+│   │   │   ├── context.js
+│   │   │   ├── defaults.js
+│   │   │   ├── designer.js
+│   │   │   ├── engine.js
+│   │   │   ├── exchange.js
+│   │   │   ├── history.js
+│   │   │   ├── llm.js
+│   │   │   ├── manual.js
+│   │   │   ├── narrator.js
+│   │   │   ├── profiles.js
+│   │   │   ├── st.js
+│   │   │   ├── story.js
+│   │   │   └── unit-lore.js
+│   │   ├── index.html
+│   │   ├── package.json
+│   │   ├── preload.cjs
+│   │   ├── README.md
+│   │   ├── service.cjs
+│   │   ├── session-store.cjs
+│   │   ├── style.css
+│   │   ├── tool-result.cjs
+│   │   ├── ui.js
+│   │   ├── upstream-manifest.json
+│   │   └── UPSTREAM_README.md
 │   ├── vcp-neon-game/
 │   │   ├── js/
 │   │   │   ├── audio.js
@@ -471,6 +514,7 @@ VCPChat/
 │   ├── chat/
 │   │   ├── chartEmbedTransform.js
 │   │   ├── chatContext.js
+│   │   ├── chatContextPipeline.js
 │   │   ├── chatDomRenderer.js
 │   │   ├── chatEventContract.js
 │   │   ├── chatHistoryMutationAuthority.js
@@ -491,6 +535,7 @@ VCPChat/
 │   │   ├── contextCompactionPrompts.js
 │   │   ├── contextCompactionService.js
 │   │   ├── contextCompactionState.js
+│   │   ├── contextCompactionStream.js
 │   │   ├── mainChatStateAuthority.js
 │   │   ├── memoryChatRepository.js
 │   │   ├── sideChatSessionService.js
@@ -500,6 +545,7 @@ VCPChat/
 │   │   ├── streamSession.js
 │   │   ├── streamTransientHistory.js
 │   │   ├── surfaceConversation.js
+│   │   ├── topicAdmissionSingleChat.js
 │   │   └── vcpStreamBridge.js
 │   ├── deskpet/
 │   │   ├── wake/
@@ -520,6 +566,7 @@ VCPChat/
 │   │   ├── idleRunner.js
 │   │   ├── index.js
 │   │   ├── live2dCapabilities.js
+│   │   ├── live2dTextureOptimizer.js
 │   │   ├── live2dWardrobe.js
 │   │   ├── outfits.js
 │   │   ├── petAssets.js
@@ -561,6 +608,10 @@ VCPChat/
 │   │   │   ├── cards.js
 │   │   │   ├── decisionData.js
 │   │   │   └── rules.js
+│   │   ├── vtrade/
+│   │   │   ├── client.js
+│   │   │   ├── orchestrator.js
+│   │   │   └── window.js
 │   │   ├── gameResourceManager.js
 │   │   ├── gameRuntime.js
 │   │   ├── gameSeatResolver.js
@@ -712,14 +763,38 @@ VCPChat/
 │   │   ├── streamSpeechOwner.js
 │   │   ├── streamStableBoundary.js
 │   │   ├── surfaceTaskOwner.js
+│   │   ├── toolBatchDomains.js
+│   │   ├── toolBatchRegions.js
+│   │   ├── toolDataHtml.js
 │   │   ├── toolPresentation.js
 │   │   ├── toolRequestMarkers.js
 │   │   ├── toolRequestScanner.js
 │   │   ├── toolResultRegions.js
+│   │   ├── topicAdmissionQueueView.js
 │   │   ├── topicSelectionReadiness.js
 │   │   ├── ttsSurfaceOwner.js
 │   │   ├── visibilityOptimizer.js
 │   │   └── windowStreamRuntime.js
+│   ├── scriptorium/
+│   │   ├── fileAccess/
+│   │   │   └── index.js
+│   │   ├── markdownFiles/
+│   │   │   └── index.js
+│   │   ├── pdfFiles/
+│   │   │   ├── edit.js
+│   │   │   ├── fonts.js
+│   │   │   └── index.js
+│   │   ├── sheetFiles/
+│   │   │   └── index.js
+│   │   ├── viewFiles/
+│   │   │   └── index.js
+│   │   ├── webPages/
+│   │   │   └── index.js
+│   │   ├── atomicReplace.js
+│   │   ├── dropOpen.js
+│   │   ├── fileTypes.js
+│   │   ├── fileViews.js
+│   │   └── textEncoding.js
 │   ├── services/
 │   │   ├── chatDataService/
 │   │   │   ├── client.js
@@ -730,6 +805,8 @@ VCPChat/
 │   │   ├── chartDataSourceService.js
 │   │   ├── chartEmbedProtocol.js
 │   │   ├── chartService.js
+│   │   ├── conversationContext.js
+│   │   ├── conversationOverrides.js
 │   │   ├── deepWikiService.js
 │   │   ├── dotGitPath.js
 │   │   ├── embeddedAppSessionManager.js
@@ -744,6 +821,7 @@ VCPChat/
 │   │   ├── networkNotesCacheStore.js
 │   │   ├── pdfAttachmentService.js
 │   │   ├── pluginAgentOperationService.js
+│   │   ├── portraitOptimizer.js
 │   │   ├── preloadPaths.js
 │   │   ├── scriptoriumAgentControlService.js
 │   │   ├── scriptoriumFontCacheService.js
@@ -752,6 +830,13 @@ VCPChat/
 │   │   ├── senderTaskRegistry.js
 │   │   ├── sourceService.js
 │   │   ├── themePreviewVariables.js
+│   │   ├── topicAdmissionGroup.js
+│   │   ├── topicConversationResolver.js
+│   │   ├── topicGenerationLease.js
+│   │   ├── topicMessageAdmission.js
+│   │   ├── topicMessageAdmissionHost.js
+│   │   ├── topicMessageAdmissionStore.js
+│   │   ├── topicSponsorDelivery.js
 │   │   ├── windowAppIds.js
 │   │   ├── windowPinService.js
 │   │   ├── windowService.js
@@ -775,6 +860,7 @@ VCPChat/
 │   │   │   ├── selection-assistant.js
 │   │   │   ├── server-connection.js
 │   │   │   ├── sidebar-surfaces.js
+│   │   │   ├── tts-cache-panel.js
 │   │   │   ├── user-identity.js
 │   │   │   ├── voice-settings.js
 │   │   │   └── workspace-management.js
@@ -1012,6 +1098,7 @@ VCPChat/
 │   │   │   └── sttWorker.js
 │   │   ├── audioRecorder.js
 │   │   ├── chatVoiceComposer.js
+│   │   ├── gsvPresets.js
 │   │   ├── passiveVoiceSentinel.js
 │   │   ├── speechDirectiveMatcher.js
 │   │   ├── voice-input-engine-adapter.js
@@ -1059,7 +1146,6 @@ VCPChat/
 │   ├── trayManager.js
 │   ├── ui-helpers.js
 │   ├── uiManager.js
-│   ├── vcpClient.js
 │   ├── weatherService.js
 │   └── webdavManager.js
 ├── Musicmodules/
@@ -1187,7 +1273,9 @@ VCPChat/
 │   ├── utility.js
 │   └── voice-input-capture.js
 ├── ProjectForgemodules/
+│   ├── projectforge-blueprint.js
 │   ├── projectforge-git.js
+│   ├── projectforge-layout.js
 │   ├── projectforge-sidetabs.js
 │   ├── projectforge-source.js
 │   ├── projectforge.css
@@ -1379,6 +1467,10 @@ VCPChat/
 │   ├── README.md
 │   ├── scriptorium-agent-port.js
 │   ├── scriptorium-async.js
+│   ├── scriptorium-board-html.js
+│   ├── scriptorium-board-lineage.js
+│   ├── scriptorium-board-model.js
+│   ├── scriptorium-board.js
 │   ├── scriptorium-deck-adapter.js
 │   ├── scriptorium-deck-editor.js
 │   ├── scriptorium-deck-export.js
@@ -1388,21 +1480,28 @@ VCPChat/
 │   ├── scriptorium-edit-history.js
 │   ├── scriptorium-export-resources.js
 │   ├── scriptorium-export.js
+│   ├── scriptorium-file-agent.js
+│   ├── scriptorium-file-views.css
+│   ├── scriptorium-file-views.js
 │   ├── scriptorium-find.js
 │   ├── scriptorium-flow-adapter.js
 │   ├── scriptorium-flow-editor.js
 │   ├── scriptorium-flow-export.js
 │   ├── scriptorium-flow-renderer.js
 │   ├── scriptorium-formatting.js
+│   ├── scriptorium-image-view.js
 │   ├── scriptorium-input-sync.js
 │   ├── scriptorium-library.js
 │   ├── scriptorium-lineage-store.js
 │   ├── scriptorium-lineage-ui.js
+│   ├── scriptorium-markdown-file.js
 │   ├── scriptorium-media.js
 │   ├── scriptorium-navigation.js
 │   ├── scriptorium-network-fonts.js
 │   ├── scriptorium-objects.js
 │   ├── scriptorium-pagination.js
+│   ├── scriptorium-pdf-view.css
+│   ├── scriptorium-pdf-view.js
 │   ├── scriptorium-pr-diff.js
 │   ├── scriptorium-pretext-bridge.js
 │   ├── scriptorium-programmable-content.js
@@ -1417,7 +1516,11 @@ VCPChat/
 │   ├── scriptorium-source-editor.js
 │   ├── scriptorium-style-ui.js
 │   ├── scriptorium-svg-assets.js
+│   ├── scriptorium-table-view.css
+│   ├── scriptorium-table-view.js
+│   ├── scriptorium-text-view.js
 │   ├── scriptorium-visibility.js
+│   ├── scriptorium-web-page.js
 │   ├── scriptorium.css
 │   ├── scriptorium.html
 │   ├── scriptorium.js
@@ -1427,6 +1530,12 @@ VCPChat/
 │   ├── vdoc-hybrid-compiler.js
 │   ├── vdoc-style-library.js
 │   └── vdoc-svg-asset-library.js
+├── sovits5cppmanager/
+│   ├── app.js
+│   ├── index.html
+│   ├── README.md
+│   ├── server.js
+│   └── start.bat
 ├── SovitsTest/
 │   ├── get_models.py
 │   ├── GSVI.py
@@ -1585,9 +1694,6 @@ VCPChat/
 │   │   │   ├── CodeSearcher.js
 │   │   │   └── plugin-manifest.json
 │   │   ├── DeepMemo/
-│   │   │   ├── src/
-│   │   │   │   └── main.rs
-│   │   │   ├── Cargo.toml
 │   │   │   ├── config.env.example
 │   │   │   ├── DeepMemo.js
 │   │   │   ├── DeepMemoService.js
@@ -1651,6 +1757,12 @@ VCPChat/
 │   │   ├── ProjectForge/
 │   │   │   ├── args.js
 │   │   │   ├── engine.js
+│   │   │   ├── evalProcess.js
+│   │   │   ├── evalRust.js
+│   │   │   ├── evalSymbol.js
+│   │   │   ├── evalWorker.cjs
+│   │   │   ├── evalWorker.py
+│   │   │   ├── exportReport.js
 │   │   │   ├── gui-revert-file.js
 │   │   │   ├── indexerClient.js
 │   │   │   ├── linkGraph.js
@@ -1709,14 +1821,22 @@ VCPChat/
 │   │   │   ├── main.py
 │   │   │   ├── plugin-manifest.json
 │   │   │   └── README.md
+│   │   ├── TavernSRPG/
+│   │   │   ├── plugin-manifest.json
+│   │   │   ├── README.md
+│   │   │   └── tavern-srpg-service.js
 │   │   ├── TopicMemo/
 │   │   │   ├── plugin-manifest.json
 │   │   │   └── TopicMemo.js
 │   │   ├── TopicSponsor/
+│   │   │   ├── config.env.example
 │   │   │   ├── plugin-manifest.json
 │   │   │   ├── README.md
 │   │   │   ├── topicsponsor-service.js
 │   │   │   └── topicsponsor.js
+│   │   ├── VAbility/
+│   │   │   ├── plugin-manifest.json
+│   │   │   └── v-ability.js
 │   │   ├── VChatAutoTTS/
 │   │   │   ├── plugin.css
 │   │   │   ├── plugin.js
@@ -1798,6 +1918,7 @@ VCPChat/
 │   │   │   ├── requirements.txt
 │   │   │   └── vt_analyzer.py
 │   │   ├── WaitingForUrReply/
+│   │   │   ├── dialog_theme.py
 │   │   │   ├── linux_dialog.py
 │   │   │   ├── plugin-manifest.json
 │   │   │   ├── README.md
@@ -1809,15 +1930,16 @@ VCPChat/
 │   │       ├── sensor.ps1
 │   │       └── sensor.sh
 │   ├── shared/
-│   │   └── fileKit/
-│   │       ├── binaryReader.js
-│   │       ├── diff.js
-│   │       ├── index.js
-│   │       ├── output.js
-│   │       ├── paths.js
-│   │       ├── reader.js
-│   │       ├── text.js
-│   │       └── validator.js
+│   │   ├── fileKit/
+│   │   │   ├── binaryReader.js
+│   │   │   ├── diff.js
+│   │   │   ├── index.js
+│   │   │   ├── output.js
+│   │   │   ├── paths.js
+│   │   │   ├── reader.js
+│   │   │   ├── text.js
+│   │   │   └── validator.js
+│   │   └── memoryProtocolProjection.js
 │   ├── frontend-plugin-loader.js
 │   ├── normalize-plugin-examples.js
 │   ├── Plugin.js
@@ -1879,9 +2001,6 @@ VCPChat/
 │   ├── voicechat.css
 │   ├── voicechat.html
 │   └── voicechat.js
-├── WebIndexTTS2/
-│   ├── README.md
-│   └── server.js
 ├── backup.py
 ├── check_theme_wallpapers.bat
 ├── main.html

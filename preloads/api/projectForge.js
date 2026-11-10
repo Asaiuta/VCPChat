@@ -12,12 +12,15 @@ module.exports = {
     api: {
         projectForgeListProjects: invoke('project-forge:list-projects', 'options'),
         projectForgeGetProject: invoke('project-forge:get-project', 'projectId'),
+        projectForgeGetTimeline: invoke('project-forge:get-timeline', 'projectId', 'options'),
+        projectForgeExportReport: invoke('project-forge:export-report', 'projectId'),
         projectForgeSearchHistory: invoke('project-forge:search-history', 'filters'),
         projectForgeGetBatch: invoke('project-forge:get-batch', 'projectId', 'batchId'),
         projectForgeGetNode: invoke('project-forge:get-node', 'projectId', 'nodeId'),
         projectForgeRevertFile: invoke('project-forge:revert-file', 'payload'),
         projectForgeDeleteProject: invoke('project-forge:delete-project', 'projectId', 'signature'),
         projectForgeAcceptProject: invoke('project-forge:accept-project', 'projectId', 'signature'),
+        projectForgeGetBlueprint: invoke('project-forge:get-blueprint', 'projectId'),
         onProjectForgeChanged: on('project-forge:changed'),
 
         // Git 侧栏

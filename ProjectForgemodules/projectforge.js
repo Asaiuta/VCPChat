@@ -250,6 +250,7 @@ async function selectProject(projectId, { keepTab = false } = {}) {
     renderTimeline();
     renderFiles();
     renderReport();
+    if (document.querySelector('.tab.active')?.dataset.tab === 'blueprint') renderBlueprint({ force: true });
     if (!keepTab) switchTab('overview');
     $('history-results').innerHTML = '<p class="muted">输入条件后搜索本工程的变动历史。</p>';
 }
@@ -310,7 +311,43 @@ function renderTimeline() {
         $('pane-timeline').innerHTML = '<p class="muted">暂无改动</p>';
         return;
     }
-    $('pane-timeline').innerHTML = `<div class="timeline">${timeline.map(b => `
+    $('pane-timeline').innerHTML = `<div class="timeline">${timelineCards(timeline)}</div>${timelineMoreButton()}`;
+}
+
+function timelineMoreButton() {
+    return state.detail.timelineHasMore
+        ? '<button class="btn" type="button" data-timeline-more>加载更早 100 批</button>'
+        : '<p class="muted">已显示全部施工脉络</p>';
+}
+
+async function loadMoreTimeline(button) {
+    if (button.disabled) return;
+    const detail = state.detail;
+    const projectId = state.currentId;
+    button.disabled = true;
+    button.textContent = '加载中…';
+    try {
+        const page = await call(api.projectForgeGetTimeline(projectId, {
+            beforeBatch: detail.timelineBeforeBatch, limit: 100,
+        }));
+        if (state.detail !== detail || state.currentId !== projectId) return;
+        const known = new Set(detail.timeline.map(b => b.id));
+        const added = page.timeline.filter(b => !known.has(b.id));
+        $('pane-timeline').querySelector('.timeline').insertAdjacentHTML('beforeend', timelineCards(added));
+        detail.timeline.push(...added);
+        detail.timelineHasMore = page.timelineHasMore;
+        detail.timelineBeforeBatch = page.timelineBeforeBatch;
+        button.outerHTML = timelineMoreButton();
+    } catch (error) {
+        if (state.detail === detail && state.currentId === projectId) toast(`读取更早脉络失败：${error.message}`, 'error');
+    } finally {
+        button.disabled = false;
+        button.textContent = '加载更早 100 批';
+    }
+}
+
+function timelineCards(timeline) {
+    return timeline.map(b => `
         <div class="tl-item kind-${escapeHtml(b.kind)}" data-batch="${b.id}">
             <div class="tl-card">
                 <div class="tl-head">
@@ -324,7 +361,7 @@ function renderTimeline() {
                 <div class="muted" style="font-size:12px;margin-top:4px">${b.files.slice(0, 6).map(f => `<code>${escapeHtml(f)}</code>`).join('、')}${b.files.length > 6 ? ` 等 ${b.files.length} 个` : ''}</div>
                 <div class="tl-nodes"></div>
             </div>
-        </div>`).join('')}</div>`;
+        </div>`).join('');
 }
 
 function nodeRowHtml(n) {
@@ -368,9 +405,12 @@ function renderFiles() {
 
 function renderReport() {
     const { project } = state.detail;
-    $('pane-report').innerHTML = project.report
-        ? `<div class="muted" style="margin-bottom:10px">提交者 ${maidHtml(project.report_by)} · 状态 ${statusBadge(project)}</div><div class="markdown">${renderMarkdownSafe(project.report)}</div>`
-        : '<p class="muted">尚未提交验收报告。</p>';
+    $('pane-report').innerHTML = `
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px">
+            <div class="muted">${project.report ? `提交者 ${maidHtml(project.report_by)} · ` : ''}状态 ${statusBadge(project)}</div>
+            <button class="btn" type="button" data-export-report="${escapeHtml(project.id)}" style="flex-shrink:0" title="导出完整工程履历，含起点、全部施工脉络与存档验收报告">📄 导出报告</button>
+        </div>
+        ${project.report ? `<div class="markdown">${renderMarkdownSafe(project.report)}</div>` : '<p class="muted">尚未提交验收报告。</p>'}`;
 }
 
 // ============================ 历史搜索 ============================
@@ -582,6 +622,55 @@ async function revertCurrent(mode) {
 function switchTab(name) {
     document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
     document.querySelectorAll('.tab-pane').forEach(p => p.classList.toggle('active', p.dataset.pane === name));
+    if (name === 'blueprint') renderBlueprint();
+}
+
+/** 工程图纸：动态画布（v 工程数据库实时投影，随施工自动生长）+ 手工精绘图（blueprints/{id}.html 存在时可切换）。
+ *  实时生长时：旧画布在 IPC 期间保持可见 → 离屏渲染 → 一次性替换 → 按阅读锚点还原滚动；并发调用只采纳最新一次。 */
+let bpRenderSeq = 0;
+async function renderBlueprint({ force = false } = {}) {
+    const pane = $('pane-blueprint');
+    const projectId = state.currentId;
+    if (!projectId) {
+        pane.innerHTML = '<p class="muted">未选择工程。</p>';
+        delete pane.dataset.loadedFor;
+        return;
+    }
+    if (!force && pane.dataset.loadedFor === projectId) return;
+    pane.dataset.loadedFor = projectId;
+    const seq = ++bpRenderSeq;
+    let manual = null;
+    try { manual = await call(api.projectForgeGetBlueprint(projectId)); } catch (_e) { manual = null; }
+    if (seq !== bpRenderSeq) return; // 已有更新的渲染请求，丢弃过期结果
+    const hasManual = !!(manual && manual.exists);
+    // bpGetViewMode / bpSetViewMode / renderBlueprintDynamic / bpCaptureScroll / bpRestoreScroll 来自 projectforge-blueprint.js（跨模块全局，与本文件其余兄弟模块同架构）
+    const mode = bpGetViewMode(projectId, hasManual);
+    const toggleHtml = hasManual ? `
+        <div class="bp-mode-bar">
+            <button class="bp-mode-btn${mode === 'dynamic' ? ' active' : ''}" data-bp-mode="dynamic" type="button">动态画布</button>
+            <button class="bp-mode-btn${mode === 'manual' ? ' active' : ''}" data-bp-mode="manual" type="button">精绘图</button>
+        </div>` : '';
+    if (mode === 'manual' && hasManual) {
+        pane.innerHTML = `${toggleHtml}<iframe class="bp-frame" src="../${escapeHtml(manual.relPath)}?t=${Date.now()}" title="改动脉络"></iframe>`;
+    } else {
+        const host = document.createElement('div');
+        host.className = 'bp-host';
+        host.dataset.project = projectId;
+        await renderBlueprintDynamic(host, projectId);
+        if (seq !== bpRenderSeq) return;
+        // 替换前一刻才取锚点：IPC 期间旧画布仍可滚动；仅旧画布属于同一工程时还原，换工程从顶部开始
+        const oldHost = pane.querySelector('.bp-host');
+        const anchor = oldHost && oldHost.dataset.project === projectId ? bpCaptureScroll(oldHost) : null;
+        pane.innerHTML = toggleHtml;
+        pane.appendChild(host);
+        bpRestoreScroll(host, anchor);
+    }
+    pane.querySelectorAll('.bp-mode-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            bpSetViewMode(projectId, btn.dataset.bpMode);
+            renderBlueprint({ force: true });
+        });
+    });
 }
 
 function debounce(fn, wait) {
@@ -600,6 +689,26 @@ function bindEvents() {
     });
     $('project-search').addEventListener('input', debounce(renderProjectList, 120));
     $('include-deleted').addEventListener('change', loadProjects);
+
+    let exportingReport = false;
+    $('pane-report').addEventListener('click', async e => {
+        const button = e.target.closest('[data-export-report]');
+        if (!button || exportingReport) return;
+        const projectId = button.dataset.exportReport;
+        exportingReport = true;
+        button.disabled = true;
+        button.textContent = '导出中…';
+        try {
+            const result = await call(api.projectForgeExportReport(projectId));
+            if (!result.canceled) toast(`报告已导出：${result.filePath}`, 'success');
+        } catch (error) {
+            toast(`导出失败：${error.message}`, 'error');
+        } finally {
+            exportingReport = false;
+            button.disabled = false;
+            button.textContent = '📄 导出报告';
+        }
+    });
 
     let activeAcceptButton = null;
     let acceptTimer = null;
@@ -724,6 +833,8 @@ function bindEvents() {
     });
 
     $('pane-timeline').addEventListener('click', e => {
+        const more = e.target.closest('[data-timeline-more]');
+        if (more) { loadMoreTimeline(more); return; }
         const row = e.target.closest('.node-row');
         if (row) { openNode(row.dataset.node); return; }
         const head = e.target.closest('.tl-head, .tl-reason');

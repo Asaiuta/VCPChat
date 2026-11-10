@@ -54,24 +54,6 @@ function normalizeFlowlockHeartbeatPrompt(prompt) {
     return `${FLOWLOCK_SYSTEM_PROMPT_PREFIX}${normalized ? ` ${normalized}` : ''}`;
 }
 
-function attachFlowlockTimestampMetadata(vcpMessage, historyMessage) {
-    if (
-        !historyMessage?.id
-        || typeof historyMessage.timestamp !== 'number'
-        || !Number.isFinite(historyMessage.timestamp)
-    ) {
-        return vcpMessage;
-    }
-
-    return {
-        ...vcpMessage,
-        __vcpchatTimestampMeta: {
-            messageId: historyMessage.id,
-            role: historyMessage.role,
-            timestamp: historyMessage.timestamp
-        }
-    };
-}
 
 /**
  * 按指定 Agent/Topic 执行后台续写
@@ -79,6 +61,46 @@ function attachFlowlockTimestampMetadata(vcpMessage, historyMessage) {
  * @param {Object} params - { agentId, topicId, prompt, messageId }
  */
 async function continueWritingForContext(params) {
+    const api = window.chatAPI || window.electronAPI;
+    if (typeof api.topicAdmissionAcquire !== 'function') {
+        return continueWritingForContextOwned(params);
+    }
+    const scope = { itemType: 'agent', itemId: params.agentId, topicId: params.topicId };
+    const token = params.messageId || `heartbeat_${params.agentId}_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const acquired = await api.topicAdmissionAcquire(scope, token);
+    if (!acquired?.success) {
+        throw Object.assign(new Error(`话题暂不可续写：${acquired?.code || acquired?.error || '占用中'}`), {
+            code: acquired?.code || 'ADMISSION_UNAVAILABLE',
+        });
+    }
+    let dispatched = false;
+    try {
+        const result = await continueWritingForContextOwned({
+            ...params, admissionToken: token,
+            onAdmissionDispatch: () => { dispatched = true; },
+        });
+        if (result?.nonStreamingSaved) {
+            const released = await api.topicAdmissionRelease(scope, token, { saved: true });
+            if (!released?.success) throw new Error(released?.error || released?.code || '心跳租约释放失败');
+        }
+        return result;
+    } catch (error) {
+        if (!dispatched) {
+            const released = await api.topicAdmissionRelease(scope, token, { saved: true });
+            if (!released?.success) console.error('[Flowlock] preparation lease release failed', released);
+        } else if (typeof api.topicAdmissionUncertain === 'function') {
+            try {
+                const report = await api.topicAdmissionUncertain(scope, token, error?.message || String(error));
+                if (!report?.success) console.error('[Flowlock] uncertainty journal rejected', report);
+            } catch (diagnosticError) {
+                console.error('[Flowlock] uncertainty journal failed', diagnosticError);
+            }
+        }
+        throw error;
+    }
+}
+
+async function continueWritingForContextOwned(params) {
     const { agentId, topicId, prompt, messageId } = params;
     const chatAPI = window.chatAPI || window.electronAPI;
     const globalSettings = settingsProvider?.get?.() || {};
@@ -115,24 +137,6 @@ async function continueWritingForContext(params) {
         });
     }
 
-    // 获取与普通单聊一致的合并后高级回复规则。
-    // IPC 返回官方预置 + 用户覆盖；权限预置默认关闭，不会因 Flowlock 后台运行而隐式授权。
-    const conversationSnapshot = typeof chatAPI.resolveConversationContext === 'function'
-        ? await chatAPI.resolveConversationContext({ type: 'agent', id: agentId }) : null;
-    if (conversationSnapshot && !conversationSnapshot.success) throw new Error(conversationSnapshot.error);
-    let tavernRules = conversationSnapshot?.rules || [];
-    const tavernEngine = window.TavernRulesEngine;
-    if (!conversationSnapshot && typeof chatAPI.tavernGetRules === 'function') {
-        try {
-            const tavernResult = await chatAPI.tavernGetRules();
-            if (tavernResult?.success && Array.isArray(tavernResult.store?.rules)) {
-                tavernRules = tavernResult.store.rules;
-            }
-        } catch (error) {
-            console.warn('[Flowlock] Failed to load advanced reply rules:', error);
-        }
-    }
-
     // 确定提示词
     let temporaryPrompt = prompt;
     if (!temporaryPrompt || !temporaryPrompt.trim()) {
@@ -147,94 +151,12 @@ async function continueWritingForContext(params) {
 
     // 所有 Flowlock 心跳消息必须使用系统提示标记；已有前缀时不重复添加。
     temporaryPrompt = normalizeFlowlockHeartbeatPrompt(temporaryPrompt);
-    if (tavernEngine && tavernRules.length > 0) {
-        temporaryPrompt = tavernEngine.applyUserSuffix(temporaryPrompt, tavernRules, 'agent');
-    }
-
-    // 构建 VCP 消息
-    const messagesForVCP = await Promise.all(historyForVCP.map(async msg => {
-        let currentMessageTextContent = '';
-        if (typeof msg.content === 'string') {
-            currentMessageTextContent = msg.content;
-        } else if (msg.content && typeof msg.content === 'object') {
-            if (typeof msg.content.text === 'string') {
-                currentMessageTextContent = msg.content.text;
-            } else if (Array.isArray(msg.content)) {
-                currentMessageTextContent = msg.content
-                    .filter(item => item.type === 'text' && item.text)
-                    .map(item => item.text)
-                    .join('\n');
-            }
-        }
-        return attachFlowlockTimestampMetadata(
-            {
-                role: msg.role, content: currentMessageTextContent,
-                ...(msg.role === 'user' && msg.contextCompaction?.kind === 'vchat-context-checkpoint'
-                    && msg.contextCompaction?.version === 1 ? { __vcpContextCheckpoint: true } : {}),
-            },
-            msg
-        );
-    }));
-
-    // 心跳仍使用 user role 进入现有续写链路，但内容前缀使后端可可靠识别其系统来源。
-    messagesForVCP.push({ role: 'user', content: temporaryPrompt });
-
-    // 注入系统提示词
-    if (agentConfig && agentConfig.systemPrompt) {
-        let systemPromptContent = agentConfig.systemPrompt.replace(/\{\{AgentName\}\}/g, agentConfig.name || agentId);
-        const prependedContent = [];
-
-        if (agentConfig.agentDataPath && topicId) {
-            const historyPath = `${agentConfig.agentDataPath}\\topics\\${topicId}\\history.json`;
-            prependedContent.push(`当前聊天记录文件路径: ${historyPath}`);
-        }
-
-        if (agentConfig.topics && topicId) {
-            const currentTopicObj = agentConfig.topics.find(t => t.id === topicId);
-            if (currentTopicObj && currentTopicObj.createdAt) {
-                const date = new Date(currentTopicObj.createdAt);
-                const formattedDate = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
-                prependedContent.push(`当前话题创建于: ${formattedDate}`);
-            }
-        }
-
-        if (prependedContent.length > 0) {
-            systemPromptContent = prependedContent.join('\n') + '\n\n' + systemPromptContent;
-        }
-
-        if (tavernEngine && tavernRules.length > 0) {
-            systemPromptContent = tavernEngine.applySystemSuffix(systemPromptContent, tavernRules, 'agent');
-        }
-        messagesForVCP.unshift({ role: 'system', content: systemPromptContent });
-    } else if (tavernEngine && tavernRules.length > 0) {
-        const tavernSystemOnly = tavernEngine.applySystemSuffix('', tavernRules, 'agent');
-        if (tavernSystemOnly.trim()) {
-            messagesForVCP.unshift({ role: 'system', content: tavernSystemOnly });
-        }
-    }
-
-    for (const message of messagesForVCP) {
-        if (message.role === 'system' && typeof message.content === 'string' &&
-            message.content.includes('{{VCPChatWorkSpace') && chatAPI.expandWorkspacePlaceholders) {
-            const expanded = await chatAPI.expandWorkspacePlaceholders(message.content, conversationSnapshot);
-            if (expanded?.success) message.content = expanded.text;
-        }
-    }
-
-    if (
-        tavernEngine &&
-        tavernRules.some(rule => rule.type === 'context_inject' && rule.enabled !== false)
-    ) {
-        const systemMessages = messagesForVCP.filter(message => message.role === 'system');
-        const nonSystemMessages = messagesForVCP.filter(message => message.role !== 'system');
-        const injectedMessages = tavernEngine.applyContextInject(
-            nonSystemMessages,
-            tavernRules,
-            'agent'
-        );
-        messagesForVCP.length = 0;
-        messagesForVCP.push(...systemMessages, ...injectedMessages);
-    }
+    // 此文件以 classic script 加载；显式锚定主页面，避免相对导入落到脚本目录。
+    const { assembleRequestMessages } = await import(new URL('modules/chat/chatContextPipeline.js', document.baseURI).href);
+    const { messagesForVCP } = await assembleRequestMessages({
+        electronAPI: chatAPI, agentConfig: agentConfig || {}, history: historyForVCP,
+        context: { agentId, topicId }, temporaryPrompt,
+    });
 
     const useStreaming = (agentConfig?.streamOutput !== false);
     const modelConfigForVCP = {
@@ -268,6 +190,7 @@ async function continueWritingForContext(params) {
 
     // 构建上下文。后台流也必须带完整身份，streamManager 才能写入正确历史。
     const context = {
+        admissionToken: params.admissionToken,
         agentId: agentId,
         agentName: agentConfig?.name || agentId,
         topicId: topicId,
@@ -279,7 +202,7 @@ async function continueWritingForContext(params) {
     // Streaming lifecycle is now started by the VCP stream bridge when the
     // producer publishes its first owned event. This prevents Flowlock from
     // creating a second terminal state machine for the same message.
-    if (!useStreaming) {
+    if (!useStreaming && typeof chatAPI.topicAdmissionPersistAssistant !== 'function') {
         let historyWithThinking = await chatAPI.getChatHistory(agentId, topicId);
         if (!historyWithThinking || historyWithThinking.error) {
             historyWithThinking = [];
@@ -296,6 +219,7 @@ async function continueWritingForContext(params) {
     if (params.isCurrent && !params.isCurrent()) throw new Error('心流会话已停止、切换或挂起');
 
     // 发送到 VCP
+    params.onAdmissionDispatch?.();
     const vcpResponse = await chatAPI.sendToVCP(
         globalSettings.vcpServerUrl,
         globalSettings.vcpApiKey,
@@ -322,8 +246,36 @@ async function continueWritingForContext(params) {
                 avatarColor: agentConfig?.avatarCalculatedColor,
                 content: assistantMessageContent,
                 timestamp: Date.now(),
-                id: response.id || `flowlock_nonstream_${Date.now()}`
+                id: thinkingMessageId,
+                agentId,
+                admissionToken: params.admissionToken,
+                admissionTerminal: true,
+                isThinking: false,
+                finishReason: 'completed'
             };
+
+            if (typeof chatAPI.topicAdmissionPersistAssistant === 'function') {
+                const saved = await chatAPI.topicAdmissionPersistAssistant(
+                    { itemType: 'agent', itemId: agentId, topicId }, assistantMessage);
+                if (!saved?.success) throw new Error(saved?.error || '心跳终稿保存失败');
+                // UI/Flowlock effects cannot invalidate an already durable terminal.
+                try {
+                    if (isForCurrentView && chatManagerProvider?.loadChatHistory) {
+                        await chatManagerProvider.loadChatHistory(agentId, 'agent', topicId);
+                    }
+                } catch (effectError) {
+                    console.error('[Flowlock] post-commit history refresh failed', effectError);
+                }
+                try {
+                    await window.flowlockManager?.handleFinalizedMessage({
+                        type: 'end', messageId: thinkingMessageId, context,
+                        content: assistantMessageContent, finishReason: 'completed'
+                    });
+                } catch (effectError) {
+                    console.error('[Flowlock] post-commit finalization failed', effectError);
+                }
+                return { nonStreamingSaved: true };
+            }
 
             const historyForSave = await chatAPI.getChatHistory(agentId, topicId);
             if (historyForSave && !historyForSave.error) {
@@ -341,6 +293,7 @@ async function continueWritingForContext(params) {
                 }
             }
 
+            if (!Array.isArray(historyForSave)) throw new Error('心跳回复历史保存未完成');
             // 非流式回复不会产生 stream end 事件，直接进入统一完成入口。
             await window.flowlockManager?.handleFinalizedMessage({
                 type: 'end',
@@ -349,6 +302,9 @@ async function continueWritingForContext(params) {
                 content: assistantMessageContent,
                 finishReason: 'completed'
             });
+            return { nonStreamingSaved: true };
+        } else {
+            throw new Error('心跳回复格式无效');
         }
     } else {
         if (vcpResponse?.streamError) {
