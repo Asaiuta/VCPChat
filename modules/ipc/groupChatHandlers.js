@@ -18,6 +18,12 @@ const { clearTrajectoryOf, clearTrajectoriesOfOwner } = require('../modelTraject
  * @param {function} context.startSelectionListener - Function to start the selection listener.
  */
 let ipcHandlersRegistered = false;
+let admissionGroupAdvance = null;
+
+function advanceTopicAdmission(request) {
+    if (!admissionGroupAdvance) throw new Error('群聊推进运行时尚未初始化，已暂停');
+    return admissionGroupAdvance(request);
+}
 const AVATAR_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.webp'];
 
 async function findAvatarUrl(agentDir, cacheBust = false) {
@@ -46,7 +52,8 @@ function initialize(mainWindow, context) {
         fileWatcher,
         historyMutationQueue = new HistoryMutationQueue({ userDataDir: USER_DATA_DIR, fileWatcher }),
         jevService = null,
-        gameService = null
+        gameService = null,
+        topicAdmission = null
     } = context;
 
     if (ipcHandlersRegistered) {
@@ -68,19 +75,79 @@ function initialize(mainWindow, context) {
 
     groupChat.initializeRuntimeServices({
         historyMutationQueue,
+        topicAdmission,
         jevService,
         getAgentConfigById
     });
 
     if (gameService) {
+        let modelCache = { fetchedAt: 0, ids: [] };
+        const readAllAgentConfigs = async () => {
+            const entries = await fs.readdir(AGENT_DIR, { withFileTypes: true });
+            const configs = await Promise.all(entries.filter(entry => entry.isDirectory())
+                .map(entry => getAgentConfigById(entry.name)));
+            return configs.filter(config => !config.error);
+        };
         require('./gameHandlers').configureRuntime({
             gameService, groupChat, loadAgent: getAgentConfigById,
             listAgents: async () => {
-                const entries = await fs.readdir(AGENT_DIR, { withFileTypes: true });
-                const configs = await Promise.all(entries.filter(entry => entry.isDirectory())
-                    .map(entry => getAgentConfigById(entry.name)));
-                return configs.filter(config => !config.error && config.model)
-                    .map(config => ({ id: config.id, name: config.name || config.id, avatarUrl: config.avatarUrl }));
+                const configs = await readAllAgentConfigs();
+                return configs.filter(config => config.model)
+                    .map(config => ({
+                        id: config.id,
+                        name: config.name || config.id,
+                        avatarUrl: config.avatarUrl,
+                        model: typeof config.model === 'string' ? config.model.trim() : '',
+                    }));
+            },
+            listModels: async ({ forceRefresh = false } = {}) => {
+                const modelUsageTracker = require('../modelUsageTracker');
+                const [favoriteModels, hotModels, agentConfigs] = await Promise.all([
+                    modelUsageTracker.getFavoriteModels().catch(() => []),
+                    modelUsageTracker.getHotModels(15).catch(() => []),
+                    readAllAgentConfigs().catch(() => []),
+                ]);
+                const now = Date.now();
+                if (forceRefresh || !modelCache.ids.length || now - modelCache.fetchedAt > 30000) {
+                    try {
+                        const settingsPath = path.join(path.dirname(USER_DATA_DIR), 'settings.json');
+                        const settings = await fs.pathExists(settingsPath) ? await fs.readJson(settingsPath) : {};
+                        if (settings?.vcpServerUrl) {
+                            const parsed = new URL(settings.vcpServerUrl);
+                            const modelsUrl = new URL('/v1/models', `${parsed.protocol}//${parsed.host}`).toString();
+                            const headers = settings.vcpApiKey
+                                ? { Authorization: `Bearer ${settings.vcpApiKey}` }
+                                : {};
+                            const response = await fetch(modelsUrl, {
+                                headers,
+                                signal: AbortSignal.timeout(4000),
+                            });
+                            if (response.ok) {
+                                const payload = await response.json();
+                                const remoteIds = (Array.isArray(payload?.data) ? payload.data : [])
+                                    .map(item => (typeof item?.id === 'string' ? item.id.trim() : ''))
+                                    .filter(Boolean);
+                                if (remoteIds.length) {
+                                    modelCache = { fetchedAt: now, ids: remoteIds };
+                                }
+                            }
+                        }
+                    } catch {
+                        // Fall back to cached / local agent models without blocking table setup.
+                    }
+                }
+                const clean = list => [...new Set((Array.isArray(list) ? list : [])
+                    .map(id => (typeof id === 'string' ? id.trim() : ''))
+                    .filter(Boolean))];
+                const agentModels = agentConfigs
+                    .map(cfg => (typeof cfg.model === 'string' ? cfg.model.trim() : ''))
+                    .filter(Boolean);
+                const models = clean([...favoriteModels, ...hotModels, ...agentModels, ...modelCache.ids]);
+                return {
+                    models,
+                    favoriteModels: clean(favoriteModels),
+                    hotModels: clean(hotModels),
+                };
             },
         });
     }
@@ -90,6 +157,14 @@ function initialize(mainWindow, context) {
             mainWindow.webContents.send('vcp-stream-event', data);
         }
     };
+
+    admissionGroupAdvance = require('../services/topicAdmissionGroup').createTopicAdmissionGroup({
+        readHistory: scope => historyMutationQueue.read(scope),
+        reportUncertain: (scope, token, error) => topicAdmission?.reportUncertain(scope, token, error),
+        loadGroupConfig: groupId => groupChat.getAgentGroupConfig(groupId),
+        runGroup: (groupId, topicId, payload, options) => groupChat.handleGroupChatMessage(
+            groupId, topicId, payload, createStreamSender(), getAgentConfigById, options),
+    });
 
     // --- Group Chat IPC Handlers ---
     ipcMain.handle('create-agent-group', async (event, groupName, initialConfig) => {
@@ -157,7 +232,7 @@ function initialize(mainWindow, context) {
         return await groupChat.getGroupChatHistory(groupId, topicId);
     });
 
-    ipcMain.handle('save-group-chat-history', async (event, groupId, topicId, history) => {
+    ipcMain.handle('save-group-chat-history', async (event, groupId, topicId, history, options) => {
         if (!groupId || !topicId || !Array.isArray(history)) {
             const errorMsg = `保存群组 ${groupId} 话题 ${topicId} 聊天历史失败: 参数无效。`;
             console.error(errorMsg);
@@ -166,7 +241,8 @@ function initialize(mainWindow, context) {
         try {
             await historyMutationQueue.replace(
                 { itemId: groupId, itemType: 'group', topicId },
-                history
+                history,
+                { requireExisting: true, expectedHistory: options?.expectedHistory }
             );
             console.log(`[Main IPC] 群组 ${groupId} 话题 ${topicId} 聊天历史已通过共享历史队列保存`);
             return { success: true };
@@ -177,23 +253,27 @@ function initialize(mainWindow, context) {
     });
 
     ipcMain.handle('send-group-chat-message', async (event, groupId, topicId, userMessage) => {
-        // The actual VCP call and streaming will be handled within groupChat.handleGroupChatMessage
-        // It needs a way to send stream chunks back to the renderer.
-        // We'll pass a function to groupChat.handleGroupChatMessage that uses event.sender.send
-        console.log(`[Main IPC] Received send-group-chat-message for Group: ${groupId}, Topic: ${topicId}`);
+        if (event.sender !== mainWindow?.webContents) return { success: false, code: 'FORBIDDEN' };
+        if (!topicAdmission) return { success: false, error: '中央消息入场服务不可用' };
         try {
-            const sendStreamChunkToRenderer = (data) => { // Channel is now fixed
-                if (mainWindow && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
-                    mainWindow.webContents.send('vcp-stream-event', data);
-                }
-            };
-
-            // Await the group chat handler to ensure any errors within it are caught by this try...catch block.
-            await groupChat.handleGroupChatMessage(groupId, topicId, userMessage, sendStreamChunkToRenderer, getAgentConfigById);
-
-            return { success: true, message: "Group chat message processing started and completed." };
+            if (!userMessage?.id || userMessage.role !== 'user'
+                || typeof userMessage.content?.text !== 'string') {
+                throw new TypeError('群聊用户消息参数无效');
+            }
+            const originalText = typeof userMessage.originalUserText === 'string'
+                ? userMessage.originalUserText : userMessage.content.text;
+            return await topicAdmission.submit({
+                scope: { itemType: 'group', itemId: groupId, topicId },
+                message: {
+                    id: userMessage.id, role: 'user', name: userMessage.name,
+                    content: originalText, attachments: userMessage.attachments || [],
+                    timestamp: Date.now(), isGroupMessage: true, groupId, topicId,
+                    _metadata: { groupRequestText: userMessage.content.text },
+                },
+                requestId: userMessage.id,
+                triggerPolicy: 'reply',
+            });
         } catch (error) {
-            console.error(`[Main IPC] Error in send-group-chat-message handler for Group ${groupId}:`, error);
             return { success: false, error: error.message };
         }
     });
@@ -297,5 +377,6 @@ function initialize(mainWindow, context) {
 }
 
 module.exports = {
-    initialize
+    initialize,
+    advanceTopicAdmission
 };

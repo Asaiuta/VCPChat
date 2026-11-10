@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-function createFlowlockEnvironment() {
+function createFlowlockEnvironment(logger = console) {
     const notifications = [];
     const window = {
         VCPMainChatState: {
@@ -26,7 +26,7 @@ function createFlowlockEnvironment() {
     };
 
     const context = vm.createContext({
-        console,
+        console: logger,
         window,
         document,
         setTimeout,
@@ -226,5 +226,96 @@ test('suspended compaction terminal clears active round without executing flowlo
         assert.equal(manager.getSession('agent-test').contextCompactionSuspended, true);
         assert.equal(manager.resumeAfterContextCompaction(lease), true);
         assert.ok(session.pendingTimer);
+    } finally { manager.cleanup(); }
+});
+
+test('heartbeat import failures retain diagnostics and notify when retries are exhausted', async () => {
+    const errors = [];
+    const warnings = [];
+    const { manager, notifications } = createFlowlockEnvironment({
+        log() {},
+        error: (...args) => errors.push(args),
+        warn: (...args) => warnings.push(args)
+    });
+    const failure = new TypeError('Failed to fetch dynamically imported module: file:///missing.js');
+    manager.continueWritingForContext = async () => { throw failure; };
+    const scheduled = [];
+    manager.scheduleNextRound = (agentId, delayMs) => scheduled.push({ agentId, delayMs });
+    try {
+        await manager.start('agent-test', 'topic-test');
+        const session = manager.sessions.get('agent-test');
+        for (let attempt = 1; attempt <= 3; attempt++) {
+            await manager.triggerRound('agent-test');
+            assert.equal(session.retryCount, attempt);
+            assert.equal(session.lastError, failure.message);
+            assert.equal(session.activeMessageId, null);
+        }
+        assert.deepEqual(scheduled, [
+            { agentId: 'agent-test', delayMs: 5000 },
+            { agentId: 'agent-test', delayMs: 5000 }
+        ]);
+        assert.equal(warnings.length, 2);
+        assert.equal(warnings[0][1], failure);
+        assert.match(warnings[0][0], /retry 1\/3/);
+        const failures = errors.filter(([message]) => message.includes('continue writing failed'));
+        assert.equal(failures.length, 3);
+        assert.ok(failures.every(([message, error]) =>
+            message.includes('topic=topic-test') && message.includes('messageId=flowlock_') && error === failure));
+        assert.ok(errors.some(([message]) => message.includes('max retries reached (3/3)')));
+        assert.equal(session.completionReason, 'max_retries_exceeded');
+        assert.equal(session.status, 'stopped');
+        assert.equal(manager.isAgentLocked('agent-test'), false);
+        assert.equal(notifications.filter(n => n.type === 'error' && n.msg.includes('已自动停止')).length, 1);
+        assert.ok(!notifications.some(n => n.type === 'info'));
+    } finally { manager.cleanup(); }
+});
+test('relay adoption transfers active reply without starting a heartbeat', async () => {
+    const { manager } = createFlowlockEnvironment();
+    await manager.start('agent-test', 'topic-test', { startImmediately: false });
+    const session = manager.sessions.get('agent-test');
+    session.activeMessageId = 'old';
+    const lease = manager.suspendForContextCompaction('agent-test', 'topic-test');
+    assert.ok(lease);
+    assert.equal(manager.markRelaySuspension(lease, 'old-token'), true);
+    assert.equal(manager.adoptRelayMessage('agent-test', 'topic-test', 'new', 'wrong-token'), false);
+    assert.equal(manager.adoptRelayMessage('agent-test', 'wrong-topic', 'new', 'old-token'), false);
+    assert.equal(manager.adoptRelayMessage('agent-test', 'topic-test', 'new', 'old-token'), true);
+    assert.equal(session.activeMessageId, 'new');
+    assert.equal(session.contextCompactionLease, null);
+    assert.equal(session.pendingTimer, null);
+    assert.equal(manager.resumeAfterContextCompaction(lease), false);
+    assert.equal(manager.adoptRelayMessage('agent-test', 'topic-test', 'duplicate'), false);
+    await manager.stopAll();
+});
+
+test('relay adoption cannot create or revive a stopped or restarted session', async () => {
+    const { manager } = createFlowlockEnvironment();
+    assert.equal(manager.adoptRelayMessage('agent-test', 'topic-test', 'new'), false);
+    await manager.start('agent-test', 'topic-test', { startImmediately: false });
+    manager.suspendForContextCompaction('agent-test', 'topic-test');
+    await manager.stop('agent-test');
+    assert.equal(manager.adoptRelayMessage('agent-test', 'topic-test', 'late'), false);
+    await manager.start('agent-test', 'topic-test', { startImmediately: false });
+    assert.equal(manager.adoptRelayMessage('agent-test', 'topic-test', 'late'), false);
+    await manager.stopAll();
+});
+test('old relay cannot adopt a restarted or handed-off session that is suspended again', async () => {
+    const { manager } = createFlowlockEnvironment();
+    try {
+        await manager.start('agent-test', 'topic-test', { startImmediately: false });
+        const oldLease = manager.suspendForContextCompaction('agent-test', 'topic-test');
+        manager.markRelaySuspension(oldLease, 'old-token');
+        await manager.stop('agent-test');
+        await manager.start('agent-test', 'topic-test', { startImmediately: false });
+        const newLease = manager.suspendForContextCompaction('agent-test', 'topic-test');
+        assert.equal(manager.markRelaySuspension(oldLease, 'old-token'), false);
+        assert.equal(manager.adoptRelayMessage('agent-test', 'topic-test', 'late', 'old-token'), false);
+        assert.equal(manager.markRelaySuspension(newLease, 'new-token'), true);
+        await manager.handoffToClaim({
+            agentId: 'agent-test', topicId: 'topic-test', heartbeatSeconds: 60, requestId: 'new-claim',
+        });
+        manager.suspendForContextCompaction('agent-test', 'topic-test');
+        assert.equal(manager.adoptRelayMessage('agent-test', 'topic-test', 'late', 'new-token'), false);
+        assert.equal(manager.sessions.get('agent-test').activeMessageId, null);
     } finally { manager.cleanup(); }
 });

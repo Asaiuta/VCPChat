@@ -11,6 +11,8 @@ const windowService = require('../services/windowService');
 const WINDOW_APP_IDS = require('../services/windowAppIds');
 const { PRELOAD_ROLES, resolveAppPreload } = require('../services/preloadPaths');
 const scriptoriumImportService = require('../services/scriptoriumImportService');
+// Markdown、网页、PDF、表格、文本等文件原位打开（modules/scriptorium）。
+const fileViews = require('../scriptorium/fileViews');
 const {
     ScriptoriumFontCacheService,
 } = require('../services/scriptoriumFontCacheService');
@@ -22,9 +24,9 @@ const MAX_RESOURCE_REDIRECTS = 5;
 const PROJECT_EXTENSIONS = new Set(['.vdocx', '.vpptx']);
 const EXPORT_FORMATS = new Set(['html-flow', 'html-paged', 'pdf']);
 const IMPORT_EXTENSIONS = new Set(scriptoriumImportService.SUPPORTED_EXTENSIONS);
-const OPEN_EXTENSIONS = new Set([...PROJECT_EXTENSIONS, ...IMPORT_EXTENSIONS]);
+const OPEN_EXTENSIONS = new Set([...PROJECT_EXTENSIONS, ...IMPORT_EXTENSIONS, '.excalidraw']);
 const LIBRARY_EXTENSIONS = new Set([
-    '.vdocx', '.vpptx', '.docx', '.pptx', '.txt', '.html', '.md',
+    '.vdocx', '.vpptx', '.docx', '.pptx', '.txt', '.html', '.md', '.excalidraw',
 ]);
 const RECENT_LIMIT = 12;
 const AGENT_REQUEST_TIMEOUT_MS = 30000;
@@ -37,6 +39,7 @@ const AGENT_ENDPOINT_METHODS = Object.freeze({
         'deleteStylePack', 'listSvgAssetPacks', 'listSvgAssets',
         'getSvgAsset', 'getSvgAssetPack', 'upsertSvgAssetPack',
         'deleteSvgAssetPack', 'submitSourcePr', 'buildProjectArtifact',
+        'getBoard', 'updateBoard', 'createBoard', 'saveBoard', 'getBoardNodeSource', 'getBoardHistory', // 白板
     ]),
     docx: new Set([
         'getDocumentInfo', 'getRenderedText', 'getOutline', 'getSource',
@@ -66,6 +69,7 @@ const AGENT_MUTATION_METHODS = new Set([
 const AGENT_DIRECT_MUTATION_METHODS = new Set([
     'upsertStylePack', 'deleteStylePack',
     'upsertSvgAssetPack', 'deleteSvgAssetPack',
+    'createBoard', 'updateBoard',
 ]);
 
 let docxWindow = null;
@@ -560,7 +564,10 @@ async function readDocumentLibrary() {
     const roots = [];
     for (const root of documentLibraryRoots) {
         await fs.ensureDir(root.path);
-        const children = await scanDocumentLibraryDirectory(root.path);
+        let children = await scanDocumentLibraryDirectory(root.path);
+        // Boards 独立展示，保留既有物理目录，不在用户文档中重复列出。
+        if (root.id === 'documents') children = children.filter((entry) =>
+            !(entry.type === 'directory' && entry.name.toLowerCase() === 'boards'));
         roots.push({
             id: root.id,
             label: root.label,
@@ -889,16 +896,17 @@ async function readDocument(filePath) {
 async function chooseAndReadDocument(event) {
     const owner = BrowserWindow.fromWebContents(event.sender) || docxWindow || mainWindow;
     const result = await dialog.showOpenDialog(owner, {
-        title: '打开 VCP 富文档工程',
+        title: '打开文件',
         properties: ['openFile'],
-        filters: [
+        filters: fileViews.openFilters([
             { name: 'VCP 富文档工程', extensions: ['vdocx', 'vpptx'] },
-        ],
+        ]),
     });
     if (result.canceled || !result.filePaths.length) {
         return { success: false, canceled: true };
     }
-    return readDocument(result.filePaths[0]);
+    return await fileViews.open(result.filePaths[0], { sender: event.sender, grant: true })
+        || readDocument(result.filePaths[0]);
 }
 
 async function chooseAndImportDocument(event) {
@@ -952,6 +960,7 @@ async function atomicWrite(filePath, bytes) {
 }
 
 async function saveDocument(event, payload = {}) {
+    if (fileViews.saves(payload.filePath)) return fileViews.save(event, payload); // 从 .md 原位打开的文稿保存回 .md
     let targetPath = payload.filePath;
     const requestedExtension = path.extname(targetPath || payload.suggestedName || '').toLowerCase();
     const projectExtension = requestedExtension === '.vpptx' ? '.vpptx' : '.vdocx';
@@ -1299,6 +1308,12 @@ function initialize(params) {
             ),
         },
         {
+            id: 'boards',
+            label: '用户白板',
+            description: 'Excalidraw 与可编程 HTML 白板',
+            path: path.join(params.appDataRoot, 'ScriptoriumDocument', 'VDOCX', 'Boards'),
+        },
+        {
             id: 'presentations',
             label: '用户演示',
             description: 'VPPTX 与 PowerPoint 演示',
@@ -1329,7 +1344,8 @@ function initialize(params) {
     ipcMain.on('scriptorium:agent-response', handleAgentResponse);
     ipcMain.handle('docx:choose-open', chooseAndReadDocument);
     ipcMain.handle('scriptorium:choose-import', chooseAndImportDocument);
-    ipcMain.handle('docx:read-path', (_event, filePath) => readDocument(filePath));
+    ipcMain.handle('docx:read-path', async (event, filePath) =>
+        await fileViews.open(filePath, { sender: event.sender }) || readDocument(filePath));
     ipcMain.handle('docx:read-external-resource', readExternalResource);
     ipcMain.handle(
         'scriptorium:resolve-font-stylesheet',
@@ -1350,6 +1366,18 @@ function initialize(params) {
     ipcMain.handle('scriptorium:svg-assets-load', readSvgAssetPacks);
     ipcMain.handle('scriptorium:svg-assets-save', writeSvgAssetPacks);
     ipcMain.handle('docx:fonts-list', (_event, forceRefresh = false) => getSystemFonts(forceRefresh));
+    fileViews.register(ipcMain, {
+        shell: require('electron').shell,
+        dialog,
+        ownerOf: (event) => (event?.sender && BrowserWindow.fromWebContents(event.sender)) || docxWindow || mainWindow,
+        dataDir: () => path.dirname(recentFilePath),
+        libraryDir: () => documentLibraryRoots.find((root) => root.id === 'documents')?.path,
+        libraryRoots: () => documentLibraryRoots.map((root) => root.path),
+        recentFiles: readRecentFiles,
+        rememberRecentFile,
+        atomicWrite,
+        importable: (filePath) => OPEN_EXTENSIONS.has(path.extname(String(filePath || '')).toLowerCase()),
+    });
 }
 
 module.exports = {

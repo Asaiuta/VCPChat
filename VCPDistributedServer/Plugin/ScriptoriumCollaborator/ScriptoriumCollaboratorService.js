@@ -646,11 +646,39 @@ async function getVisualContext(args, executionContext = {}) {
             ?? args.visualDelayMs
             ?? args.captureDelayMs
             ?? args.screenshotDelayMs,
+        // 白板：只看这些元素或这一区域（文坊 ScriptoriumModules/scriptorium-board.js）。
+        ids: parseArray(args.ids, 'ids', null),
+        region: parseObject(args.region, 'region', null),
     });
     return externalizePageNumbers(result, {
         deck: endpoint === 'pptx'
             || result?.details?.documentKind === 'pptx',
     });
+}
+
+// 白板按元素读写（文坊 ScriptoriumModules/scriptorium-board.js）。
+async function getBoard(args) {
+    return call(args, 'getBoard', {
+        ids: parseArray(args.ids, 'ids', null),
+        region: parseObject(args.region, 'region', null),
+        sinceRevision: args.sinceRevision,
+        limit: args.limit,
+    });
+}
+
+async function updateBoard(args, executionContext = {}) {
+    const author = authorFromMaid(args, executionContext);
+    return call(args, 'updateBoard', {
+        expectedRevision: args.expectedRevision,
+        requestId: requestIdOf(args, executionContext),
+        author, maid: author,
+        summary: String(args.summary || '更新白板').trim(),
+        save: booleanOf(args.save, true),
+        add: parseArray(args.add, 'add'),
+        update: parseArray(args.update, 'update'),
+        delete: parseArray(args.delete, 'delete'),
+        background: args.background,
+    }, 'common', executionContext);
 }
 
 async function getPrHistory(args) {
@@ -950,6 +978,27 @@ async function processSingleToolCall(args, executionContext = {}) {
         case 'getviewportimage':
         case 'getslidevisual':
             return getVisualContext(args, executionContext);
+        case 'getboard':
+            return getBoard(args);
+        case 'updateboard':
+            return updateBoard(args, executionContext);
+        case 'createboard': {
+            const author = authorFromMaid(args, executionContext);
+            return call(args, 'createBoard', {
+                name: args.name || args.title,
+                elements: parseArray(args.elements ?? args.add, 'elements'),
+                background: args.background,
+                author,
+                requestId: requestIdOf(args, executionContext),
+                openAfterCreate: booleanOf(args.openAfterCreate, true),
+            }, 'common', executionContext);
+        }
+        case 'saveboard':
+            return call(args, 'saveBoard', { expectedRevision: args.expectedRevision });
+        case 'getboardnodesource':
+            return call(args, 'getBoardNodeSource', { id: args.id, startLine: args.startLine, endLine: args.endLine });
+        case 'getboardhistory':
+            return call(args, 'getBoardHistory');
         case 'getprhistory':
             return getPrHistory(args);
         case 'liststylepacks':
@@ -998,7 +1047,7 @@ async function processSingleToolCall(args, executionContext = {}) {
             );
         default:
             throw new Error(
-                '[ScriptoriumCollaborator] 不支持的 command。可用值：ListFonts、GetDocumentInfo、GetRenderedText、GetOutline、GetSection、GetSource、SearchSource、GetViewportSource、GetVisualContext、GetPrHistory、ListStylePacks、GetStylePack、UpsertStylePack、DeleteStylePack、ListSvgAssetPacks、ListSvgAssets、GetSvgAsset、GetSvgAssetPack、UpsertSvgAssetPack、DeleteSvgAssetPack、SubmitSourcePr、AddSlide、InsertSlide、DeleteSlide、UpdatePresentationConfig、CreateProject、GetStorageInfo。'
+                '[ScriptoriumCollaborator] 不支持的 command。可用值：ListFonts、GetDocumentInfo、GetRenderedText、GetOutline、GetSection、GetSource、SearchSource、GetViewportSource、GetVisualContext、GetBoard、UpdateBoard、GetPrHistory、ListStylePacks、GetStylePack、UpsertStylePack、DeleteStylePack、ListSvgAssetPacks、ListSvgAssets、GetSvgAsset、GetSvgAssetPack、UpsertSvgAssetPack、DeleteSvgAssetPack、SubmitSourcePr、AddSlide、InsertSlide、DeleteSlide、UpdatePresentationConfig、CreateProject、GetStorageInfo。'
             );
     }
 }

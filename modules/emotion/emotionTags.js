@@ -22,11 +22,22 @@ const PENDING = Object.freeze({ pending: true });
 
 /** 解析一个注释体（<!-- 和 --> 之间的部分）；不是情绪标签或情绪认不出时返回 null */
 export function parseEmotionTagBody(body) {
-    const match = TAG_BODY.exec(String(body ?? ''));
+    const source = String(body ?? '');
+    // 保留原英文子表情与无效强度容错；完整可读名称走下面的尾部数字解析。
+    const legacy = TAG_BODY.exec(source);
+    if (legacy && (!legacy[2] || !legacy[3] || /^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$/.test(legacy[3])
+        || /^(?:[em][a-f0-9]+)(?:[+,，](?:[em][a-f0-9]+|nod|shake|tilt|cheer|bow))*$/i.test(legacy[2]))) {
+        const emotion = normalizeEmotion(legacy[1]);
+        return emotion ? { emotion, variant: legacy[2] ? legacy[2].toLowerCase() : null, intensity: clampIntensity(legacy[3], 0.7) } : null;
+    }
+    const match = /^\s*emo\s*[:：]\s*([^\s/<>]+)\s*\/\s*([^<>\r\n]+?)\s*$/i.exec(source);
     if (!match) return null;
     const emotion = normalizeEmotion(match[1]);
     if (!emotion) return null;
-    return { emotion, variant: match[2] ? match[2].toLowerCase() : null, intensity: clampIntensity(match[3], 0.7) };
+    const tail = /\s+([+-]?(?:\d+(?:\.\d+)?|\.\d+))$/.exec(match[2]);
+    const variant = (tail ? match[2].slice(0, tail.index) : match[2]).trim();
+    if (!variant || /[!]/.test(variant)) return null;
+    return { emotion, variant: variant.toLowerCase(), intensity: clampIntensity(tail?.[1], 0.7) };
 }
 
 /**
@@ -141,8 +152,26 @@ export function createEmotionTagScanner() {
             let nextAt = -1;
             let opener = null;
             for (const candidate of OPENERS) {
-                const at = buffer.indexOf(candidate, cursor);
-                if (at !== -1 && (nextAt === -1 || at < nextAt)) { nextAt = at; opener = candidate; }
+                let searchFrom = cursor;
+                while (searchFrom < buffer.length) {
+                    const at = buffer.indexOf(candidate, searchFrom);
+                    if (at === -1) break;
+                    // 反引号紧邻包裹的字面量（如 `<think>`）不开启区域
+                    if (buffer[at - 1] === '`' || buffer[at + candidate.length] === '`') {
+                        searchFrom = at + candidate.length;
+                        continue;
+                    }
+                    // 思维链标签要求位于行首（左侧仅空白），避免正文句中提及 `<think>` 时吞没整条回复
+                    if (candidate === '<think>' || candidate === '<thinking>') {
+                        const lineStart = at === 0 ? 0 : buffer.lastIndexOf('\n', at - 1) + 1;
+                        if (!/^[ \t]*$/.test(buffer.slice(lineStart, at))) {
+                            searchFrom = at + candidate.length;
+                            continue;
+                        }
+                    }
+                    if (nextAt === -1 || at < nextAt) { nextAt = at; opener = candidate; }
+                    break;
+                }
             }
             if (nextAt === -1) {
                 const keep = final ? 0 : heldTailLength(buffer.slice(cursor), OPENERS);
