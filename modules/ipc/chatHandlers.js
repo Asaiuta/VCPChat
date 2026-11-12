@@ -165,6 +165,7 @@ function omitUnsetOptionalModelParams(modelConfig = {}) {
  * @param {function} context.startSelectionListener - Function to start the selection listener.
  */
 let ipcHandlersRegistered = false;
+let registeredMainWindow = null;
 const flowlockClaimLocks = new Map();
 const vcpStreamTasks = new SenderTaskRegistry({ label: 'vcp-stream-tasks' });
 const INTERRUPT_TIMEOUT_MS = 5000;
@@ -203,6 +204,10 @@ function sanitizeFlowlockRequest(request) {
 }
 
 function initialize(mainWindow, context) {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+        registeredMainWindow = mainWindow;
+    }
+
     const {
         AGENT_DIR,
         USER_DATA_DIR,
