@@ -4,7 +4,7 @@
 
 **这个 README 是「现在完成了吗」的唯一答案面。** 任何进度数字、任何阶段状态，只在这里写一次；其余文档引用它，不复制。看到别处的数字与这里不一致，以这里为准，并把那一处改掉。
 
-最后更新：2026-11-08（未知触摸已增加持久隔离：旧RPC退出或宿主重启不能清除，显式恢复还需原设备新启动证明。MuMu真实故障与离线回归见下表；生产不自动重启或发送CANCEL。此前固定时长持续运行属于修复前源码，不继承至本版。`ui-task-v20 / ui-elements-v11 / ui-predicates-v2` 保留原阈值、预算和完成契约；真实模型/真实 App 扩展仍待进行。Legado r21 属于 v18 历史冻结字节，不覆盖 v20；各族仍 `calibrated:false`。search-v9、toggle-v1、route-v1 分开准入）。
+最后更新：2026-11-12（M4.1 人工接管已从快照式改为实时 scrcpy control：`takeover-refresh`/`takeover-input` 删除，改为 `takeover-touch`/`takeover-key` 单向流，见下表 M4 行。此项只有隔离浏览器与离线证据，未做真机与真实 Electron 批准。此前 2026-11-08 的未知触摸持久隔离、`ui-task-v20 / ui-elements-v11 / ui-predicates-v2` 阈值与预算、Legado r21 归属 v18、各族 `calibrated:false` 与 search-v9/toggle-v1/route-v1 分开准入均不变）。
 
 ---
 
@@ -24,7 +24,8 @@
 | 旋转 / 方向切换 | **真机通过 8/8**（2026-11-05 夜间） | `scripts/verify-android-rotation.cjs --suite`；[旋转验收](2026-11-05-rotation-acceptance.md) | 单 ROM；横屏下仅验 9/14 |
 | M2.6 策略与呈现 | **真机通过**：原生批准/交还 4/4，结构关系与 Collect 5/5 | [人工交互](../../tests/android-human-interaction.test.js)、[无OCR流程](../../tests/android-no-ocr-workflows.test.js)；[本轮验收](2026-11-05-device-acceptance.md) | typed intent 暂缓；批准按钮由真人在现场点击，不可合成 |
 | M3 视觉中间层 | **未开工（零实现）** | 无 | 硬前置未闭；OCR/模板一行代码都没有 |
-| M4 人机协同 | **首批已集成、离线及隔离浏览器验证**：M4.1默认屏显式设备、原生批准能力、socket写会话/epoch、真实排干、有限快照点击/滑动/按键；M4.0历史原生交互已通过；M4.2 传输层已实现并离线验证（剩公开诊断与别名契约），M4.3 跨设备凭据边界未收口 | [首批接管记录](2026-11-06_android-m4-takeover.md)；[lease](../../tests/android-takeover-lease.test.js)、[Service](../../tests/android-takeover-service.test.js)、[HTTP/WS](../../tests/android-takeover-channel.test.js)、[viewer](../../tests/android-takeover-viewer.test.js) | 接管未真机/真实Electron批准；临时全局门阻止所有Agent与管理，canonical identity、跨进程、多屏、连续pointer/scrcpy control未做 |
+| M4 人机协同 | **首批已集成、离线及隔离浏览器验证**：M4.1默认屏显式设备、原生批准能力、socket写会话/epoch、真实排干；**实时输入已改为 scrcpy control 通道**（见下一行），快照式 refresh/input 已删除；M4.0历史原生交互已通过；M4.2 传输层已实现并离线验证（剩公开诊断与别名契约），M4.3 跨设备凭据边界未收口 | [首批接管记录](2026-11-06_android-m4-takeover.md)；[lease](../../tests/android-takeover-lease.test.js)、[Service](../../tests/android-takeover-service.test.js)、[HTTP/WS](../../tests/android-takeover-channel.test.js)、[viewer](../../tests/android-takeover-viewer.test.js) | 接管未真机/真实Electron批准；临时全局门阻止所有Agent与管理，canonical identity、跨进程、多屏未做 |
+| M4.1 实时人工接管 | **已集成、离线及隔离浏览器验证**：`control=true clipboard_autosync=false` 的 scrcpy control socket；pointer 按帧合并 move、pointer capture、拖出画面夹边、方向变化补发抬起；返回/主页/最近任务单次按键；会话期约每秒采样前台包，3 秒内允许样本才放行；成功不回应、失败回报一次 | [探针记录](../../artifacts/android-takeover-live-2026-11-12/result.json)；[隔离浏览器夹具](../../scripts/test-android-takeover-browser.cjs)；[viewer-takeover](../../VCPDistributedServer/Plugin/AndroidController/lib/viewer-takeover.js)；[takeover-channel](../../VCPDistributedServer/Plugin/AndroidController/lib/takeover-channel.js) | 未真机、未真实 Electron 批准；文本/剪贴板/多指/副屏未开放；socket 写入只算已派发，无设备 ACK；包策略每秒采样存在窗口期，非逐写权威 |
 | M4.5 后台虚拟屏 | **P0 技术可行性单机通过，生产未接入**：focus1 候选不抢焦点（20/20）；在因果判据下，生产 u2 carrier 按 display 读到虚拟屏元素树，加上 scrcpy control 触摸，F3W 矩阵 20/20（用户全程使用手机，carrier p50 64ms） | [焦点修复报告](2026-11-06_android-m4-focus-report.md)；[P0真机报告](2026-11-06_android-m4-p0-report.md)；[冻结协议](../../scripts/android-m4/README.md) | P0原失败保留；首批矩阵因物理屏外部变化0/1/19中止。未接入生产路径：A3 语义树（生产 uiautomator dump 仍只取活动窗口；F3W 多根读树 20/20 与 control 触摸 22/22 均为研究靶场内验证，见[焦点修复报告](2026-11-06_android-m4-focus-report.md)）、生产 control socket 输入、IME/PASTE、同App迁移、权限弹窗、跨ROM；研究靶场已卸载并复核无残留 |
 | M5 长任务与生态 | **受限切片继续完善，完整准入未通过**：原靶场复验 8/8；独立读取改用单次采样进程和有界完整树重采 | [独立采集复验](2026-11-06_m5-independent-verification-report.md)；[前批稳定性](2026-11-06_m5-stability-report.md)；[生产路径测试](../../tests/android-task-executor.test.js) | 最新v5固定20次：独立匹配20/20、联合通过19/20；1次任务UI_CONTEXT_CHANGED，第二App未扩展 |
 | M5 上下文差异证据 | **已集成、离线验证**：UI_CONTEXT_CHANGED/上下文不明附封闭词表维度名，完成阶段逐样本谓词与容器内外HMAC摘要；完成等待仍为整页稳定（判断与v6准入条件见报告） | [记录](2026-11-06_m5-context-diff-report.md) | 限定回归1865/1865（113文件，不与1952混比）；未真机，生产已变，v5 19/20不覆盖本版 |
@@ -80,7 +81,9 @@
 | J0.1/J5.3/J1.2续批限定回归 | **271/271 pass，0 fail/cancel/skip**，exit 0，69.088s | 2026-11-07 | 15文件；新增模型证据、最大预算容量和stale恢复边界；[最终日志](../../artifacts/android-jev-j12-2026-11-07/final-tests.log)、[选择集](../../artifacts/android-jev-j12-2026-11-07/final-selection.json)、[续批记录](2026-11-07_jev-evidence-recovery.md)；最大预算夹具269038字节/394事件，512KiB上限和4096字节终止预留不变；无上游请求/真机，不代表校准或完整J系列准入 |
 | J系列首批完成契约限定回归 | **240/240 pass，0 fail/cancel/skip**，exit 0，69.407s | 2026-11-07 | 13文件，含22项新增完成契约/窗口/轨迹用例；rules/shadow/jev真实Service路径、替身XML/模型及独立虚拟时钟；[最终日志](../../artifacts/android-jev-j1-2026-11-07/focused-final.log)、[选择集](../../artifacts/android-jev-j1-2026-11-07/test-selection.json)、[首批记录](2026-11-07_jev-j1-completion.md)；非全仓、无上游请求/真机，不代表J0完整或Jev校准 |
 | M4.1首批接管限定回归 | **2113/2113 pass，0 fail/cancel/skip**，exit 0，77.989s | 2026-11-06 | 128测试文件：Android/ADB/scrcpy/UI graph/GlobalJev/jev-client/分布式取消；[日志](../../artifacts/android-takeover-2026-11-06/regression-accepted.log)，[选择集与内容摘要](../../artifacts/android-takeover-2026-11-06/after.json)；非全仓、非真机；并行UI变更原样保留 |
-| M4.1隔离浏览器 | **通过**：同源真实HTTP/WS/Sharp截图→开始→点击→返回→刷新→结束→reload仍只读；fixture点击/按键/批准各1次 | 2026-11-06 | [截图](../../artifacts/android-takeover-2026-11-06/browser-takeover.png)；设备传输与原生批准为替身，不代表真实Electron dialog/手机通过；[记录](2026-11-06_android-m4-takeover.md) |
+| M4.1隔离浏览器（快照式，已删除） | **通过**：同源真实HTTP/WS/Sharp截图→开始→点击→返回→刷新→结束→reload仍只读；fixture点击/按键/批准各1次 | 2026-11-06 | [截图](../../artifacts/android-takeover-2026-11-06/browser-takeover.png)；设备传输与原生批准为替身，不代表真实Electron dialog/手机通过；[记录](2026-11-06_android-m4-takeover.md) |
+| M4.1 实时接管限定回归 | **92/92 pass，0 fail/skip**，exit 0，5.145s | 2026-11-12 | 5文件：lease、Service、HTTP/WS、viewer、viewer-presentation；全为替身设备与替身 DOM，不含真机 H.264 与真实 Electron 批准 |
+| M4.1 实时接管隔离浏览器探针 | **DONE，exit 0**：批准→down/move/up 3 次注入坐标正确→back 键码 4 成对→非法键与画幅不符各拒一次→结束 epoch 前进回 idle | 2026-11-12 | [结果](../../artifacts/android-takeover-live-2026-11-12/result.json)、[探针](../../artifacts/android-takeover-live-2026-11-12/probe.cjs)；真实 Service + 真实 HTTP/WS + 真实坐标换算，设备传输、scrcpy control 与原生批准为替身；帧为 JPEG 回退，H.264 控制链未在真机跑过 |
 | M4专项离线核查 | **319 tests / 319 pass / 0 fail**，exit 0，4.098s | 2026-11-05 | 17个测试文件；mock/harness，不含真实对话框、双设备或虚拟屏；[日志](../../artifacts/android-m4-research-2026-11-05/offline-tests.log) |
 | 本轮限定 Android+宿主接缝离线回归 | **1845 tests / 1845 pass / 0 fail**，exit 0，11.159s | 2026-11-05 M5 首批 | 无取消/跳过；Android/ADB/scrcpy/frame/Jev/分布式取消与两套CLI；非全仓测试，不与历史1925分母混比；[日志](../../artifacts/android-m5-2026-11-05/offline-final.log) |
 | 独立窗口接入后限定 Android+宿主接缝离线回归 | **1967 tests / 1967 pass / 0 fail**，exit 0，16.802s | 2026-11-05 | 无取消/跳过；命令覆盖含新增窗口/目录/展示/启动权限及既有 Android/ADB/流/Jev/分布式测试，不与先前1845分母混比；[日志](../../artifacts/android-display-window/regression.log) |
@@ -135,7 +138,8 @@ J0.2 当前入口：[通用循环冻结协议](2026-11-07_jev-ui-task-protocol.m
 | [android-controller-competitive-gap-2026-11.md](android-controller-competitive-gap-2026-11.md) | 与 u2 / Appium / Maestro / scrcpy / droidrun 的逐维对照（G1–G13、H1–H7） | 要判断「这算不算落后」时 |
 | [android-virtual-display-feasibility.md](android-virtual-display-feasibility.md) | 后台虚拟屏可行性：外部事实、三条路线、探针命令与判据 | 做 M4.5 时 |
 | [2026-11-05_android-m4-research.md](2026-11-05_android-m4-research.md) | M4源码调研、协议修正、接管状态机、跨设备与虚拟屏准入（历史快照） | 决定M4顺序或评估M5所有权时 |
-| [2026-11-06_android-m4-takeover.md](2026-11-06_android-m4-takeover.md) | M4.1默认屏首批实现、排干/未知隔离/有限快照交互、离线和浏览器证据 | 使用接管或准备真实设备验收时 |
+| [2026-11-06_android-m4-takeover.md](2026-11-06_android-m4-takeover.md) | M4.1 默认屏首批实现、排干/未知隔离、**已删除的快照式交互**与当时证据（历史） | 追溯旧协议或对比本批改动时 |
+| [2026-11-12_android-m4-live-takeover.md](2026-11-12_android-m4-live-takeover.md) | **M4.1 实时改动**：scrcpy control 通道、坐标缩放/抬起补偿/按键白名单、本轮隔离浏览器探针结果与未验证清单 | 使用人工接管、准备真机或真实 Electron 验收时 |
 | [android-m2-device-validation.md](android-m2-device-validation.md) | M2 真机矩阵记录 | 复核 M2 结果时 |
 | [android-m15-device-validation.md](android-m15-device-validation.md) | M1.5 真机矩阵记录 | 复核 M1.5 结果时 |
 | [android-performance-baseline.md](android-performance-baseline.md) | Observe / 流性能基线与复采数字 | 谈性能时 |
