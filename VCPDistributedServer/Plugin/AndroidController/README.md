@@ -2,7 +2,7 @@
 
 插件接受 `Describe / Observe / ExecuteStep / RunTask / Manage`。`RunTask` 是新增实验性宿主任务入口；原子动作仍统一放入 ExecuteStep.action，截图使用 Observe mode=image，设备管理使用 Manage。旧顶层动作别名已删除，不提供兼容转译。工具发现沿用 VCPToolBox 的 `{{VCPDynamicTools}}`；联网搜索、文档处理与主机维护使用已有工具，不在安卓插件中复制实现。
 
-**当前状态以[文档状态表](../../../docs/android-controller/README.md)为准。** M2有固定portrait靶场历史证据；本轮新增结构关系、人工确认、Handoff、Collect与滚动可见性契约，不沿用旧代码的真机结论。
+**当前状态以[文档状态表](../../../docs/android-controller/README.md)为准。** M2 有固定 portrait 靶场真机通过记录（2026-11-05 批次 14/14，档位见状态表）；本轮新增结构关系、人工确认、Handoff、Collect与滚动可见性契约，不沿用旧代码的真机结论。
 
 **M3 前收口状态：** 分源、上下文/epoch、完整布局stable、分层摘要、策略门与远端owner已接入；可信逐次批准/Handoff有单机固定靶场证据。数字、跨ROM与环境准入欠账只看[状态表](../../../docs/android-controller/README.md)，不沿用旧代码的通过结论。M3 OCR/模板、安装App新后端与全窗口输入未交付。
 
@@ -12,27 +12,27 @@
 
 从应用启动台、常用应用抽屉或 V 桌面的「安卓」打开独立显示屏。主页面只保留标题栏和视频画面；标题栏齿轮进入独立设置页，分为「画面」「连接」「控制器」「状态」。显示方式、画质、重连收在「画面」，配对与连接收在「连接」，自动唤醒、输入与应用策略收在「控制器」，实际分辨率、帧率、延迟和帧信息收在「状态」。返回画面或按 Esc 关闭设置，不重复建立正在使用的视频连接；「重连画面」则明确重新建立连接。
 
-独立窗口使用 VCPChat 自绘标题栏与最小化 / 最大化或还原 / 关闭按钮，不使用 Electron 原生标题栏覆盖层。标题栏按钮样式、设置控件样式和设计 token 直接取自项目现有样式文件，并应用当前主题与明暗模式；不另建一套配色或原生控件外观。人工接管入口收在标题栏手形菜单中，默认关闭，不额外占据视频高度。仅暴露受限的窗口适配接口；窗口控制由隔离 preload 的固定消息处理，不向投屏网页暴露通用 Electron API。
+独立窗口使用 VCPChat 自绘标题栏与最小化 / 最大化或还原 / 关闭按钮，不使用 Electron 原生标题栏覆盖层。标题栏按钮样式、设置控件样式和设计 token 直接取自项目现有样式文件，并应用当前主题与明暗模式；不另建一套配色或原生控件外观。人工接管为标题栏单一开关（手形图标：带斜线为未启用，高亮为已启用），默认关闭，不额外占据视频高度。仅暴露受限的窗口适配接口；窗口控制由隔离 preload 的固定消息处理，不向投屏网页暴露通用 Electron API。
 
 「视频分辨率」提供原始分辨率和按短边选择的 540p / 720p / 1080p / 1440p / 2160p。例如源画面为 1080 × 2400 时，720p 预计为 720 × 1600，而不是长边 720 px。读取有效源屏幕尺寸后等比缩小，不拉伸、不裁切、不放大，不修改手机分辨率；横竖屏沿用同一短边档位。设置中显示预计宽高，编码器对齐后的实际视频宽高以「状态」为准。旧长边配置会显示为「旧配置 · 长边 ≤ … px」，修改帧率或码率不会顺手改变原有分辨率策略。
 
 选择帧率上限、目标码率和分辨率后点击「应用」。画质与显示方式保存在 AppData 的 `android-display-preferences.json`，重新打开窗口或重启后保留；应用会短暂重启共享 H.264 流，其他查看窗口也会受影响；JPEG 兼容画面不受这些参数控制。新 HTTP 字段 `maxShortEdge` 为 `0`（原始）或 `180..2160` 安全整数，与旧 `maxSize` 互斥；旧 `maxSize` API 和环境配置仍可用。短边模式若无法读取源尺寸会明确报错，而不以错误尺寸假装成功。
 
-「恢复默认显示设置」将画质与显示方式在同一次原子保存中恢复为完整显示、30 fps、2 Mbps、长边 540 px，并沿既有视频切换流程应用。保存失败保留旧配置；编码器重启失败会明确提示兼容画面回退，已保存的默认值仍供下次启动使用。
+「恢复默认显示设置」将画质与显示方式在同一次原子保存中恢复为完整显示、30 fps、2 Mbps、长边 540 px（出厂默认仍写旧 `maxSize` 档，见 `lib/display-preferences.js`），并沿既有视频切换流程应用。保存失败保留旧配置；编码器重启失败会明确提示兼容画面回退，已保存的默认值仍供下次启动使用。
 
 「控制器」提供自动唤醒、剪贴板粘贴方式、禁止访问／只读应用列表与逐次操作确认。「连接与高级选项」提供 ADB 路径、默认设备、命令超时、显示端口与常驻控件服务；「兼容画面」提供 JPEG／PNG 格式、JPEG 质量、刷新间隔、最大宽度和采集方式。这些选项保存到插件原有 `config.env`，重启 VCPChat 后生效；当前连接和在途任务保持原配置。保存按版本检查并原子替换，冲突或失败保留界面草稿，显式「重新读取」会放弃草稿。显示偏好独立于这些启动配置，已保存画质优先于环境中的 H.264 默认值。
 
 控制器设置仅由桌面独立设置窗口的受限 IPC 提供，普通浏览器查看器不提供配置文件写入。系统能力授权按钮跳转到主窗口的「Android 系统授权」，复用分设备风险确认和授权保存，不新增授权副本；包策略仍独立约束通用操作。`LOOM_APP_ID` 保留在插件配置中。
 
-窗口在首帧和横竖屏比例变化时自动贴合。手动调整大小后保持用户尺寸，也可在设置中点击「贴合窗口」返回画面并恢复；最大化或全屏时不自动缩放。设置打开期间不自动调整窗口大小。「适合宽度」可滚动查看超出窗口的画面。无设备时显示简短空状态，可进入连接设置，不自动扫描或连接。此前画质与布局的验证范围见[历史记录](../../../docs/android-controller/2026-11-05_android-display-quality-report.md)；本次布局以当前实现为准。
+窗口在首帧和横竖屏比例变化时自动贴合。手动调整大小后保持用户尺寸，也可在设置中点击「贴合窗口」返回画面并恢复；最大化或全屏时不自动缩放。设置打开期间不自动调整窗口大小。「适合宽度」可滚动查看超出窗口的画面。无设备时显示简短空状态，可进入连接设置，不自动扫描或连接。此前画质与布局的验证范围见[历史记录](../../../docs/android-controller/2026-11-05_android-display-quality-report.md)——该轮为「最长边」模型且设置不持久化，两项语义已被本节短边档位与持久化取代，其验证结论不外推到现行模型；本次布局以当前实现为准。
 
-## 人工接管（experimental，默认屏）
+## 人工接管（experimental，默认屏，实时）
 
-标题栏手形菜单选择「开始接管」，在电脑原生对话框批准后操作。只绑定当前显示的明确设备；没有可信宿主批准服务时不可用。开始会停止原 Agent/M5 调用并等待真实在途操作排干，未知设备保持隔离，不强行交接。最长十分钟，结束、关窗、断线或超时均撤销会话，不自动恢复原 AI 任务。
+点击标题栏手形开关启用，在电脑原生对话框批准后，直接在实时视频上按下、拖动、抬起；再次点击即停用。只绑定当前显示的明确设备，且需要 H.264 画面的 scrcpy 控制通道已就绪；没有可信宿主批准服务时不可用。开始会停止原 Agent/M5 调用并等待真实在途操作排干，未知设备保持隔离，不强行交接。最长十分钟，结束、关窗、断线或超时均撤销会话，不自动恢复原 AI 任务。
 
-首版展示独立「接管快照，操作后刷新」，支持点击、100–1500ms有限滑动、返回/主页/最近任务。快照十四秒有效，加载与尺寸校验完成才可操作，每次输入后重新采图。过期/旋转/上下文变化须刷新，直播画面不能当作可操作坐标。回执只报已派发，不声称设备或业务完成；派发后截图失败不会重试原动作。
+输入经 scrcpy control socket 注入（`control=true clipboard_autosync=false`）：pointer 按帧合并 move，使用 pointer capture，拖出画面时夹到边缘；返回/主页/最近任务为单次按键。坐标按当前显示帧像素上报，服务端按编码帧缩放；画面方向变化时抬起当前手势并要求重新按下。会话结束、断线、失焦或控制通道丢失时补发抬起。socket 写入只算已派发，没有设备 ACK，不声称业务完成。
 
-现有包拒绝/只读/敏感动作策略仍有效，批准接管不覆盖逐次确认。首版不开放文本、剪贴板、长按、连续pointer或副屏。为防连接别名绕过，接管期间临时全局拒绝其它设备的Agent操作及连接管理；不代表跨主机或外部ADB客户端互斥。阶段与验证范围见[当前状态](../../../docs/android-controller/README.md)及[接管记录](../../../docs/android-controller/2026-11-06_android-m4-takeover.md)。加载新后台需要重载插件宿主/重启 VCPChat，仅刷新旧viewer不替换已加载Service。
+禁止访问／只读应用策略仍有效：会话期间约每秒采样一次前台包，新按下与按键要求 3 秒内的允许样本，命中限制时抬起当前手势并提示。人工接管由用户本人操作，逐次确认（confirmEveryWrite）与敏感词确认由会话批准覆盖，不适用于实时输入。首版不开放文本、剪贴板、多指或副屏。为防连接别名绕过，接管期间临时全局拒绝其它设备的Agent操作及连接管理；不代表跨主机或外部ADB客户端互斥。历史快照式首批见[接管记录](../../../docs/android-controller/2026-11-06_android-m4-takeover.md)。加载新后台需要重载插件宿主/重启 VCPChat，仅刷新旧viewer不替换已加载Service。
 
 ## Describe：按需读取参数
 
@@ -79,7 +79,93 @@ M2 实验性元素图使用 `mode=image,target=element`，与 `region`、`target
 
 `mode=api` 传 `capability=github-public-issue`、`params={owner,repo,number}`，不访问设备。固定 GitHub HTTPS 匿名GET，无任意URL、凭据、重定向、写入或自动GUI回退。默认5秒、最多15秒、响应上限256KiB。PR closed 不代表 merged。
 
-## RunTask：受限宿主搜索任务（experimental）
+## RunTask：受限宿主任务（experimental）
+
+### 通用 UI 任务循环
+
+`intent=ui_task` 允许 Jev 从当前可见控件中自主选择导航、填写、点击、滚动、返回、键盘提交、长按和白名单内启动 App。目标由 `goal` 指定，输入只能选择调用方提供的具名值。默认预算为 120 秒、16 次写动作、256 次观察和 32 次模型调用；可用 `operations` 限制动作集合。
+
+```json
+{
+  "command": "RunTask",
+  "task": {
+    "serial": "YOUR_DEVICE_SERIAL",
+    "package": "io.legado.app.release",
+    "intent": "ui_task",
+    "decision": "jev",
+    "goal": "搜索魔女之旅，找到作者为白石定规的结果，不打开或收藏",
+    "inputs": { "query": "魔女之旅" },
+    "operations": ["Tap", "Fill", "Scroll", "Back", "ImeAction"],
+    "loading": { "id": "io.legado.app.release:id/fb_stop" },
+    "completion": { "all": [
+      { "type": "text", "text": { "id": "io.legado.app.release:id/search_src_text", "inputRef": "query" } },
+      { "type": "row", "id": "io.legado.app.release:id/recycler_view", "fields": [
+        { "id": "io.legado.app.release:id/tv_name", "equals": "魔女之旅", "normalize": "NFC_trim" },
+        { "id": "io.legado.app.release:id/tv_author", "equals": "白石定规", "normalize": "NFC_trim", "stripPrefix": "作者：" }
+      ] }
+    ] },
+    "budget": { "timeoutMs": 120000, "maxActions": 3, "maxObservations": 96, "maxModelCalls": 8 }
+  }
+}
+```
+
+`completion.all` 支持 `visible`、`absent`、`checked`、精确 `text` 和同一直接结果行 `row`。每个目标、row字段及loading均可使用完整`id`，或`selector`加可选`package`（默认任务包）：selector支持精确text/desc/class/role/id及一层within/childOf/siblingOf/hasDescendant。依据完整原始树检查，隐藏重复仍算歧义；关系锚点缺失不能证明absent，多个row字段不能复用同一原始节点。模型 Done 后仍需宿主两次稳定读回；未提供检查器时返回 `unverified`。显式字段/inputRef 绑定会限制填写候选；顶层text/inputRef声明字段验证后跨页返回，值丢失或出现可见歧义即TASK_PROGRESS_LOST，不自动重填，字段暂时不在当前页面不作为丢失证据；无 ID 或重复 ID 的控件用新鲜快照索引绑定，Fill 仍须 RPC 唯一性与精确读回。可选 `loading.id` 或 `loading.selector` 声明后台工作进行中的标记。加载尚未满足目标或页面未稳定时，由宿主算法逐段进行最多五秒的只读观察，只消耗原观察预算和总截止，不调用模型；页面稳定且加载结束或原目标已满足后再交 Jev 决策。目标已出现时仍需 Done 与原两次稳定核验。未知写停止，已接受的相同页面/动作不重放。匿名及同名容器保留各自的局部引用，模型可辨认不同列表行中的字段关系。
+
+此模式会向已配置的 Jev 发送目标、具名输入及有界非密码界面文字/字段值，轨迹仅保存引用与摘要。仅 display 0，`allowedPackages` 默认当前包，`assistance` 默认 `none`，可显式选 `main_agent` 或 `human`；仍为 `calibrated:false`。协议与版本边界见 [通用循环冻结协议](../../../docs/android-controller/2026-11-08_jev-ui-task-protocol-v20.md)。
+
+`ui-task-v20` 的协助仅由有效低置信或显式 escalate 触发，同任务最多一次。主 Agent 最长10秒、Handoff最长60秒，均计入原总截止；主 Agent只可 select 当前绑定候选、reobserve 或 stop，不可生成参数、修改目标或宣布成功。它沿用发起请求实际模型，并接收有界目标及非密码候选描述；轨迹继续只存摘要/引用。交还后复采，原窗口上下文必须一致，可见已匹配输入不得丢失；未知写不升级、不重放。v20仅做离线验证，v18真机成功不继承到新代码。
+
+### 类型化双字段路线查询（J4a）
+
+```json
+{
+  "command": "RunTask",
+  "task": {
+    "serial": "YOUR_DEVICE_SERIAL",
+    "package": "com.demo",
+    "intent": "route_search",
+    "decision": "jev",
+    "inputs": { "origin": "起点", "destination": "终点" },
+    "targets": {
+      "form": "com.demo:id/route_form",
+      "origin": "com.demo:id/route_origin",
+      "destination": "com.demo:id/route_destination",
+      "submit": "com.demo:id/route_go"
+    },
+    "completion": { "type": "visible", "id": "com.demo:id/route_results" }
+  }
+}
+```
+
+只支持前台同包、display 0、同窗口/Activity 内的声明表单。五个 ID 必须互异，字段须唯一、安全、完整可见的非密码 TextField；全树不允许其它输入框，焦点只能属于两个字段或提交按钮。每个值非空且不超过 2000 字符，拒绝 C0/C1 控制字符；其它空白与 Unicode 原样保留。
+
+宿主稳定读取初态，正确预填字段直接验证；Jev 选择剩余字段的填写顺序，实际值和 `inputRef` 由宿主固定，输入值不发给 Jev 或主 Agent。每字段最多一次 Fill，RPC 精确读回与原始树两次稳定匹配缺一不可。已验证字段缺失、变值或不安全立即停止。提交前复核两字段、焦点及结果未预存，最多一次 Tap；后置只证明指定 UI 标记稳定出现，不证明路线内容或质量。
+
+`route-v1` / `route-feedback-v1` / `route-completion-v1` 未校准，默认 60000ms / 3 动作 / 96 观察 / 6 模型，最多六轮。每次 Fill 的五秒后置从派发前开始；提交验证与最终核验共享提交前五秒截止。主 Agent/Handoff 最多一次，沿用原预算和已验证进度；unknown 不重放。不支持导航、滚动、IME、联想选择或任意表单。详见[冻结契约](../../../docs/android-controller/2026-11-07_jev-j4-route-contract.md)与[状态表](../../../docs/android-controller/README.md)。
+
+### 单个应用内布尔开关（J3.3a）
+
+```json
+{
+  "command": "RunTask",
+  "task": {
+    "serial": "YOUR_DEVICE_SERIAL",
+    "package": "com.demo",
+    "intent": "set_toggle",
+    "decision": "jev",
+    "targets": { "toggle": "com.demo:id/notifications" },
+    "inputs": { "checked": false }
+  }
+}
+```
+
+宿主固定完成条件为该目标的 `checked` 值，不接受额外 `completion/loading/searchActions`。只支持前台同包、同窗口/Activity、display 0 的单个开关，不能导航到设置页；系统设置仍使用已有 `System` 能力及授权。
+
+原始树必须证明目标唯一、完整可见、启用、可点击且可勾选，`checked` 必须明确为 `true` 或 `false`。缺失值不会转换为 false；隐藏重复 ID、密码/编辑目标与隐藏/禁用/交互祖先均拒绝。连续两次稳定读回已满足时零写、零模型；否则 Jev 只选绑定的 `c0/Tap` 或 `escalate`，宿主复采后最多点击一次，再独立稳定读回两次。完成仅证明声明的 UI 状态，不证明持久化、通知送达或其它业务效果。
+
+`toggle-v1` / `toggle-completion-v1` / `toggle-feedback-v1` 均为未校准实验策略。默认 60000ms、1 动作、64 次观察、4 次 Jev，最多 4 轮；`maxActions` 固定为 1，`maxModelCalls=0` 只允许零模型路径。点击前启动的五秒后置窗口同时约束动作验证和最终核验，可信未派发 stale 可重决策，未知写不重试。显式 `assistance:main_agent|human` 复用单次升级与原预算/租约，交还复采。布尔当前值和目标值可外发，屏幕标签与原始树不外发。详见[冻结契约](../../../docs/android-controller/2026-11-07_jev-j33-toggle-contract.md)与[状态表](../../../docs/android-controller/README.md)。
+
+### 搜索任务
 
 ```json
 {
@@ -122,7 +208,11 @@ M2 实验性元素图使用 `mode=image,target=element`，与 `region`、`target
 
 `item` 要求唯一可见容器内的可见非密码后代条目，`minItems` 为 1–50（默认 1）；`itemMatchesInput` 要求至少一项原始文本包含本次输入，二者须配合 `item`。`absent` 独立可选，可引用先前的输入目标，要求对应原始节点消失；不能与正向完成 ID 相同。条目证据来自原始树，避免非点击书名折叠到可点击行后丢失；只向宿主传计数和布尔值。声明条目条件时，空结果占位容器不算预存完成，但已满足的完整完成谓词仍拒绝。这个检查证明声明的 UI 条件，不代表全文语义相关性、全部搜索结果或业务质量。
 
-生产装配由宿主注入执行器，独立插件缺服务返回 `TASK_HOST_UNAVAILABLE`。脱敏轨迹在宿主 `AppData/android-task-traces/<taskId>.jsonl`：保存参数引用、同包资源目标/后置条件、带随机内存密钥的观察摘要、决策来源、prepared/settled原子回执和独立验证；不保存查询值、原始树、模型自由输出或原始错误。轨迹事件容量按任务预算计算：`maxObservations + 9 × maxActions + 2 × maxModelCalls + 2`，全局最多362事件（不含文件头）/512KiB；预留1个终止事件及4KiB，容量耗尽返回 `TASK_TRACE_LIMIT` 并记录停止原因。逐条写入文件、不在内存累积轨迹，独占创建、不覆写；写失败停止后续动作。取消可能先返回taskId而后台仍排干/关闭轨迹；最后的prepared不代表动作未执行，更不是恢复许可。
+生产装配由宿主注入执行器，独立插件缺服务返回 `TASK_HOST_UNAVAILABLE`。脱敏轨迹在宿主 `AppData/android-task-traces/<taskId>.jsonl`：保存参数引用、同包资源目标/后置条件、带随机内存密钥的观察摘要、决策来源、prepared/settled原子回执和独立验证；不保存查询值、原始树、模型自由输出或原始错误。轨迹事件容量由 `androidTaskBudget.traceEventLimit` 按任务预算计算，当前全局最多 401 事件（不含文件头）/512 KiB；预留 1 个终止事件及 4 KiB，容量耗尽返回 `TASK_TRACE_LIMIT` 并记录停止原因。逐条写入文件、不在内存累积轨迹，独占创建、不覆写；写失败停止后续动作。取消可能先返回 taskId 而后台仍排干/关闭轨迹；最后的 prepared 不代表动作未执行，更不是恢复许可。
+
+新轨迹只接受当前 `search-v8`、`toggle-v1`、`route-v1` 决策契约；完成策略身份必填，搜索反馈只接受 `search-feedback-v4`。旧版本写入兼容已删除。升级包必须显式携带候选所属 `candidateStep` 和 `decisionContext`，不再从当前阶段猜测历史候选阶段。已有 JSONL 文件保留，不通过写入器重放或自动迁移。
+
+任务稳定等待、声明加载等待、动作后验证与普通 idle 使用同一采样期限分类：先检查取消和总期限，再把已到局部期限且无未排干请求的 `VERIFICATION_TIMEOUT` / `ADB_TIMEOUT` 转成所属阶段的业务结果。声明加载等待使用 `TASK_WAIT_TIMEOUT`；未到期和未知传输错误继续传播，超时不授权重放动作。
 
 本版没有Skill编译/复用、自动修复、持久断点、viewer接管、虚拟屏或通用任务队列。只验证所声明搜索模板，推广前仍须目标App/ROM真机准入。
 
@@ -145,9 +235,64 @@ M2 实验性元素图使用 `mode=image,target=element`，与 `region`、`target
 }
 ```
 
-复用全局 Jev 设置与宿主服务，每次请求最多2秒、零重试。固定最多8轮、2次等待；模型等待期间持有设备租约，返回后复采、最后派发前再次核对观察/epoch/TTL。任一未知写、页面失配、循环、候选歧义、预算耗尽或无法证明进度均停止，不重放。密码表单直接拒绝；缺搜索语义或唯一资源ID时不猜测目标。模型只能选宿主生成的候选，不能改变输入、完成条件或批准策略。
+复用全局 Jev 设置与宿主服务，每次请求最多2秒、零重试。固定最多8轮；可信未派发 stale 可重新决策，连续第三次停止。模型等待期间持有设备租约，返回后复采、最后派发前再次核对观察/epoch/TTL。未知写、上下文变化、循环、候选歧义、预算耗尽或无法证明进度均停止，不重放。密码表单直接拒绝；缺搜索语义或唯一资源ID时不猜测目标。模型只能选宿主生成的候选，不能改变输入、完成条件或批准策略。
 
-`search-v1` 采用最高概率≥0.9、领先差≥0.2的暂定策略，**尚未通过真实模型任务数据校准**，返回 `experimental:true`、`decisionPolicy.calibrated:false`。本轮只有注入模型响应的离线闭环证据，未调用上游模型、未操作真机。它不使既有 `Observe mode=arbitrate` 建议获得执行权。词表外页面、无资源ID控件、任意表单/导航、业务结果内容验证、Skill学习仍未交付。见[Jev循环记录](../../../docs/android-controller/2026-11-06_android-jev-loop-report.md)。
+需要等待加载时，调用方可声明 `loading: { "id": "com.demo:id/loading" }`（仅 Jev）。原始树须证明标记唯一、可见、非输入/密码控件且不可点击；标记可见时只提供 `wait/escalate`，模型只收到 `declared_loading` 类别。普通候选缺失不算加载，无依据的 wait 停止 `TASK_WAIT_UNPROVEN`。每任务最多两个窗口，每个最长5000ms、间隔200ms只读采样，标记消失且合法搜索候选出现才结束；到期 `TASK_WAIT_TIMEOUT`，第三次 `TASK_WAIT_LIMIT`。窗口共享原总截止及观察预算，不清除 stale/动作历史，成功后重新观察和决策。加载等待不证明完成，提交后的完整完成谓词仍使用原共用五秒窗口。
+
+停止回执新增 `task.escalation`：固定完成条件、输入引用、设备/包/动作约束、阶段与已验证进度、历史观察和候选关联、原子回执及消耗/剩余预算。`evidenceFreshness=historical`、`continuation=not_authorized`、`scope.policy=recheck_required`；它不能授权重跑或解除隔离。`assistance_required` 表示需要交回调用方处理，硬边界为 `hard_stop`。实际升级须显式 opt-in，见下文；停止回执仍不授权跨调用恢复。取消时外层沿既有错误回执返回，内部排干后的停止证据写入轨迹。
+
+`search-v8` 仍采用最高概率≥0.9、领先差≥0.2的暂定策略，**尚未通过真实模型任务数据校准**，返回 `experimental:true`、`decisionPolicy.calibrated:false`。阶段与证据见[当前状态](../../../docs/android-controller/README.md)及[等待/升级契约](../../../docs/android-controller/2026-11-07_jev-wait-escalation.md)。它不使既有 `Observe mode=arbitrate` 建议获得执行权。词表外页面、无资源ID控件、任意表单/导航、业务结果内容验证、Skill学习仍未交付。
+
+### 最小语义与近期验证反馈
+
+`search-v8` 保留既有精确搜索词表，新增动作仅在下述声明范围内生成。候选附 `inputRef`（Fill只能query，其余为null）及封闭语义 `role/hints/fieldRelation`。明确的既有入口/提交资源ID可以生成对应提示，普通Search标签只提供通用搜索提示；不会从敏感文字中提取人物、订单或查询语义。字段关系只证明直接原始父节点相同，不证明业务关联；hierarchy根或多个查询框不会被当成唯一表单关系。
+
+每次决策附当前观察绑定的 `decisionContext`：最多三条已独立验证动作、原查询是否已验证、最近stale/加载/交还类别、轮次与原剩余预算。预算取值是本次Jev调用前的快照，包含尚待消耗的本次调用。`screenChanged`只表示观察摘要变化，不能证明进度；未知写仍停止隔离。
+
+继续使用一个choice问题，key为 `next_<本次观察UUID去横线>`。回答必须属于这个问题，不能携带额外操作/目标/输入引用头；供应商可返回type、choice和confidence，但choice必须与分布最高项一致，confidence不参与授权。旧观察的回答即使选择同名c0也会被拒绝。宿主仍独立执行新观察、写前校验与完成验证。
+
+这些字段进入实际Jev请求、脱敏轨迹和主Agent升级白名单；原始label、类名、结构路径及查询值不外发。输入增加会增加请求字节数；离线对照只证明控制行为与信息可用性，不证明真实模型成功率改善。详见 [J2契约](../../../docs/android-controller/2026-11-07_jev-j2-contract.md)。
+
+### 可选聚焦、IME 与目标查找
+
+仅 `decision=jev` 可声明非空 `searchActions`，例如：
+
+```json
+{
+  "imeAction": "search",
+  "scroll": {
+    "command": "Scroll",
+    "container": "com.demo:id/search_list",
+    "target": "com.demo:id/query",
+    "direction": "down",
+    "maxSwipes": 3
+  }
+}
+```
+
+两项均可单独使用。`imeAction=enter|search` 在 Fill 精确读回之后，如原输入框尚未唯一聚焦，先由 Jev 选择 Tap 聚焦；只有同一安全输入框、唯一焦点及原输入匹配经新观察和最终写前复核后才能发按键。该声明使用 IME 提交，不同时生成普通提交按钮。按键 ACK 不证明搜索完成，仍由原完成谓词独立验证。
+
+`scroll.command=Scroll|ScrollUntil` 只在输入前缺少普通搜索候选时提供声明的查找动作。container/target 均须同包完整 ID，方向可为 up/down/left/right；容器原始身份唯一、可见启用且明确可滚动。目标必须是容器后代中唯一可用且符合原搜索词表的入口或查询框，并离开滚动轴两端边缘。Scroll 固定 0.6 轴长、300ms；ScrollUntil 固定 host/maxSwipes=1，不使用 RPC scrollTo 的内部多次滚动。
+
+`scroll.maxSwipes` 可选，默认1、上限4；大于1仅接受 Scroll。默认单次路径仍须找到目标才算验证成功。多屏路径每次独立观察、Jev 选择、写前复核及后置验证，始终绑定原声明目标。目标未见时，仅同一容器的安全、完整可见、唯一资源 ID 直接子节点可作锚点：至少两个共同锚点沿声明方向等量移动，且有旧锚点离开和新锚点进入，经两次连续稳定采样才允许下一轮。文字、标签、描述不证明移动。重复行 ID、无稳定锚点或整屏替换而无重叠会停止；已见页面、位置漂移和未知写也停止，不推断到达列表边界。
+
+阶段 seek/focus、固定动作及已验证历史进入 `search-feedback-v4` 轨迹。多屏反馈增加已验证次数、上限和结果类别；回执保存每任务 HMAC 位置证明，主 Agent 只收到结果类别、共同锚点数和位移，不收到锚点 ID、坐标或 HMAC。stale、主 Agent 重观察和人工交还不重置滚动次数或已见页面；每次仍消耗原动作、观察、模型、八轮与总截止预算。达到声明上限即停止，不自动扩容。外包键盘树、权限弹窗或窗口/尺寸变化仍按原上下文规则拒绝；真实键盘/App 适配须另行验收。详见 [J3.1 首批契约](../../../docs/android-controller/2026-11-07_jev-j31-contract.md) 和 [多屏契约](../../../docs/android-controller/2026-11-07_jev-multiscroll-contract.md)。
+
+### 同窗口返回搜索（J3.2a）
+
+可选声明 `searchActions.back:{from:"com.demo:id/read_only_panel",target:"com.demo:id/query"}`。宿主固定发送一次 KeyEvent back，只能作为任务首个写动作；未声明或来源标记不存在时不生成该候选。from 必须是唯一、启用、完整可见的非交互标记，整棵原始树不得含输入框、密码、editable 或 checkable 节点（包含隐藏节点），target 在返回前必须不存在。调用方需明确该面板没有待保存状态，UI 检查不能证明应用所有隐藏状态。
+
+返回后必须保持同包、同窗口/Activity，来源标记消失，指定搜索入口或输入框唯一、可用、完整可见，并经过两次稳定采样。之后的入口或 Fill 仍绑定该目标，验证后才进入正常搜索阶段。无变化、错页、来源重现、上下文改变或 unknown 均停止；错误入口点击不能被 Back 补偿，交还不重置已用动作。可信未派发 stale 可以在原预算内重决策。新增 back 阶段、固定 key/revealId 与 verified_back 反馈进入轨迹和主 Agent 白名单，来源 ID 是证据标记，不是按键的元素目标。LaunchApp、跨 Activity 导航与 LongPress 仍未接入。详见 [返回契约](../../../docs/android-controller/2026-11-07_jev-j32-back-contract.md)。
+
+### 同任务升级与人工交还
+
+Jev 任务可设置 `assistance: "main_agent"` 或 `"human"`，默认 `"none"`。只在合法概率分布低置信或明确选择 escalate 时调用，每任务合计最多一次，正常路径不调用。主 Agent 最长10秒，人工最长60秒，均包含在原总截止内；原观察、动作、模型、八轮循环和已执行目标继续累计。
+
+`main_agent` 需要同时更新 VCPToolBox：原聊天请求通过工具执行器和 WebSocket 绑定可信回调，使用实际产生工具请求的模型（包括 fallback 后的模型）。单次非流式调用，零重试、零 fallback，只发送白名单任务证据。建议仅限选择本次候选、重新观察或停止；宿主仍重新取证、检查写策略并独立验证结果。查询值、页面原文、完整聊天不进入该调用。
+
+`human` 复用宿主原生 Handoff。交还使旧凭据失效；新观察必须仍在同包/同窗口上下文，已填内容也须匹配。拒绝、超时、取消立即终止续行，底层交互未结算时租约继续保持；“继续”不证明完成或批准敏感写。viewer 接管仍取消原 Agent，不能通过 viewer 交还自动恢复本任务。
+
+缺少对应服务返回 `TASK_ASSISTANCE_UNAVAILABLE`；再次请求升级为 `TASK_ASSISTANCE_LIMIT`；非法建议为 `TASK_REPLAN_INVALID`。`counts.mainModelCalls` 是回调调用次数，`counts.mainModelRequests` 是上游报告的 HTTP 尝试次数，无法取得回执时为 `null`；两者都不表示 HTTP 成功或业务成功。轨迹保留有限模型标识、usage与耗时，缺失字段为未知。详见 [J5.2 契约](../../../docs/android-controller/2026-11-07_jev-j52-contract.md)。
 
 ## ExecuteStep：动作、验证与下一次观察
 
@@ -219,7 +364,9 @@ idle 为 experimental，当前代码待真机复验。原生 `waitForIdle(timeou
 
 明确未执行或已完整响应的普通读失败仍可受预算约束地回退 CLI；错误 payload 或完整响应解析后超过请求预算不自动等于远端未排干。写动作仅 `dispatched=false` 才允许原有受限回退：即使 `drained=true`，设备业务错误、返回 false 或迟到响应都不能授权重放。Fill 读回的派发结局未知会如实标记 `unknown`，不伪装成未派发。
 
-隔离不会被普通reconnect、销毁本地socket、停止本地adb、ping成功或人工“已停止”断言解除。恢复入口是 `Manage operation=recoverOwner` 且必须显式serial：仅本会话可信owner记录经独立消失证明返回released后才清隔离，并撤销snapshot/frame与上下文epoch；缺记录或无法证明则继续隔离。它不接受force/approval，不重放失败动作、不自动启动新业务。启动失败携带quarantined时不得回退CLI，新Service即使UI_SERVER=false也必须遵守原owner隔离。2026-11-05已通过本机owner生命周期、无线ADB重连与失联租约专项；真实在途未知写入注入仍未做，不把文件SHA当运行owner身份。
+隔离不会被普通reconnect、销毁本地socket、停止本地adb、ping成功或人工“已停止”断言解除。恢复入口是 `Manage operation=recoverOwner` 且必须显式serial：先核验可信owner已退出；存在未知触摸持久记录时，还必须证明原设备Android ID摘要匹配且boot_id已变化，否则返回 `DEVICE_INPUT_STATE_UNCERTAIN`。宿主进程重启后仍读取该记录，不能因内存owner表为空而继续派发。成功恢复撤销snapshot/frame与上下文epoch，不接受force/approval、不重放失败动作。生产不自动重启设备或发送CANCEL；用户重启原Android设备后再次调用恢复入口。启动或恢复证据不足不得回退CLI，即使UI_SERVER=false也遵守隔离。设备身份、持久化及跨进程边界见[输入恢复报告](../../../docs/android-controller/2026-11-08_android-input-recovery-report.md)，当前验证状态只在[主状态表](../../../docs/android-controller/README.md)维护。
+
+触摸RPC在派发前排他写入并同步 `android-input-recovery` 记录，成功或可信未派发才清除；false、设备执行错误和未知回执均保留。记录仅包含选择器、启动ID、Android ID摘要和随机标识，不包含原始Android ID、坐标或输入内容。读取/同步/删除失败均停止。Android ID仅用于一致性检查，不是硬件认证；同一数据目录的顺序调用可阻断设备别名绕过，但不宣称跨宿主并发全局锁或断电目录持久性。普通shell/键盘输入遵守已有触摸隔离，本轮未为其新增独立的崩溃持久化协议。
 
 owner 每5秒通过认证控制通道续约，连续30秒未续约由设备端自行退出；失效控制转发会核验归属后重建。主机退出、ADB断开或隔离会停止续约，停止/恢复仍等待独立进程与端点消失证明。该机制只适用于新版owner，不会自动清理缺少可信记录的旧版孤儿。验收与边界见[修复记录](../../../docs/android-controller/2026-11-05_android-owner-rebind-report.md)。
 
@@ -349,7 +496,7 @@ steps接受数组或JSON数组文本，1–8步；每步只允许action/expect/w
 
 ## Manage：连接与显示
 
-`operation=connect|reconnect|disconnect|startDisplay|stopDisplay|displayStatus|actionHistory|recoverOwner`。`recoverOwner`必须显式serial，按本会话owner独立消失证明解除隔离，不接受force/approval，不重放动作；证据不足继续隔离。connect 支持 mode=auto|wireless|usb、address/serial；首次配对优先用显示屏向导。startDisplay 的 open=true 复用 Loom 侧栏。管理事务与设备动作互斥，不能打断已占用设备。disconnect 先释放对应设备的RPC会话，再断开ADB；未指定设备时先释放全部会话。owner退出未证明时保留连接与恢复证据，返回 `UI_SERVER_OWNER_QUARANTINED`，不执行ADB断开。
+`operation=connect|reconnect|disconnect|startDisplay|stopDisplay|displayStatus|actionHistory|recoverOwner`。`recoverOwner`必须显式serial，核验owner独立消失；存在未知触摸持久记录时还要求同设备新启动证明，不接受force/approval，不自动重启、不发送CANCEL、不重放动作；证据不足继续隔离。connect 支持 mode=auto|wireless|usb、address/serial；首次配对优先用显示屏向导。startDisplay 的 open=true 复用 Loom 侧栏。管理事务与设备动作互斥，不能打断已占用设备。disconnect 先释放对应设备的RPC会话，再断开ADB；未指定设备时先释放全部会话。owner退出未证明时保留连接与恢复证据，返回 `UI_SERVER_OWNER_QUARANTINED`，不执行ADB断开。
 
 设备操作 `timeoutMs` 默认60000，范围1–300000，覆盖准备、排队、动作、验证及动作后观察；waitTimeoutMs 默认5000，范围1–30000，限制条件等待及 idle 等待，二者共用同一等待预算，不延长总预算。可信取消来自执行上下文，不从模型JSON接收。已派发动作不能自动回滚；无法中止的依赖排干前仍保留设备租约。ADB容量默认64，队列满立即失败，排队消耗总预算。分布式远程取消协议尚未端到端补齐。
 
@@ -397,11 +544,15 @@ ScrollUntil使用`visibility.contract=scroll-axis-interior`：目标的观察到
 
 - AndroidControllerService：四入口路由、设备选择、观察凭据及动作编排；设备执行沿用 step-runtime 的租约、预算与回执。
 - lib/expectation-wait：单个条件的有界只读轮询，一次编译选择器；沿用外层租约、取消与截止时间，成功时返回原始采样供后置观察复用。
+- lib/operation-deadline：模型、求助和人工交互共用的局部期限；单调时钟在依赖返回或失败时复核，迟到结果无效，依赖真实结束后才退出。求助轨迹写入也消耗原窗口，下游只收到剩余时间；总任务取消优先于局部超时。
+- lib/layout-evidence：布局稳定性和元素截图按节点自身可见性采集；task-port 明确排除隐藏祖先下的任务证据。两者共用原始树遍历与滚动裁剪，隐藏后代保留身份供歧义检查，不计入任务的可见结果或加载标记。
 - lib/device-network：地址/配对码解析、网络诊断与有截止时间的 LAN 发现，不访问控制器状态。
 - lib/loom-display-url：可选宿主地址同步；读取并保留已有 manifest/CSS/JS，读取失败不覆盖应用。
 - lib/stream-server：观众订阅与恢复；同 socket 共享在途就绪 Promise，probe 单飞，最后 H.264 意图撤销时停止编码器，不中断 JPEG 观众。
 
-服务 `cleanup()` 同步关闭工具、设备管理及显示启动入口，再取消并等待真实在途操作、管理事务和截图排干，最后释放资源；显式 `initialize()` 完成后才重新接收调用。已隔离设备即使在清理时成功释放 owner，也保留恢复证明，仍需 `Manage recoverOwner` 显式解除隔离。
+服务 `cleanup()` 同步关闭工具、设备管理及显示启动入口，再取消并等待真实在途操作、管理事务和截图排干，最后释放资源；显式 `initialize()` 完成后才重新接收调用。已隔离设备即使在清理时成功释放 owner，也保留恢复证明与未知触摸记录，仍需 `Manage recoverOwner` 显式核验；有触摸记录时，清理或重启宿主都不能代替原Android设备重启。
+
+普通 ExecuteStep 的批准/Handoff 与 RunTask 一样：取消或截止可以先返回调用回执，设备租约仍等宿主交互真实结束才释放。视频流掉线判断只采用成功查询中当前 scrcpy serial 的状态；查询失败保留为未知，查询期间切设备或关闭订阅会废弃旧结果。
 
 H.264 新观众和重同步只接收当前配置及可连续解码的关键帧；旧关键帧之后已有增量帧时，等待新关键帧，超时临时显示 JPEG，关键帧到达后释放 JPEG 订阅并恢复 H.264。旋转后旧配置与关键帧一起失效。流解析器按包分配独立缓冲，分片复制量随输入线性增长，消费完立即释放组包缓冲；单包上限为 16 MiB。
 
@@ -409,7 +560,9 @@ H.264 新观众和重同步只接收当前配置及可连续解码的关键帧�
 
 ## 范围与回归
 
-回归数字、真机结论与阶段档位见 [docs/android-controller/README.md](../../../docs/android-controller/README.md) 的状态表（含同日首跑 `adb-budget` 抖动的记录）。原始日志、失败轮次和代码摘要见[收口报告](../../../docs/android-controller/2026-11-05_audit-android-pre-m3-report.md)。历史32项policy/identity专项不再作为当前全量数字。
+> 本节以下 2026-11-02 → 11-04 段落是**历史批次数字**，不是当前状态；当前分母、真机结论与阶段档位只看[状态表](../../../docs/android-controller/README.md)。保留仅为追溯当时改动依据。
+
+回归数字、真机结论与阶段档位见 [docs/android-controller/README.md](../../../docs/android-controller/README.md) 的状态表。原始日志、失败轮次和代码摘要见[收口报告](../../../docs/android-controller/2026-11-05_audit-android-pre-m3-report.md)。历史32项policy/identity专项不再作为当前全量数字。
 
 2026-11-04 历史首批：**1740/1740离线通过，0失败/取消/跳过，14.213s**（完整隔离矩阵含M1.5/M2 CLI测试）；生产JS与验收runner语法检查、限定差分空白检查通过。载体改为本地SHA-256内容寻址、设备读回复核与每generation文件证据；已知不符push后仍不符拒绝，不可校验明确unknown，ADB/push错误不降格。scope=startup_file，不证明运行owner或远端已终止；能力失败缓存随世代失效，旧paste RPC迟到错误不污染新代。固定靶场idle仅由可信context hook输出已有sample/dump时间、完整摘要与有界纯几何，不加设备请求、不改稳定判据或验收断言；dumpFreshness仍unproven，真机NOT_PASSED不变。
 
@@ -419,7 +572,7 @@ H.264 新观众和重同步只接收当前配置及可连续解码的关键帧�
 
 第二轮架构收敛：**1496/1496通过，0失败/取消/跳过，14.947s**，新增34条（ADB调度18+生成选择器16）。ADB按设备串行、跨设备并行，管理命令为全局FIFO屏障；精确host只读发现可与设备并行但不跨屏障，总容量仍默认64且无闲置serial队列累积。提交参数副本固定分类与执行，避免可变argv绕过屏障。生成selector复用真实解析器确认原样可消费，无法表达的行返回`selector:null`并提示仅用新鲜`index+snapshotId`；不扩大4096条件预算、不降级成其它匹配身份。同文本ordinal按完整动作匹配全集计数，修复带ID/无ID混排指错行。预算测试仅适配VM相对依赖解析，原断言未改。未跑真机；完整边界与剩余P1见[代码审查记录](../../../docs/android-controller/android-controller-code-review.md#第二轮设备调度与可消费的选择器契约)。
 
-尚未实现：自主规划、持久化长任务、通用deep link、手机文件传输、写业务API、自动GUI回退、Jev图片/Box、常驻无障碍服务、H.264模型共享帧。VCP异步结果保存/通知不等于自动续跑Agent，不另造并行执行框架。历史真机与API证据见[P2验证记录](../../../docs/android-controller/android-p2-validation.md)，不作为本轮真机验收。
+通用 `ui_task` 已提供预算内自主导航与多步操作；尚未实现：开放式长期规划、持久化长任务、通用deep link、手机文件传输、写业务API、自动GUI回退、Jev图片/Box、常驻无障碍服务、H.264模型共享帧。VCP异步结果保存/通知不等于自动续跑Agent，不另造并行执行框架。历史真机与API证据见[P2验证记录](../../../docs/android-controller/android-p2-validation.md)，不作为本轮真机验收。
 
 M2 RPC ABI 实证：随包 APK selector 的 `PACKAGE_NAME=524288`，`INSTANCE=16777216`；两者不是同一位，不允许拿旧 INSTANCE 误位表示 packageName。`waitForIdle` 是只读、experimental 的一参 RPC，参数仅数字安全整数1–2000；idle 编排进一步限原生等待≤1500ms。真实 loopback HTTP 签名测试覆盖有效调用与本地拒绝，invalid 请求不得发 HTTP；不代表已连接真机验收。M1.5 手造 package mask 测试按此 ABI 更正，不为迁就旧测试保留错误生产掩码。
 
@@ -429,7 +582,7 @@ M2 RPC ABI 实证：随包 APK selector 的 `PACKAGE_NAME=524288`，`INSTANCE=16
 node --test tests/android-*.test.js tests/android-*.test.mjs tests/adb-*.test.js tests/frame-hub-contract.test.js tests/scrcpy-*.test.js tests/stream-recovery.test.js tests/subscriber-init.test.js tests/ui-graph.test.js tests/vision*.test.js tests/launch-app.test.js tests/focus-parse.test.js tests/auto-connect*.test.js tests/device-reconnect.test.js tests/*jev*.test.js tests/distributed-*.test.js
 ```
 
-M2（2026-11-03）最新完整隔离回归：**1425 tests / 1425 pass / 0 fail / 0 skipped，15.140s**（含M1.5/M2两套CLI安全测试33条）。覆盖选择器/元素图/idle/公共入口/真实loopback HTTP、受限正则独立参考、raw祖先、隐藏/禁用/长标签完整证据、carrier声明/CLI精确尾行、预算/取消/传输未知隔离，前台切出仍排干清传输，以及idle局部deadline耗尽后已排干ADB只读超时归unknown（提前超时/取消/STEP/UI未知仍抛）。JS语法与限定差分空白检查通过。M2最终第七轮完整真机**13/14，0未执行，NOT_PASSED**。仅动态几何idle未通过：运动前后仍存活/ticks增加，但返回verified/layout_stable；尚未记录两份采样几何，需核清往返轨迹采样重合与期望契约，不能直接声称算法漏运动或改期望盖PASS。定位/序列6项、元素图4项、其它idle3项同轮通过，进程正常cleanup/exit1；见[本轮证据](../../../docs/android-controller/android-m2-device-validation.md)；M3前仍存的可靠性短板见[对标审查](../../../docs/android-controller/android-pre-m3-gap-review.md)。新增能力保持experimental，不把隔离回归或单ROM靶场外推为普遍准入。
+M2（2026-11-03）当时完整隔离回归：**1425 tests / 1425 pass / 0 fail / 0 skipped，15.140s**（含M1.5/M2两套CLI安全测试33条）。覆盖选择器/元素图/idle/公共入口/真实loopback HTTP、受限正则独立参考、raw祖先、隐藏/禁用/长标签完整证据、carrier声明/CLI精确尾行、预算/取消/传输未知隔离，前台切出仍排干清传输，以及idle局部deadline耗尽后已排干ADB只读超时归unknown（提前超时/取消/STEP/UI未知仍抛）。JS语法与限定差分空白检查通过。M2第七轮完整真机（2026-11-03，历史轮次）**13/14，0未执行，当时记 NOT_PASSED**；2026-11-05 基线改造后已复验 **14/14**（档位见[状态表](../../../docs/android-controller/README.md)），下述 idle 归因保留为历史诊断。仅动态几何idle未通过：运动前后仍存活/ticks增加，但返回verified/layout_stable；尚未记录两份采样几何，需核清往返轨迹采样重合与期望契约，不能直接声称算法漏运动或改期望盖PASS。定位/序列6项、元素图4项、其它idle3项同轮通过，进程正常cleanup/exit1；见[本轮证据](../../../docs/android-controller/android-m2-device-validation.md)；M3前仍存的可靠性短板见[对标审查](../../../docs/android-controller/android-pre-m3-gap-review.md)。新增能力保持experimental，不把隔离回归或单ROM靶场外推为普遍准入。
 
 
 

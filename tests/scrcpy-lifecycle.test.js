@@ -6,9 +6,11 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const { EventEmitter } = require('node:events');
+const { createRequire } = require('node:module');
 
 const filename = path.resolve(__dirname, '../VCPDistributedServer/Plugin/AndroidController/lib/scrcpy-hub.js');
 const source = fs.readFileSync(filename, 'utf8');
+const productionRequire = createRequire(filename);
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 function deferred() {
     let resolve;
@@ -61,7 +63,7 @@ function setup(options = {}) {
         },
     };
     vm.runInNewContext(source, {
-        require(name) { return name === 'child_process' ? childProcess : name === 'net' ? net : require(name); },
+        require(name) { return name === 'child_process' ? childProcess : name === 'net' ? net : productionRequire(name); },
         module, exports: module.exports, __dirname: path.dirname(filename), Buffer, console,
         setTimeout,
         clearTimeout,

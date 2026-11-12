@@ -101,6 +101,10 @@ class ScrcpyHub {
         this.effectiveMaxSize = null;
         this.bitRate = clampInt(options.bitRate, 2000000, 100000, 50000000);
         this.maxFps = clampInt(options.maxFps, 30, 1, 120);
+        // control=true opens the scrcpy control socket for live human takeover.
+        // Writes are only reachable through injectTouch/injectKeycode.
+        this.control = options.control === true;
+        this.controlSocket = null;
 
         // 就绪等待。旧实现是 `setTimeout(resolve, 1800)` 盲等，无出处。
         // 真机实测（PJZ110，2026-11-02，3 轮）：
@@ -332,7 +336,10 @@ class ScrcpyHub {
             'shell',
             `CLASSPATH=${REMOTE_JAR} app_process / com.genymobile.scrcpy.Server ${SERVER_VERSION}`
             + ` scid=${session.scid} log_level=warn max_size=${this.effectiveMaxSize} video_bit_rate=${this.bitRate}`
-            + ` max_fps=${this.maxFps} tunnel_forward=true audio=false control=false cleanup=false`,
+            // Bound recovery while the screen is changing; static screens may still emit no frames.
+            + ` max_fps=${this.maxFps} tunnel_forward=true audio=false control=${this.control} cleanup=false`
+            + (this.control ? ' clipboard_autosync=false' : '')
+            + ' video_codec_options=i-frame-interval=1',
         ];
 
         this.serverProc = spawn(this.adbPath, ['-s', this.serial, ...args], {
@@ -443,7 +450,14 @@ class ScrcpyHub {
                         this._emitPacket({ type: 'session', data: null, width, height, pts: 0, key: false });
                     },
                 });
-                socket.on('data', (chunk) => { if (current()) this._onData(chunk); });
+                let controlRequested = !this.control;
+                socket.on('data', (chunk) => {
+                    if (!current()) return;
+                    // tunnel_forward accepts video then control; the dummy byte proves the
+                    // video socket was accepted, and device meta waits for the control socket.
+                    if (!controlRequested) { controlRequested = true; this._connectControl(socket); }
+                    this._onData(chunk);
+                });
                 resolve();
             });
 
@@ -461,6 +475,59 @@ class ScrcpyHub {
                 }
             });
         });
+    }
+
+    _connectControl(videoSocket) {
+        const control = net.createConnection({ host: '127.0.0.1', port: this.localPort });
+        const generation = this._generation;
+        const current = () => generation === this._generation && this.socket === videoSocket;
+        control.setNoDelay(true);
+        this.controlSocket = control;
+        // Device messages (clipboard/ack/uhid) are unused; drain so the device sender never blocks.
+        control.on('data', () => {});
+        control.on('error', () => {});
+        control.on('close', () => {
+            if (this.controlSocket === control) this.controlSocket = null;
+            if (!this.stopping && current()) videoSocket.destroy();
+        });
+    }
+
+    controlReady() {
+        const socket = this.controlSocket;
+        return this.control && this.state === STATE_STREAMING && !!socket && !socket.destroyed
+            && !socket.connecting && Number.isSafeInteger(this.width) && Number.isSafeInteger(this.height);
+    }
+
+    _writeControl(buffer) {
+        if (!this.controlReady()) throw Object.assign(new Error('scrcpy 控制通道不可用'), { code: 'SCRCPY_CONTROL_UNAVAILABLE' });
+        this.controlSocket.write(buffer);
+    }
+
+    /** INJECT_TOUCH_EVENT. x/y are video-frame pixels of a width×height frame. */
+    injectTouch({ action, x, y, width, height, pointerId = -2 }) {
+        const buffer = Buffer.alloc(32);
+        buffer.writeUInt8(2, 0);
+        buffer.writeUInt8(action, 1);
+        buffer.writeBigInt64BE(BigInt(pointerId), 2);
+        buffer.writeInt32BE(x, 10);
+        buffer.writeInt32BE(y, 14);
+        buffer.writeUInt16BE(width, 18);
+        buffer.writeUInt16BE(height, 20);
+        buffer.writeUInt16BE(action === 1 ? 0 : 0xffff, 22);
+        buffer.writeInt32BE(0, 24);
+        buffer.writeInt32BE(0, 28);
+        this._writeControl(buffer);
+    }
+
+    /** INJECT_KEYCODE: action 0=down, 1=up. */
+    injectKeycode(action, keycode) {
+        const buffer = Buffer.alloc(14);
+        buffer.writeUInt8(0, 0);
+        buffer.writeUInt8(action, 1);
+        buffer.writeInt32BE(keycode, 2);
+        buffer.writeInt32BE(0, 6);
+        buffer.writeInt32BE(0, 10);
+        this._writeControl(buffer);
     }
 
     _onData(chunk) {
@@ -609,9 +676,12 @@ class ScrcpyHub {
         const session = this._serverSession;
         this._serverSession = null;
         const socket = this.socket;
+        const control = this.controlSocket;
         const proc = this.serverProc;
         const port = this.localPort;
         this.socket = null;
+        this.controlSocket = null;
+        try { control?.destroy(); } catch { /* 忽略 */ }
         this.serverProc = null;
         this.localPort = null;
         this._parser = null;
@@ -649,6 +719,7 @@ class ScrcpyHub {
             effectiveMaxSize: this.effectiveMaxSize,
             bitRate: this.bitRate,
             maxFps: this.maxFps,
+            control: this.controlReady(),
             lastError: this.lastError,
             uptimeMs: this.startedAt ? Date.now() - this.startedAt : 0,
         };
