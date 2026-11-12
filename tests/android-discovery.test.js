@@ -71,6 +71,7 @@ async function harness({ mdns = [], ready = [], stall = false } = {}) {
     const module = { exports: {} };
     vm.runInNewContext(fs.readFileSync(entry, 'utf8'), {
         module, exports: module.exports,
+        __dirname: path.dirname(entry), __filename: entry,
         require(name) { return Object.hasOwn(overrides, name) ? overrides[name] : realRequire(name); },
         console, Buffer, process, setTimeout, clearTimeout,
     }, { filename: entry });

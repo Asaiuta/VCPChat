@@ -41,6 +41,33 @@ test('independent device B runs while A is blocked, but the next A stays FIFO', 
     assert.equal(client.queueStats().completed, 3);
 });
 
+test('diagnostics expose per-selector occupancy and show aliases as distinct, unserialized keys', async () => {
+    const { client, calls, hold } = fixture();
+    const usb = hold('A1');
+    const wifi = hold('W1');
+    const work = [
+        client.enqueue(['A1'], { serial: 'A' }),
+        client.enqueue(['A2'], { serial: 'A' }),
+        client.enqueue(['W1'], { serial: '10.0.0.2:5555' }),
+    ];
+    try {
+        await tick();
+        // Same phone over USB and Wi-Fi: both run concurrently — the queue cannot see they alias.
+        assert.deepEqual(calls.map(call => call.name), ['A1', 'W1']);
+        const stats = client.queueStats();
+        assert.equal(stats.keyNamespace, 'adb-selector');
+        assert.deepEqual(stats.activeKeys, ['10.0.0.2:5555', 'A']);
+        assert.deepEqual(stats.pendingByKey, { A: 1 });
+        assert.equal(stats.exclusiveRunning, false);
+        assert.equal(stats.pendingExclusive, 0);
+        const snapshot = JSON.stringify(stats);
+        assert.equal(JSON.stringify(client.queueStats()), snapshot, 'diagnostics must not mutate scheduling');
+    } finally { usb.resolve(); wifi.resolve(); await Promise.all(work); }
+    const idle = client.queueStats();
+    assert.deepEqual(idle.activeKeys, []);
+    assert.deepEqual(idle.pendingByKey, {});
+});
+
 test('host devices discovery is not blocked by a device command', async () => {
     const { client, calls, hold } = fixture({ serial: 'A' });
     const gate = hold('A1');
@@ -257,12 +284,17 @@ test('Service Observe on B completes through real ADB scheduling while A samplin
     await entered.promise;
     let completed = false;
     const second = h.service.processToolCall({ command: 'Observe', serial: 'B', wake: 'never' }).then(result => { completed = true; return result; });
+    let timer;
     try {
-        await tick();
+        // B must finish while A remains gated; asynchronous initialization need
+        // not fit in one event-loop tick on a busy host.
+        await Promise.race([second, new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error('B remained blocked by A')), 3000);
+        })]);
         assert.equal(completed, true, 'device discovery and all B preparation must avoid the blocked A lane');
         assert.equal((await second).details.serial, 'B');
         assert.ok(calls.some(call => call.serial === 'B' && call.args.includes('uiautomator')));
-    } finally { gate.resolve(); await Promise.allSettled([first, second]); }
+    } finally { clearTimeout(timer); gate.resolve(); await Promise.allSettled([first, second]); }
     assert.equal(client.queueStats().depth, 0);
 });
 

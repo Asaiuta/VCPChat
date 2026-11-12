@@ -43,11 +43,12 @@ test('默认提交预算在队头未释放时到期，之后不执行且释放�
     assert.equal(calls.length, 0);
 });
 
-test('执行只得到提交预算减去排队时间的剩余部分', async () => {
+test('执行只得到提交预算减去排队时间的剩余部分', async t => {
+    t.mock.timers.enable({ apis: ['Date'], now: 1000 });
     const { client, calls, release } = blockedClient({ timeoutMs: 200 });
     const submitted = Date.now();
     const command = client.enqueue(['devices']);
-    await wait(35);
+    t.mock.timers.tick(35);
     await release();
     await command;
     assert.equal(calls.length, 1);

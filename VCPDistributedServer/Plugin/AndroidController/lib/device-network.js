@@ -279,5 +279,61 @@ async function scanLocalNetwork(options = {}) {
     return { hosts: found, prefixes, scanned: alive.size, scannedPorts: index, timedOut: Date.now() >= deadlineMs };
 }
 
+/** 读取 ARP 表：[{ ip, mac }]，mac 统一为小写冒号分隔。arp 不可用时返回空数组。 */
+function readArpTable(options = {}) {
+    const { execFile } = require('child_process');
+    const timeout = Math.max(1, Math.min(4000, options.timeoutMs ?? 3000));
+    return new Promise((resolve) => {
+        execFile('arp', ['-a'], { encoding: 'utf8', timeout, windowsHide: true }, (error, output) => {
+            if (error) return resolve([]);
+            const entries = [];
+            for (const line of String(output).split(/\r?\n/)) {
+                // Windows: `192.168.1.5   aa-bb-cc-dd-ee-ff   动态`；macOS/Linux: `? (192.168.1.5) at aa:bb:cc:dd:ee:ff`
+                const match = /(\d{1,3}(?:\.\d{1,3}){3})\)?\s+(?:at\s+)?([0-9a-f]{1,2}(?:[-:][0-9a-f]{1,2}){5})/i.exec(line);
+                if (!match) continue;
+                const mac = match[2].toLowerCase().split(/[-:]/).map((part) => part.padStart(2, '0')).join(':');
+                if (mac === 'ff:ff:ff:ff:ff:ff' || mac === '00:00:00:00:00:00' || /^01:00:5e:/.test(mac)) continue;
+                entries.push({ ip: match[1], mac });
+            }
+            resolve(entries);
+        });
+    });
+}
 
-module.exports = { parseHostPort, parsePairCode, localAddresses, probePort, diagnoseEndpoint, scanSubnets, scanLocalNetwork };
+/**
+ * 让系统为整个 /24 发起 ARP 解析，而不必 spawn 254 个 ping。
+ * 发一个 UDP 空包到 discard 端口即可触发邻居解析；不关心是否送达。
+ */
+function primeArp(prefixes = scanSubnets(), options = {}) {
+    const dgram = require('dgram');
+    const waitMs = options.waitMs ?? 1200;
+    return new Promise((resolve) => {
+        let socket;
+        try { socket = dgram.createSocket('udp4'); } catch { resolve(0); return; }
+        let sent = 0;
+        socket.on('error', () => {});
+        const payload = Buffer.alloc(0);
+        for (const prefix of prefixes.slice(0, 4)) {
+            for (let host = 1; host < 255; host++) {
+                try { socket.send(payload, 9, `${prefix}.${host}`, () => {}); sent += 1; } catch { /* 单个地址失败不影响其余 */ }
+            }
+        }
+        const timer = setTimeout(() => { try { socket.close(); } catch { /* 已关闭 */ } resolve(sent); }, waitMs);
+        timer.unref?.();
+    });
+}
+
+/** 网卡 IPv4 地址集合的稳定指纹；切换 Wi-Fi / 开关热点都会改变它。 */
+function networkFingerprint() {
+    const entries = [];
+    for (const [name, list] of Object.entries(os.networkInterfaces() || {})) {
+        for (const net of list || []) {
+            if (net.family !== 'IPv4' || net.internal || net.address.startsWith('169.254.')) continue;
+            entries.push(`${name}=${net.address}/${net.netmask || ''}`);
+        }
+    }
+    return entries.sort().join('|');
+}
+
+module.exports = { parseHostPort, parsePairCode, localAddresses, probePort, diagnoseEndpoint, scanSubnets, scanLocalNetwork,
+    readArpTable, primeArp, networkFingerprint };

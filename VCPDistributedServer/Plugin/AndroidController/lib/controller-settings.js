@@ -8,7 +8,7 @@ const { configSchema } = require('../plugin-manifest.json');
 const { createInteractionPolicy } = require('./interaction-policy');
 
 // Native settings only. Display preferences have their own live, atomic store.
-const KEYS = Object.freeze(['AUTO_WAKE', 'INTERACTION_POLICY', 'CLIPBOARD_PASTE',
+const KEYS = Object.freeze(['AUTO_WAKE', 'AUTO_CONNECT', 'INTERACTION_POLICY', 'CLIPBOARD_PASTE',
     'ADB_PATH', 'DEVICE_SERIAL', 'ADB_TIMEOUT_MS', 'UI_SERVER', 'DISPLAY_PORT',
     'STREAM_FORMAT', 'STREAM_CAPTURE_MODE', 'STREAM_QUALITY', 'STREAM_INTERVAL_MS', 'STREAM_MAX_WIDTH']);
 const RANGES = { ADB_TIMEOUT_MS: [100, 300000], DISPLAY_PORT: [0, 65535],
