@@ -78,7 +78,7 @@ export const jevServiceSection = section('jev-service', 'Jev 服务', [
                 label: '重试基础延迟',
                 min: 1,
                 max: 30000,
-                step: 100,
+                step: 1,
                 defaultValue: 500,
                 description: '指数退避的初始等待时间',
                 save: { parse: 'int', min: 1, max: 30000, fallback: 500 },
