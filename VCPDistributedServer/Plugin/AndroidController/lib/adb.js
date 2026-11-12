@@ -26,6 +26,10 @@ function normalizeAdbPath(value) {
     return configured || 'adb';
 }
 
+function queueKeyLabel(key) {
+    return key === HOST_READ_KEY ? '<host-read>' : String(key);
+}
+
 function schedulingKey(args, request) {
     if (!request.noSelector) return request.serial || null;
     const [command, option] = args;
@@ -64,6 +68,10 @@ class AdbClient {
      */
     queueStats() {
         const stats = this.queue.stats;
+        const occupancy = this.queue.occupancy();
+        const pendingByKey = {};
+        for (const key of [...occupancy.pendingByKey.keys()].map(queueKeyLabel).sort()) pendingByKey[key] = 0;
+        for (const [key, count] of occupancy.pendingByKey) pendingByKey[queueKeyLabel(key)] += count;
         return {
             depth: this.queue.depth,
             pending: this.queue.pending.length,
@@ -74,6 +82,13 @@ class AdbClient {
             failed: stats.failed,
             rejected: { ...stats.rejected },
             failedByCode: { ...stats.failedByCode },
+            // Keys are raw adb selectors: a USB serial and its ip:port/mDNS alias are
+            // distinct keys and are NOT serialized against each other.
+            keyNamespace: 'adb-selector',
+            exclusiveRunning: occupancy.exclusiveRunning,
+            pendingExclusive: occupancy.pendingExclusive,
+            activeKeys: occupancy.activeKeys.map(queueKeyLabel).sort(),
+            pendingByKey,
         };
     }
 
@@ -627,7 +642,8 @@ function parseMdnsServices(text) {
         if (!trimmed || /^List of discovered/i.test(trimmed)) continue;
         const parts = trimmed.split(/\s+/);
         if (parts.length < 3) continue;
-        const [name, type, address] = parts;
+        const [name, rawType, address] = parts;
+        const type = rawType.replace(/\.$/, '');
         if (!/^_adb-tls-(connect|pairing)\._tcp$/.test(type)) continue;
 
         const separator = address.lastIndexOf(':');

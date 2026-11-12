@@ -5,8 +5,10 @@ const pkg = 'com.example';
 const id = name => `${pkg}:id/${name}`;
 const spec = extra => ({ serial: 'A', package: pkg, intent: 'search', decision: 'jev',
     inputs: { query: 'private query 731' }, completion: { type: 'visible', id: id('results') }, ...extra });
-const response = (questions, selected) => ({ answers: { next: { probabilities:
-    Object.fromEntries(Object.keys(questions.next.criteria).map(key => [key, key === selected ? 1 : 0])) } } });
+const response = (questions, selected) => {
+    const key = Object.keys(questions)[0];
+    return { answers: { [key]: { probabilities: Object.fromEntries(Object.keys(questions[key].criteria).map(id => [id, id === selected ? 1 : 0])) } } };
+};
 
 async function searchWorld(options = {}) {
     const events = [], models = [], actions = [], values = new Map();
@@ -34,9 +36,10 @@ async function searchWorld(options = {}) {
     const xml = () => {
         sampleCount++;
         options.onCapture?.(sampleCount, { change: () => version++ });
-        return `<hierarchy rotation="0">${controls().map(n => `<node class="android.widget.${n.kind}" package="${pkg}" resource-id="${id(n.name)}" text="${escape(n.label)}" content-desc="${escape(n.desc || '')}" enabled="${n.enabled !== false}" clickable="${n.clickable !== false}" password="${n.password === true}" bounds="[0,${n.top}][90,${n.top + 35}]"/>`).join('')}</hierarchy>`;
+        const tree = `<hierarchy rotation="0">${controls().map(n => `<node class="android.widget.${n.kind}" package="${pkg}" resource-id="${id(n.name)}" text="${escape(n.label)}" content-desc="${escape(n.desc || '')}" enabled="${n.enabled !== false}" clickable="${n.clickable !== false}" password="${n.password === true}" visible-to-user="${n.visible !== false}" bounds="[0,${n.top}][90,${n.top + 35}]"/>`).join('')}</hierarchy>`;
+        return options.transformXml ? options.transformXml(tree) : tree;
     };
-    const jev = options.jev === null ? null : { async decide(state, questions, request) {
+    const jev = options.jev === null ? null : { ...(options.modelTimeoutMs ? { async getStatus() { return { timeoutMs: options.modelTimeoutMs }; } } : {}), async decide(state, questions, request) {
         models.push({ state: structuredClone(state), questions, request });
         if (options.decide) return options.decide(state, questions, request);
         const candidate = state.candidates.find(c => c.targetId === id(options.twoChoices && page === 'home' ? 'menu_search'
@@ -51,8 +54,9 @@ async function searchWorld(options = {}) {
             events.push(structuredClone(event));
         }, async close() {} };
     } };
-    const executor = createAndroidTaskExecutor({ traceStore: store, jev });
-    const h = await harness({ config: options.config, services: { androidTaskExecutor: executor },
+    const executor = (options.executorFactory || createAndroidTaskExecutor)({ traceStore: store, jev });
+    const h = await harness({ config: options.config, services: { androidTaskExecutor: executor, ...(options.services || {}) },
+        ...(options.probeScreen ? { client: { probeScreen: options.probeScreen } } : {}),
         uiServer: { ok: true, xml, async invoke(method, params, request) {
             if (options.invoke) { const result = await options.invoke(method, params, request); if (result !== undefined) return result; }
             if (method === 'click') {

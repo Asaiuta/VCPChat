@@ -1,6 +1,7 @@
 'use strict';
 
 const { createHash } = require('node:crypto');
+const { withOperationDeadline } = require('./operation-deadline');
 
 // Ephemeral approval evidence, never a public token or persistent element handle.
 function approvalBinding({ serial, requestId, action, policy, probe, graph }) {
@@ -21,42 +22,24 @@ function approvalBinding({ serial, requestId, action, policy, probe, graph }) {
 
 function createHumanInteraction({ getService, runtime }) {
     const available = () => typeof getService()?.request === 'function';
-    async function request(kind, detail) {
+    async function request(kind, detail, options = {}) {
         runtime.check();
         if (!available()) throw runtime.failure('HUMAN_INTERACTION_UNAVAILABLE', '宿主没有注入可信用户交互服务。');
-        const controller = new AbortController();
-        const signal = runtime.executionSignal();
-        const abort = () => controller.abort();
-        signal?.addEventListener('abort', abort, { once: true });
-        if (signal?.aborted) abort();
-        const timeoutMs = Math.min(kind === 'handoff' ? 600000 : 60000, runtime.remainingTaskMs());
-        let timer;
-        let onAbort;
+        const signal = AbortSignal.any([runtime.executionSignal(), options.signal].filter(Boolean));
+        const timeoutMs = Math.min(options.timeoutMs ?? Infinity, kind === 'handoff' ? 600000 : 60000, runtime.remainingTaskMs());
         try {
-            const boundary = new Promise((_, reject) => {
-                onAbort = () => reject(runtime.failure('HUMAN_INTERACTION_CANCELLED', '用户交互已取消；不执行原动作。'));
-                controller.signal.addEventListener('abort', onAbort, { once: true });
-                if (controller.signal.aborted) onAbort();
-                timer = setTimeout(abort, timeoutMs);
+            const answer = await withOperationDeadline(timeoutMs, signal, ({ signal }) => {
+                runtime.check();
+                return getService().request({ kind, detail, signal });
             });
-            const answer = await Promise.race([boundary,
-                Promise.resolve().then(() => {
-                    runtime.check();
-                    controller.signal.throwIfAborted();
-                    return getService().request({ kind, detail, signal: controller.signal });
-                })]);
             runtime.check();
-            controller.signal.throwIfAborted();
             return answer === true;
         } catch (error) {
             runtime.check();
-            if (error.code === 'HUMAN_INTERACTION_CANCELLED') throw error;
+            if (error.code === 'TIMEOUT' || error.code === 'ABORTED') {
+                throw runtime.failure('HUMAN_INTERACTION_CANCELLED', '用户交互已取消；不执行原动作。');
+            }
             throw runtime.failure('HUMAN_INTERACTION_FAILED', '宿主用户交互失败；未批准，不执行原动作。');
-        } finally {
-            clearTimeout(timer);
-            signal?.removeEventListener('abort', abort);
-            controller.signal.removeEventListener('abort', onAbort);
-            controller.abort();
         }
     }
     return { available, request };

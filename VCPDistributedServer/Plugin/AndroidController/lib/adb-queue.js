@@ -31,6 +31,22 @@ class AdbCommandQueue {
 
     resetStats() { this.stats = createQueueStats(); }
 
+    /** Read-only occupancy by key; null is the exclusive barrier. No scheduling side effects. */
+    occupancy() {
+        const pending = new Map();
+        let pendingExclusive = 0;
+        for (const entry of this.pending) {
+            if (entry.key === null) pendingExclusive += 1;
+            else pending.set(entry.key, (pending.get(entry.key) || 0) + 1);
+        }
+        return {
+            exclusiveRunning: this.exclusiveRunning,
+            pendingExclusive,
+            activeKeys: [...this.activeKeys],
+            pendingByKey: pending,
+        };
+    }
+
     push(task, deadlineMs, signal, key = null) {
         let error;
         if (signal?.aborted) error = new AdbError('ADB_ABORTED', 'adb 调用已取消。');

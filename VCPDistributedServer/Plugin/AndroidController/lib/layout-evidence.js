@@ -11,7 +11,9 @@ function intersect(a, b) {
     return box.right > box.left && box.bottom > box.top ? box : null;
 }
 
-function rawEntries(graph, screen) {
+// Layout/screenshots observe each node independently. Task evidence additionally
+// excludes hidden subtrees; both policies use the same traversal and geometry.
+function rawEntries(graph, screen, { excludeHiddenSubtrees = false } = {}) {
     const entries = [];
     const stack = [{ raw: graph?.rawRoot, clip: { left: 0, top: 0, right: screen.width, bottom: screen.height }, path: '' }];
     while (stack.length) {
@@ -22,7 +24,7 @@ function rawEntries(graph, screen) {
         const bounds = parseBounds(attrs.bounds);
         const visible = ownHidden ? null : intersect(bounds, clip);
         if (raw.tag === 'node') entries.push({ raw, attrs, bounds, visible, path });
-        const nextClip = attrs.scrollable === 'true' ? intersect(clip, bounds) : clip;
+        const nextClip = excludeHiddenSubtrees && ownHidden ? null : attrs.scrollable === 'true' ? intersect(clip, bounds) : clip;
         for (let i = (raw.children || []).length - 1; i >= 0; i--) {
             stack.push({ raw: raw.children[i], clip: nextClip, path: `${path}/${i}` });
         }
@@ -34,15 +36,29 @@ function screenContext(probe) {
     return contextEvidence.contextKey(contextEvidence.frameContext(probe));
 }
 
+function completeEntries(entries, packageName) {
+    let foreground = false;
+    for (const item of entries) {
+        if (item.path.split('/').length >= 200) return false;
+        if (item.visible && item.attrs.package === packageName) foreground = true;
+    }
+    return foreground;
+}
+
+// The task port already owns this capture's raw entries and uses its stricter
+// full-tree HMAC. It needs completeness, not another tree copy and unused hash.
+function hasCompleteLayout(graph, probe, entries) {
+    return contextEvidence.graphMatchesContext(graph, contextEvidence.frameContext(probe))
+        && completeEntries(entries, probe.focus.package);
+}
+
 function layoutEvidence(graph, probe) {
     const baseContext = screenContext(probe);
     const context = baseContext;
     if (!contextEvidence.graphMatchesContext(graph, contextEvidence.frameContext(probe))) return { complete: false, context, digest: '' };
     const entries = rawEntries(graph, probe.size);
-    if (entries.some(item => item.path.split('/').length >= 200)) return { complete: false, context, digest: '' };
+    if (!completeEntries(entries, probe.focus.package)) return { complete: false, context, digest: '' };
     const nodes = entries.filter(item => item.visible);
-    const foreground = nodes.some(item => item.attrs.package === probe.focus.package);
-    if (!nodes.length || !foreground) return { complete: false, context, digest: '' };
     const evidence = nodes.map(({ attrs, bounds, visible, path }) => [path, attrs.class || '', attrs.package || '',
         attrs['resource-id'] || '', bounds, visible, attrs.enabled, attrs.clickable, attrs['long-clickable'], attrs.scrollable,
         attrs.checkable, attrs.checked, attrs.selected, attrs.focusable, attrs.focused, attrs.password]);
@@ -85,4 +101,4 @@ function elementEvidence(graph, node, screen) {
         attrs['resource-id'] || '', node.id || '', node.bounds, node.label, node.value, node.flags]) };
 }
 
-module.exports = { rawEntries, screenContext, layoutEvidence, elementEvidence, m2IdleDiagnostic };
+module.exports = { rawEntries, screenContext, hasCompleteLayout, layoutEvidence, elementEvidence, m2IdleDiagnostic };

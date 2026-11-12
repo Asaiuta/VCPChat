@@ -144,7 +144,7 @@ test('没有缓存时不补发，也不报错', async () => {
     server.stopWatchdog?.();
 });
 
-test('真实 ScrcpyHub 会缓存 config / session / 关键帧', () => {
+test('真实 ScrcpyHub 缓存 session/config，只补发可连续解码的最新关键帧', () => {
     const hub = new ScrcpyHub({
         adbPath: 'adb', serial: 'x:1', logger: { log() {}, warn() {}, error() {} },
     });
@@ -153,12 +153,20 @@ test('真实 ScrcpyHub 会缓存 config / session / 关键帧', () => {
     hub._emitPacket({ type: 'session', data: null, width: 720, height: 1520, pts: 0, key: false });
     hub._emitPacket({ type: 'config', data: Buffer.from([1, 2, 3]), pts: 0, key: false });
     hub._emitPacket({ type: 'frame', data: Buffer.from([9, 9]), pts: 0, key: true });
-    hub._emitPacket({ type: 'frame', data: Buffer.from([8]), pts: 66, key: false });
 
     assert.ok(hub.lastSession, 'session 必须缓存');
     assert.equal(hub.lastSession.width, 720);
     assert.ok(hub.lastConfig, 'config 必须缓存');
     assert.equal(hub.lastConfig.data.length, 3);
     assert.ok(hub.lastKeyFrame, '关键帧必须缓存');
-    assert.equal(hub.lastKeyFrame.data.length, 2, '不能被后续 delta 帧覆盖');
+    assert.equal(hub.lastKeyFrame.data.length, 2);
+    const initial = [];
+    hub.replayInitTo(packet => initial.push(packet.type));
+    assert.deepEqual(initial, ['session', 'config', 'frame']);
+
+    hub._emitPacket({ type: 'frame', data: Buffer.from([8]), pts: 66, key: false });
+    assert.equal(hub.lastKeyFrame, null, '后续 delta 使旧关键帧失效，不能补发断链视频');
+    const waiting = [];
+    hub.replayInitTo(packet => waiting.push(packet.type));
+    assert.deepEqual(waiting, ['session', 'config']);
 });

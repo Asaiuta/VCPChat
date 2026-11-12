@@ -2,6 +2,7 @@
 
 const axios = require('axios');
 const { HttpsProxyAgent } = require('https-proxy-agent');
+const { observedTransport } = require('./jevTransport');
 
 const PROVIDER_DEFAULTS = Object.freeze({
     typesafe: Object.freeze({
@@ -277,7 +278,9 @@ class JevClient {
     _buildHeaders(config, apiKey, extraHeaders = {}) {
         const headers = {
             Authorization: `Bearer ${apiKey}`,
-            'Content-Type': 'application/json'
+            'Content-Type': 'application/json',
+            // Cloudflare 拦无 UA 请求(error 1010)；网关走 CF 橙云必须带 UA
+            'User-Agent': 'VCPChat-JevClient/1.0'
         };
         if (config.provider === 'openrouter') {
             if (config.referer) headers['HTTP-Referer'] = config.referer;
@@ -364,6 +367,7 @@ class JevClient {
                     timeout: config.timeoutMs,
                     maxRedirects: 0,
                     signal: options.signal,
+                    ...(typeof options.onTransportMetadata === 'function' ? { transport: observedTransport(options.onTransportMetadata) } : {}),
                     ...(proxyAgent ? {
                         httpsAgent: proxyAgent,
                         // 禁止 Axios 再读取环境代理或执行二次代理解析。

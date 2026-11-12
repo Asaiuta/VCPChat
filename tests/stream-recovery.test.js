@@ -31,6 +31,7 @@ const { StreamServer } = require(path.join(root, 'VCPDistributedServer/Plugin/An
 class FakeScrcpyHub extends EventEmitter {
     constructor({ failStartTimes = 0, streaming = false } = {}) {
         super();
+        this.serial = 'test:5555';
         this.subscribers = new Set();
         this.failStartTimes = failStartTimes;
         this.startCalls = 0;
@@ -109,7 +110,7 @@ class FakeScrcpyHub extends EventEmitter {
             codec: 'h264',
             maxSize: 540,
             maxFps: 30,
-            serial: 'test:5555',
+            serial: this.serial,
             packetsReceived: this.packetsReceived,
             lastError: null,
         };
@@ -492,7 +493,7 @@ test('存活检查：设备还在、画面静止时不误判', async () => {
     hub.emitPacket({ type: 'frame', data: Buffer.alloc(8, 1), pts: 0, key: true });
 
     server.deviceApi = {
-        async listDevices() { return { ok: true, devices: [{ serial: 'x:1', state: 'device' }], ready: 1 }; },
+        async listDevices() { return { ok: true, devices: [{ serial: hub.serial, state: 'device' }], ready: 1 }; },
     };
 
     const recovered = await server.checkLiveness();
@@ -525,7 +526,7 @@ test('存活检查：offline 状态的设备也算掉线', async () => {
 
     server.deviceApi = {
         async listDevices() {
-            return { ok: true, devices: [{ serial: '192.168.1.5:40001', state: 'offline' }], ready: 0 };
+            return { ok: true, devices: [{ serial: hub.serial, state: 'offline' }], ready: 0 };
         },
     };
 
@@ -549,7 +550,7 @@ test('真机实测值：34 秒无帧但链路活着，不重启', async () => {
     // 把上一帧时间推到 34 秒前（真机观测到的最长静止时长）
     hub.lastPacketAt = Date.now() - 34000;
     server.deviceApi = {
-        async listDevices() { return { ok: true, devices: [{ serial: 'x:1', state: 'device' }], ready: 1 }; },
+        async listDevices() { return { ok: true, devices: [{ serial: hub.serial, state: 'device' }], ready: 1 }; },
     };
 
     const before = hub.startCalls;
@@ -593,7 +594,7 @@ test('链路死了才重启：socket 已销毁', async () => {
     await sleep(120);
 
     server.deviceApi = {
-        async listDevices() { return { ok: true, devices: [{ serial: 'x:1', state: 'device' }], ready: 1 }; },
+        async listDevices() { return { ok: true, devices: [{ serial: hub.serial, state: 'device' }], ready: 1 }; },
     };
     const recovered = await server.checkLiveness();
     assert.equal(recovered, true, 'socket 都没了当然要重启');

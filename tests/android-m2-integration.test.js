@@ -3,7 +3,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { harness } = require('./helpers/android-service-harness.cjs');
 const focus = { package: 'com.example', component: 'com.example/.Main', window: 'Main' };
-const probe = () => ({ focus: { ...focus }, size: { width: 100, height: 200 }, wakefulness: 'Awake' });
+const probe = () => ({ focus: { ...focus }, size: { width: 100, height: 200 }, wakefulness: 'Awake', displayId: 0,
+    rotation: 0, keyguard: { showing: false, inputRestricted: false } });
 const tree = (text = '消息(3)', top = 20) => `<hierarchy rotation="0"><node class="android.widget.Button" package="com.example" resource-id="com.example:id/messages" text="${text}" clickable="true" enabled="true" bounds="[0,${top}][80,${top + 30}]"/></hierarchy>`;
 const execute = (h, args = {}, ctx) => h.service.processToolCall({ command: 'ExecuteStep', serial: 'A', ...args }, ctx);
 const idle = { action: { command: 'Wait', mode: 'idle' }, waitTimeoutMs: 1000 };
@@ -16,7 +17,7 @@ test('host fuzzy selector rebinds fresh dynamic text and explicit nth disambigua
         assert.equal(result.details.execution.outcome, 'dispatched');
         assert.equal(inputs(h).length, 1);
     } finally { await h.service.cleanup(); }
-    const repeated = `<hierarchy>${tree('重复', 20).replace(/<\/?hierarchy[^>]*>/g, '')}${tree('重复', 80).replace(/<\/?hierarchy[^>]*>/g, '').replace('id/messages', 'id/other')}</hierarchy>`;
+    const repeated = `<hierarchy rotation="0">${tree('重复', 20).replace(/<\/?hierarchy[^>]*>/g, '')}${tree('重复', 80).replace(/<\/?hierarchy[^>]*>/g, '').replace('id/messages', 'id/other')}</hierarchy>`;
     const second = await harness({ uiServer: { ok: true, xml: repeated } });
     try {
         await assert.rejects(execute(second, { action: { command: 'Tap', selector: 'text=重复' } }), { code: 'TARGET_NOT_UNIQUE' });
@@ -90,7 +91,9 @@ test('sequence dynamic fuzzy selectors and expectations rebind every step, not o
             { action: { command: 'Tap', selector: { contains: '消息' } }, expect: { type: 'visible', selector: { regex: '^消息.*$', role: 'button' } } },
             { action: { command: 'Tap', selector: { contains: '消息', nth: 0 } } },
         ] });
-        assert.equal(result.details.sequence.status, 'completed'); assert.equal(clicks, 2); assert.equal(h.uiServer.dumped, 3);
+        assert.equal(result.details.sequence.status, 'completed'); assert.equal(clicks, 2);
+        // Two target acquisitions, two independent pre-dispatch policy samples, one expectation sample.
+        assert.equal(h.uiServer.dumped, 5);
     } finally { await h.service.cleanup(); }
 });
 
@@ -105,8 +108,8 @@ test('invalid regex is rejected before first sequence action', async () => {
 
 
 for (const mode of ['duplicates', 'scope-missing', 'over-budget']) test(`Wait absent never turns incomplete/ambiguous ${mode} into verified`, async () => {
-    const xml = mode === 'over-budget' ? `<hierarchy>${Array.from({ length: 300 }, () => tree('a'.repeat(100)).replace(/<\/?hierarchy[^>]*>/g, '')).join('')}</hierarchy>`
-            : mode === 'duplicates' ? `<hierarchy>${tree('重复').replace(/<\/?hierarchy[^>]*>/g, '')}${tree('重复', 80).replace(/<\/?hierarchy[^>]*>/g, '')}</hierarchy>` : tree('重复');
+    const xml = mode === 'over-budget' ? `<hierarchy rotation="0">${Array.from({ length: 300 }, () => tree('a'.repeat(100)).replace(/<\/?hierarchy[^>]*>/g, '')).join('')}</hierarchy>`
+            : mode === 'duplicates' ? `<hierarchy rotation="0">${tree('重复').replace(/<\/?hierarchy[^>]*>/g, '')}${tree('重复', 80).replace(/<\/?hierarchy[^>]*>/g, '')}</hierarchy>` : tree('重复');
     const selector = mode === 'duplicates' ? 'text=重复' : mode === 'scope-missing' ? { contains: '重复', within: { id: 'missing' } } : { regex: 'b'.repeat(512) };
     const h = await harness({ uiServer: { ok: true, xml } });
     try { const result = await execute(h, { action: { command: 'Wait' }, expect: { type: 'absent', selector }, waitTimeoutMs: 5 }); assert.equal(result.details.execution.outcome, 'unknown'); assert.equal(inputs(h).length, 0); }
@@ -145,7 +148,7 @@ test('failed condition transport cannot launch afterObserve inside the same Exec
         assert.equal(result.details.execution.outcome, 'unknown');
         assert.equal(result.details.observation.status, 'failed');
         assert.equal(h.uiServer.dumped, 1); assert.equal(h.dumpCount, 0);
-        for (const operation of ['reconnect', 'connect', 'disconnect', 'pair']) assert.throws(() => h.api[operation]({}), { code: 'DEVICE_STATE_UNCERTAIN' });
+        for (const operation of ['reconnect', 'connect', 'disconnect', 'pair']) await assert.rejects(h.api[operation]({}), { code: 'DEVICE_STATE_UNCERTAIN' });
     } finally { await h.service.cleanup(); }
 });
 
@@ -174,7 +177,7 @@ test('idle drained ADB probe timeout at its own deadline is unknown IDLE_TIMEOUT
 });
 
 
-for (const phase of ['baseline-probe', 'baseline-size', 'sample-size', 'final-probe']) test(`idle budget-expired drained ADB_TIMEOUT from ${phase} stops without more reads`, async t => {
+for (const phase of ['baseline-probe', 'sample-probe', 'final-probe']) test(`idle budget-expired drained ADB_TIMEOUT from ${phase} stops without more reads`, async t => {
     t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
     let probes = 0;
     let sizes = 0;
@@ -190,15 +193,10 @@ for (const phase of ['baseline-probe', 'baseline-size', 'sample-size', 'final-pr
         async probeScreen() {
             assert.equal(stopped, false);
             probes++;
-            if ((phase === 'baseline-probe' && probes === 1) || (phase === 'final-probe' && probes === 3)) return fail();
+            if ((phase === 'baseline-probe' && probes === 1) || (phase === 'sample-probe' && probes === 2) || (phase === 'final-probe' && probes === 3)) return fail();
             return probe();
         },
-        async screenSize() {
-            assert.equal(stopped, false);
-            sizes++;
-            if ((phase === 'baseline-size' && sizes === 1) || (phase === 'sample-size' && sizes === 2)) return fail();
-            return { width: 100, height: 200 };
-        },
+        async screenSize() { sizes++; assert.fail('idle context must not compose cached screen size'); },
     }, uiServer: { ok: true, xml: tree(), invoke: () => null } });
     try {
         const started = Date.now();
@@ -208,6 +206,7 @@ for (const phase of ['baseline-probe', 'baseline-size', 'sample-size', 'final-pr
         assert.equal(result.details.actionVerified, false);
         assert.equal(Date.now() - started, 4500);
         assert.ok(deadlines.includes(started + 4500));
+        assert.equal(sizes, 0);
         assert.equal(h.uiServer.dumped, phase === 'final-probe' ? 1 : 0);
         assert.equal(inputs(h).length, 0);
         assert.equal(h.calls.filter(call => call[0] === 'rpc').length, phase.startsWith('baseline') ? 0 : 1);

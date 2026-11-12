@@ -22,6 +22,7 @@ const {
 const { validateSelector: isValidSelector } = require('./lib/selector');
 const { waitForExpectation } = require('./lib/expectation-wait');
 const { waitForIdle } = require('./lib/idle-wait');
+const { samplingExpired } = require('./lib/sampling-deadline');
 const { screenContext, layoutEvidence, m2IdleDiagnostic } = require('./lib/layout-evidence');
 
 
@@ -31,14 +32,19 @@ const { ScrcpyHub } = require('./lib/scrcpy-hub');
 const { UiServer } = require('./lib/ui-server');
 const { RemoteOwner } = require('./lib/ui-owner');
 const { createUiSessions } = require('./lib/ui-sessions');
+const { InputRecovery, bootIdentity } = require('./lib/input-recovery');
+let inputRecovery = null;
 const { StreamServer } = require('./lib/stream-server');
 const { DisplayPreferences, resolvePreferencesFile } = require('./lib/display-preferences');
 const { ControllerSettings } = require('./lib/controller-settings');
 let controllerSettings = null;
 const fs = require('node:fs');
-const { parseHostPort, parsePairCode, localAddresses, probePort, diagnoseEndpoint, scanSubnets, scanLocalNetwork } = require('./lib/device-network');
+const { parseHostPort, parsePairCode, localAddresses, probePort, diagnoseEndpoint, scanSubnets, scanLocalNetwork,
+    readArpTable, primeArp, networkFingerprint } = require('./lib/device-network');
+const { KnownDevices, createAutoConnector } = require('./lib/wireless-auto');
+const { qrSvg } = require('./lib/qr-svg');
 const path = require('node:path');
-const { randomUUID } = require('node:crypto');
+const { randomUUID, randomBytes } = require('node:crypto');
 const { performance } = require('node:perf_hooks');
 const { URL } = require('node:url');
 const stepRuntime = require('./lib/step-runtime');
@@ -67,8 +73,16 @@ const interactionPolicy = createInteractionPolicy({ getConfig: () => runtime.con
 const interactionGuard = createInteractionGuard({ policy: interactionPolicy,
     probe: serial => freshFrameProbe(requireAdb(), serial), captureGraph,
     check: stepRuntime.check, fail: stepRuntime.failure, human: humanInteraction, requestId: stepRuntime.requestId,
-    assertWrite: (serial, probe, graph) => taskPort.assertWrite(serial, probe, graph) });
-const taskPort = createTaskPort({ runtime: stepRuntime, captureGraph, executePlan: executeStepPlan,
+    assertWrite: async (serial, probe, graph) => {
+        await inputRecovery?.assertWritable(serial);
+        return taskPort.assertWrite(serial, probe, graph);
+    } });
+const taskPort = createTaskPort({ runtime: stepRuntime, captureGraph, executePlan: executeStepPlan, bindSnapshot: storeSnapshot,
+    handoff: async (task, options) => {
+        if (!humanInteraction.available()) throw stepRuntime.failure('TASK_ASSISTANCE_UNAVAILABLE', '宿主未提供用户交互服务。');
+        const resumed = await requestHandoff(task.serial, '当前任务需要协助。处理界面后可交还；继续会重新验证原任务约束。', options);
+        return { resumed, epoch: contextTracker.epoch(task.serial) };
+    },
     ensureCapabilities: async serial => {
         await guardRead(serial);
         if (!uiServerEnabled()) throw stepRuntime.failure('TASK_CAPABILITY_UNAVAILABLE', '搜索任务需要可读回的Fill RPC能力。');
@@ -79,7 +93,7 @@ const guardRead = (serial, probe) => {
     assertDeviceCertain(serial);
     return interactionGuard.read(serial, probe);
 };
-const policyFailure = error => /^(?:POLICY_|HUMAN_INTERACTION_)/.test(error?.code || '') || error?.needsConfirmation === true;
+const policyFailure = error => /^(?:POLICY_|HUMAN_INTERACTION_|INPUT_RECOVERY_|DEVICE_STATE_UNCERTAIN|DEVICE_INPUT_STATE_UNCERTAIN)/.test(error?.code || '') || error?.needsConfirmation === true;
 
 const DEFAULT_DUMP_TIMEOUT_MS = 25000;
 // 快照与图像凭据超过此年龄后拒绝执行。
@@ -128,6 +142,12 @@ let scrcpyHub = null;
 let streamServer = null;
 let displayStarting = null;
 let viewerTakeover = null;
+let knownDevices = null;
+let autoConnector = null;
+let qrPairing = null;
+const rememberedSerials = new Set();
+// 用户手动断开后不再后台重连，直到显式连接或配对。
+let autoConnectPaused = false;
 let serviceStopped = false;
 let initializePromise = null;
 let cleanupPromise = null;
@@ -152,6 +172,7 @@ const uiSessions = createUiSessions({
     identityFor: serial => RemoteOwner.identityFor(serial),
     invalidate: serial => { contextTracker.invalidate(serial); lastObserve.delete(serial); lastVision.delete(serial); },
     failure: stepRuntime.failure,
+    inputRecovery: () => inputRecovery,
 });
 const { quarantine: quarantineDevice, record: recordOwnerState, assertCertain: assertDeviceCertain,
     start: startUiServer, call: withDeviceRpc, get: uiServerFor } = uiSessions;
@@ -358,7 +379,10 @@ async function autoConnectDevice(client, options = {}) {
                 return null;
             }
             await selectDevice(client, target);
-            if (client === adb) writeDeviceCache(target);
+            if (client === adb) {
+                writeDeviceCache(target);
+                await rememberDevice(client, target, deadlineMs);
+            }
             return { ok: true, action: 'connected', serial: target, address: target, state,
                 source: candidate.source || 'mdns', autoDiscovered: !address, message: `已连接 ${target}` };
         } catch (error) {
@@ -402,6 +426,157 @@ function rankSource(source) {
     if (source === 'connected') return 3;
     if (source === 'mdns') return 2;
     return 1;
+}
+
+function autoConnectEnabled() {
+    const raw = String(runtime.config?.AUTO_CONNECT ?? 'true').trim().toLowerCase();
+    return !['false', 'off', '0', 'no'].includes(raw);
+}
+
+function knownDevicesFile() {
+    try {
+        return path.join(runtime?.dataDir || path.join(process.cwd(), 'AppData'), 'android-controller-known-devices.json');
+    } catch {
+        return null;
+    }
+}
+
+const IPV4_ADDRESS_RE = /^(\d{1,3}(?:\.\d{1,3}){3}):(\d{1,5})$/;
+
+/** 记住已授权的无线设备：序列号作身份，IP:端口作快速路径，MAC 用于换 IP 后重新定位。 */
+async function rememberDevice(client, serial, deadlineMs = Date.now() + 4000) {
+    if (!knownDevices || !serial) return null;
+    const left = () => Math.max(1, Math.min(3000, deadlineMs - Date.now()));
+    let host = null;
+    let port = null;
+    const direct = IPV4_ADDRESS_RE.exec(serial);
+    if (direct) {
+        host = direct[1];
+        port = Number(direct[2]);
+    } else if (/^adb-/.test(serial)) {
+        const services = await client.mdnsServices({ timeoutMs: left(), deadlineMs }).catch(() => []);
+        const service = services.find((item) => item.kind === 'connect' && serial.startsWith(`${item.name}.`));
+        if (service) ({ host, port } = service);
+    } else {
+        return null;
+    }
+    const id = String(await client.runText(['shell', 'getprop', 'ro.serialno'], { serial, timeoutMs: left(), deadlineMs })
+        .catch(() => '')).trim();
+    const mac = host ? (await readArpTable({ timeoutMs: left() })).find((entry) => entry.ip === host)?.mac : undefined;
+    rememberedSerials.add(serial);
+    return knownDevices.upsert({ id: /^[\w.-]{1,64}$/.test(id) ? id : undefined, host, port, mac });
+}
+
+function isKnownSerial(serial, known) {
+    const direct = IPV4_ADDRESS_RE.exec(serial);
+    return known.some((item) => (item.id && serial.startsWith(`adb-${item.id}-`))
+        || (direct && item.host === direct[1]));
+}
+
+async function runBackgroundManagement(task) {
+    if (uiSessions.hasUncertain()) return { ok: false, busy: true, code: 'DEVICE_STATE_UNCERTAIN' };
+    try {
+        return await stepRuntime.runManagement(task);
+    } catch (error) {
+        if (error?.code === 'DEVICE_BUSY' || error?.code === 'TAKEOVER_ACTIVE') return { ok: false, busy: true, code: error.code };
+        throw error;
+    }
+}
+
+/**
+ * 后台自动连接一轮。发现阶段（adb devices / mDNS / ARP / 端口探测）都是宿主侧只读查询，
+ * 不占设备管理锁；只有真正 connect / 切换选中设备时才进入管理互斥，避免长时间阻塞 AI 操作。
+ */
+async function backgroundReconnect(client, ctx = {}) {
+    if (autoConnectPaused) return { ok: false, code: 'PAUSED', message: '已手动断开，自动连接暂停；点「连接设备」恢复。' };
+    const deadlineMs = Date.now() + (ctx.budgetMs ?? 12000);
+    const left = (cap) => Math.max(1, Math.min(cap, deadlineMs - Date.now()));
+    const devices = await client.devices({ timeoutMs: left(5000), deadlineMs }).catch(() => null);
+    if (!devices) return { ok: false, code: 'ADB_UNAVAILABLE', message: 'adb 不可用。' };
+    const ready = devices.filter((device) => device.state === 'device');
+    const known = knownDevices?.list() || [];
+
+    if (client.serial && ready.some((device) => device.serial === client.serial)) {
+        if (client === adb && !rememberedSerials.has(client.serial)
+            && (IPV4_ADDRESS_RE.test(client.serial) || /^adb-/.test(client.serial))) {
+            await rememberDevice(client, client.serial, deadlineMs).catch(() => null);
+        }
+        return { ok: true, action: 'already-connected', serial: client.serial };
+    }
+    const selectedGone = !client.serial || !devices.some((device) => device.serial === client.serial);
+    const pick = selectedGone && (ready.find((device) => isKnownSerial(device.serial, known))
+        || (!client.serial ? ready[0] : null));
+    if (pick) {
+        const selected = await runBackgroundManagement(async () => {
+            await selectDevice(client, pick.serial);
+            return { ok: true, action: 'selected', serial: pick.serial, message: `已选用 ${pick.model || pick.serial}` };
+        });
+        return selected;
+    }
+    if (devices.some((device) => device.state === 'unauthorized')) {
+        return { ok: false, code: 'UNAUTHORIZED', message: '手机等待「允许调试」授权。' };
+    }
+
+    const candidates = [];
+    const seen = new Set();
+    const add = (address, source) => {
+        if (!address || seen.has(address) || ready.some((device) => device.serial === address)) return;
+        seen.add(address);
+        candidates.push({ address, source });
+    };
+    const services = await client.mdnsServices({ timeoutMs: left(4000), deadlineMs }).catch(() => []);
+    for (const service of services) if (service.kind === 'connect') add(service.address, 'mdns');
+
+    const legacy = client === adb ? readDeviceCache()?.address : null;
+    const targets = known.filter((item) => item.host || item.mac);
+    if (!targets.length && legacy && IPV4_ADDRESS_RE.test(legacy)) {
+        const [, host, port] = IPV4_ADDRESS_RE.exec(legacy);
+        targets.push({ host, port: Number(port) });
+    }
+    let arp = targets.some((item) => item.mac) ? await readArpTable({ timeoutMs: left(3000) }) : [];
+    const hostOf = (item) => (item.mac && arp.find((entry) => entry.mac === item.mac)?.ip) || item.host;
+    const probes = targets.filter((item) => item.port && hostOf(item)).map(async (item) => {
+        const host = hostOf(item);
+        const probe = await probePort(host, item.port, Math.min(800, left(800)));
+        if (probe.kind === 'OPEN') add(`${host}:${item.port}`, 'known');
+    });
+    await Promise.all(probes);
+
+    let deepScanned = false;
+    if (!candidates.length && ctx.deepScan && targets.length && deadlineMs - Date.now() > 2000) {
+        if (ctx.networkChanged) {
+            await primeArp(scanSubnets(), { waitMs: Math.min(1200, left(1200)) });
+            arp = await readArpTable({ timeoutMs: left(3000) });
+        }
+        const hosts = [...new Set(targets.map(hostOf).filter(Boolean))];
+        const scan = await scanLocalNetwork({ hosts, deadlineMs: Math.min(deadlineMs - 1500, Date.now() + 9000) });
+        deepScanned = true;
+        for (const { host, port } of scan.hosts) add(`${host}:${port}`, 'portscan');
+    }
+    if (!candidates.length) {
+        return { ok: false, code: 'NOT_FOUND', deepScanned,
+            message: known.length || legacy ? '已配对手机不在线：确认无线调试已打开且与电脑同一网络。' : '尚无已配对的手机。' };
+    }
+
+    let last = null;
+    for (const candidate of candidates.sort((a, b) => rankSource(b.source) - rankSource(a.source))) {
+        if (deadlineMs - Date.now() < 1500) break;
+        try {
+            last = await runBackgroundManagement(() => autoConnectDevice(client, { address: candidate.address, deadlineMs }));
+            if (last?.ok || last?.busy) return { ...last, deepScanned, source: candidate.source };
+        } catch (error) {
+            last = { ok: false, code: error.code || 'CONNECT_FAILED', message: error.message };
+            if (error.code === 'UNAUTHORIZED' || error.code === 'CONNECT_TIMEOUT') break;
+        }
+    }
+    return { ...(last || { ok: false, code: 'CONNECT_FAILED' }), deepScanned };
+}
+
+const QR_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+const QR_PAIRING_TTL_MS = 180000;
+
+function randomToken(length) {
+    return [...randomBytes(length)].map((byte) => QR_ALPHABET[byte % QR_ALPHABET.length]).join('');
 }
 
 /** 重连原传输；失败后由同一连接策略重新发现该主机。 */
@@ -1277,6 +1452,10 @@ async function rpcAction(serial, method, params, attempts, operation, options = 
         if (!ready.ok) {
             throw Object.assign(new Error(), { code: ready.code || 'UI_SERVER_NOT_READY', dispatched: false });
         }
+        // Resolve once per proven owner, before the final fresh target fence.
+        // The second click of DoubleTap must not add an ADB round trip.
+        const inputIdentity = isWrite && rpcMethods.entry(method)?.touch === true
+            ? await inputRecovery.identityFor(server.ownerIdentity?.binding || server, serial) : null;
         if (options.beforeDispatch) {
             await options.beforeDispatch();
             stepRuntime.check();
@@ -1288,15 +1467,23 @@ async function rpcAction(serial, method, params, attempts, operation, options = 
             timeoutMs: rpcActionTimeoutMs(method, params, options.durationMs),
         };
         // 从首击 invoke 前的单调时刻计窗；ACK 和第二击就绪等待都占用窗口。
-        const dispatchAt = performance.now();
-        if (options.dispatchDeadline !== undefined && dispatchAt > options.dispatchDeadline) {
-            throw Object.assign(new Error(), { code: 'DOUBLE_TAP_WINDOW_MISSED', dispatched: false });
-        }
-        if (options.dispatchTiming) options.dispatchTiming.startedAt = dispatchAt;
-        attempt.status = 'invoking';
-        invoking = true;
-        if (isWrite) stepRuntime.markDispatched();
-        const value = await withDeviceRpc(serial, () => server.invoke(method, params, request));
+        const value = await withDeviceRpc(serial, () => {
+            // Persistence is pre-dispatch work and must consume the original
+            // budget/window. Recheck after it, immediately before writing RPC.
+            try { stepRuntime.check(); }
+            catch (error) { throw Object.assign(error, { dispatched: false, drained: true }); }
+            const dispatchAt = performance.now();
+            if (options.dispatchDeadline !== undefined && dispatchAt > options.dispatchDeadline) {
+                throw Object.assign(new Error(), { code: 'DOUBLE_TAP_WINDOW_MISSED', dispatched: false, drained: true });
+            }
+            if (options.dispatchTiming) options.dispatchTiming.startedAt = dispatchAt;
+            attempt.status = 'invoking';
+            invoking = true;
+            if (isWrite) stepRuntime.markDispatched();
+            return server.invoke(method, params, request);
+        }, {
+            inputIdentity,
+        });
         rpcCompleted = true;
         if (isWrite) stepRuntime.markDispatched();
         attempt.status = 'dispatched';
@@ -1585,6 +1772,7 @@ async function swipe(args = {}) {
 
 const scrollUntil = require('./lib/scroll-until').createScrollUntil({
     stepRuntime, prepareTargets, rpcNodeSelector, dispatchInput, rpcAction, requireAdb,
+    freshProbe: serial => freshFrameProbe(requireAdb(), serial),
     uiServerEnabled, uiServerFor, getGraph: serial => lastObserve.get(serial)?.graph,
     textResult, channelReceipt,
 });
@@ -2276,6 +2464,14 @@ function describeVisionShot(shot, { serial }) {
 // 分发
 // ---------------------------------------------------------------------------
 
+async function requestHandoff(serial, reason, options) {
+    if (!humanInteraction.available()) throw stepRuntime.failure('HUMAN_INTERACTION_UNAVAILABLE', '宿主没有注入可信用户交互服务。');
+    const invalidate = () => { contextTracker.invalidate(serial); lastObserve.delete(serial); lastVision.delete(serial); };
+    invalidate();
+    try { return await humanInteraction.request('handoff', `设备：${serial}\n${reason}`, options); }
+    finally { invalidate(); }
+}
+
 async function handoff(args) {
     if (typeof args.reason !== 'string' || !args.reason.trim() || args.reason.length > 500
         || Object.keys(args).some(key => !['command', 'serial', 'reason'].includes(key))) {
@@ -2283,12 +2479,9 @@ async function handoff(args) {
     }
     const serial = args.serial;
     if (!humanInteraction.available()) throw stepRuntime.failure('HUMAN_INTERACTION_UNAVAILABLE', '宿主没有注入可信用户交互服务。');
-    const invalidate = () => { contextTracker.invalidate(serial); lastObserve.delete(serial); lastVision.delete(serial); };
-    invalidate();
     let resumed = false;
     stepRuntime.verified(false, { condition: { type: 'humanResume' }, evidence: { resumed: false, deviceEffectVerified: false } });
-    try { resumed = await humanInteraction.request('handoff', `设备：${serial}\n${args.reason}`); }
-    finally { invalidate(); }
+    resumed = await requestHandoff(serial, args.reason);
     stepRuntime.verified(resumed, { condition: { type: 'humanResume' }, evidence: { resumed, deviceEffectVerified: false } });
     return textResult(resumed ? '用户选择继续；旧凭据已失效，请根据当前界面继续。' : '用户选择停止；未恢复或重放任何动作。',
         { serial, handoff: resumed ? 'resumed' : 'stopped', actionVerified: resumed });
@@ -2508,7 +2701,7 @@ async function waitIdle(serial, timeoutMs, executionContext) {
         });
     } catch (error) {
         stepRuntime.check();
-        if (!['ADB_TIMEOUT', 'VERIFICATION_TIMEOUT'].includes(error.code) || Date.now() < deadlineMs) throw error;
+        if (!samplingExpired(error, deadlineMs)) throw error;
         result = { matched: false, idleMode: null, error: 'IDLE_TIMEOUT' };
     }
     stepRuntime.verified(result.matched, { condition: { type: 'idle' }, evidence: { idleMode: result.idleMode }, error: result.error || null });
@@ -2692,7 +2885,7 @@ async function recoverOwner(args) {
     }
     return stepRuntime.runManagement(async () => {
         const owner = await uiSessions.recover(serial);
-        return textResult('已独立证明原owner消失；隔离解除，未重放任何动作。', { serial, owner, recovered: true });
+        return textResult('已核验旧RPC退出及所需输入恢复证据；隔离解除，未重放任何动作。', { serial, owner, recovered: true });
     });
 }
 
@@ -2731,7 +2924,7 @@ async function runTask(args, executionContext) {
             await ensureActiveDevice(client, task.serial);
             stepRuntime.bindDevice(task.serial);
             assertDeviceCertain(task.serial);
-            const receipt = await taskPort.run(task, () => executor.run(task, taskPort));
+            const receipt = await taskPort.run(task, () => executor.run(task, taskPort, executionContext));
             if (receipt.status === 'completed' || stepRuntime.dispatchState().dispatched) {
                 stepRuntime.verified(receipt.status === 'completed', { condition: { type: 'taskCompletion', taskId: task.taskId },
                     evidence: { status: receipt.status, code: receipt.code } });
@@ -2938,13 +3131,7 @@ const deviceApi = {
     },
 
     async listDevices() {
-        let devices = [];
-        let error = null;
-        try {
-            devices = await adb.devices();
-        } catch (e) {
-            error = e.message;
-        }
+        const devices = await adb.devices();
         const ready = devices.filter((d) => d.state === 'device');
         return {
             ok: true,
@@ -2952,8 +3139,54 @@ const deviceApi = {
             ready: ready.length,
             // 前端据此决定要不要开始拉画面
             streaming: Boolean(frameHub?.status?.().streaming),
-            error,
+            autoConnect: autoConnector?.status() || { enabled: false, state: 'disabled' },
         };
+    },
+
+    /** 后台调度器专用：一轮自动连接，不经 HTTP 暴露。 */
+    async autoReconnect(ctx = {}) {
+        return backgroundReconnect(requireAdb(), ctx);
+    },
+
+    /**
+     * 二维码配对（与 Android Studio 相同协议）：手机「使用二维码配对设备」扫码后，
+     * 会以二维码里指定的实例名发布 _adb-tls-pairing 服务，主机据此找到它并用二维码里的密码配对。
+     */
+    async pairQrStart() {
+        const name = `studio-${randomToken(10)}`;
+        const password = randomToken(12);
+        const payload = `WIFI:T:ADB;S:${name};P:${password};;`;
+        qrPairing = { name, password, expiresAt: Date.now() + QR_PAIRING_TTL_MS };
+        return { ok: true, name, expiresAt: qrPairing.expiresAt, svg: qrSvg(payload) };
+    },
+
+    async pairQrPoll(body = {}) {
+        const session = qrPairing;
+        if (!session || (body.name && body.name !== session.name)) {
+            return { ok: false, state: 'stale', error: '二维码已失效，请重新生成。' };
+        }
+        if (Date.now() > session.expiresAt) {
+            qrPairing = null;
+            return { ok: false, state: 'expired', error: '二维码已过期，请重新生成。' };
+        }
+        const services = await adb.mdnsServices({ timeoutMs: 4000 }).catch(() => []);
+        const service = services.find((item) => item.kind === 'pairing' && item.name === session.name);
+        if (!service) return { ok: true, state: 'waiting' };
+        if (uiSessions.hasUncertain()) throw stepRuntime.failure('DEVICE_STATE_UNCERTAIN', 'RPC请求结局未知，设备管理暂停。');
+        const result = await stepRuntime.runManagement(() => adb.enqueue(['pair', service.address], {
+            timeoutMs: 30000, noSelector: true, input: `${session.password}\n`,
+        })).catch((error) => {
+            if (error?.code === 'DEVICE_BUSY') throw error;
+            return { stdout: '', stderr: error.message };
+        });
+        const output = `${result.stdout || ''}${result.stderr || ''}`;
+        if (!/Successfully paired/i.test(output)) {
+            return { ok: false, state: 'failed', error: output.trim() || '配对失败', hint: '在手机上重新扫码；仍失败时改用配对码。' };
+        }
+        if (qrPairing === session) qrPairing = null;
+        autoConnectPaused = false;
+        autoConnector?.trigger(1500);
+        return { ok: true, state: 'paired', address: service.address, message: '配对成功' };
     },
 
     async pair(body = {}) {
@@ -3025,10 +3258,12 @@ const deviceApi = {
             };
         }
 
+        autoConnectPaused = false;
         return { ok: true, address, autoDiscovered, message: '配对成功' };
     },
 
         async connect(body = {}) {
+        autoConnectPaused = false;
         return autoConnectDevice(requireAdb(), { address: firstString(body.address) || undefined });
     },
 
@@ -3036,6 +3271,7 @@ const deviceApi = {
         stepRuntime.assertManagementIdle();
         const client = requireAdb();
         const address = firstString(body.address);
+        autoConnectPaused = true;
         if (address) await uiSessions.stop(address);
         else await uiSessions.stopAll({ strict: true });
         await client.enqueue(address ? ['disconnect', address] : ['disconnect'], { timeoutMs: 10000, noSelector: true });
@@ -3102,6 +3338,9 @@ async function initializeService(options = {}) {
         logger: runtime.logger,
         timeoutMs: parseOptionalInt(config.ADB_TIMEOUT_MS),
     });
+    inputRecovery = new InputRecovery(path.join(path.dirname(resolvePreferencesFile(options)), 'android-input-recovery'),
+        async serial => bootIdentity(await adb.runText(['shell', 'cat /proc/sys/kernel/random/boot_id && settings get secure android_id'],
+            { serial, timeoutMs: 4000 })));
 
     frameHub = new FrameHub({
         adb,
@@ -3117,6 +3356,7 @@ async function initializeService(options = {}) {
     // scrcpy H.264 通道：帧率比 screencap 高一个数量级。
     // 设备地址要等连接后才知道，所以先建实例，start 时再补 serial。
     scrcpyHub = new ScrcpyHub({
+        control: true,
         adbPath: adb.adbPath,
         serial: config.DEVICE_SERIAL || '',
         logger: runtime.logger,
@@ -3134,12 +3374,22 @@ async function initializeService(options = {}) {
     const { fitWidth: _fitWidth, ...savedDisplayConfig } = await displayPreferences.load();
     scrcpyHub.configure(savedDisplayConfig);
 
-    viewerTakeover = createViewerTakeover({ runtime: stepRuntime, client: requireAdb,
+    viewerTakeover = createViewerTakeover({ runtime: stepRuntime,
         selectedSerial: () => adb?.serial || null,
         authorize: typeof runtime.humanInteraction?.request === 'function'
-            ? serial => humanInteraction.request('takeover', `设备：${serial}\n仅默认屏。允许本连接点击、滑动及返回/主页/最近任务，最长10分钟。\n原AI任务将停止，不会自动恢复；既有包策略与敏感动作限制仍然有效。`) : null,
-        capture: serial => screenshot({ serial, grid: false, maxWidth: 1080, quality: 75 }),
-        execute: (serial, action) => executeStep({ serial, action }, {}),
+            ? serial => humanInteraction.request('takeover', `设备：${serial}\n仅默认屏。允许本连接在实时画面上触摸、拖动及返回/主页/最近任务，最长10分钟。\n原AI任务将停止，不会自动恢复；禁止访问/只读应用策略仍然有效，逐次确认不适用于人工实时输入。`) : null,
+        control: () => (scrcpyHub?.serial === adb?.serial ? scrcpyHub : null),
+        // Human live input: package deny/read-only rules apply; per-write confirmation is
+        // satisfied by the session approval because the human is the actor.
+        checkPolicy: async serial => {
+            const probe = await requireAdb().probeScreen(serial);
+            const pkg = probe?.focus?.package || '';
+            const decision = interactionPolicy.decide({ operation: 'write', package: pkg });
+            if (!decision.allowed && !decision.needsConfirmation) {
+                throw Object.assign(new Error('前台应用受包策略限制。'), { code: decision.code });
+            }
+            return pkg;
+        },
         invalidate: serial => { contextTracker.invalidate(serial); lastObserve.delete(serial); lastVision.delete(serial); },
         assertCertain: assertDeviceCertain, quarantine: quarantineDevice,
     });
@@ -3162,6 +3412,21 @@ async function initializeService(options = {}) {
         runtime.logger.warn?.(`[AndroidController] 显示屏启动失败：${error.message}`);
     }
 
+    await autoConnector?.stop();
+    autoConnector = null;
+    knownDevices = new KnownDevices({ file: knownDevicesFile(), fs });
+    rememberedSerials.clear();
+    autoConnectPaused = false;
+    qrPairing = null;
+    if (autoConnectEnabled()) {
+        autoConnector = createAutoConnector({
+            logger: runtime.logger,
+            fingerprint: networkFingerprint,
+            attempt: (ctx) => deviceApi.autoReconnect(ctx),
+        });
+        autoConnector.start();
+    }
+
     runtime.logger.log?.(`[AndroidController] 已初始化，adb=${adb.adbPath}，显示屏=${streamServer.url() || '不可用'}`);
 }
 
@@ -3171,6 +3436,10 @@ function cleanup() {
     const initializing = initializePromise;
     cleanupPromise = (async () => {
         await initializing?.catch(() => {});
+        const connector = autoConnector;
+        autoConnector = null;
+        qrPairing = null;
+        await connector?.stop();
         const draining = stepRuntime.cancelAndDrain();
         await viewerTakeover?.stop();
         await draining;
@@ -3203,8 +3472,11 @@ function getRuntimeStatus() {
         scrcpy: scrcpyHub?.status() || null,
         // 性能基线观测面：队列压力与显示链路丢帧计数。只读快照，不改变调度行为。
         adbQueue: adb?.queueStats?.() || null,
+        // 结局未知而被隔离的 adb 选择器；按选择器记录，不代表物理设备身份。
+        quarantinedDevices: uiSessions.uncertainSerials(),
         display: streamServer?.metrics?.() || null,
         takeover: viewerTakeover?.status() || null,
+        autoConnect: autoConnector?.status() || null,
     };
 }
 
@@ -3233,6 +3505,8 @@ module.exports = {
         scanLocalNetwork,
         autoConnectDevice,
         reconnectDevice,
+        backgroundReconnect,
+        rememberDevice,
         normalizeConnectAddress,
 
         waitForForeground,

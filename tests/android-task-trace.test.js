@@ -14,7 +14,7 @@ const TERMINAL_RESERVE_BYTES = 4096;
 const SECRET = 'private query / raw interface / secret password';
 function header() {
     return { schemaVersion: 1, taskId: randomUUID(), serial: '127.0.0.1:5555', package: 'com.example.app',
-        intent: 'search', inputRefs: ['query'],
+        intent: 'search', inputRefs: ['query'], completionPolicyVersion: 'search-completion-v2',
         budget: { timeoutMs: 1000, maxActions: 8, maxObservations: 16, maxModelCalls: 2 } };
 }
 function event() {
@@ -164,11 +164,16 @@ test('exclusive canonical task filenames never overwrite a conflicting task', as
 
 test('Jev candidates are bounded data snapshots with no getters, raw labels or foreign targets', async t => {
     const f = await fixture(t);
-    const h = { ...header(), decision: 'jev', policyVersion: 'search-v1' };
+    const h = { ...header(), decision: 'jev', policyVersion: 'search-v9' };
     const trace = await f.store.open(h);
     const candidate = () => ({ candidateId: 'c0', targetId: 'com.example.app:id/search', command: 'Tap',
-        evidenceSources: ['text'], postcondition: 'search_progress' });
-    const event = candidates => ({ type: 'candidates', step: 'entry', candidates });
+        evidenceSources: ['text'], postcondition: 'search_progress', inputRef: null,
+        semantics: { role: 'button', hints: ['search'], fieldRelation: 'none' } });
+    const observation = { id: randomUUID(), digest: 'a'.repeat(64), contextDigest: 'b'.repeat(64), controls: 1 };
+    const decisionContext = { version: 'search-feedback-v4', observationId: observation.id, round: 1,
+        queryVerified: false, screenChanged: null, consecutiveStale: 0, waits: 0, recentActions: [], lastEvent: 'initial',
+        remaining: { timeoutMs: 1000, actions: 8, observations: 16, modelCalls: 2, rounds: 8, waits: 2 } };
+    const event = candidates => ({ type: 'candidates', step: 'entry', candidates, observation, decisionContext });
     for (const patch of [{ text: SECRET }, { targetId: 'other.app:id/search' }, { command: 'Shell' },
         { postcondition: SECRET }, { evidenceSources: ['text', 'text'] }, { evidenceSources: [SECRET] }, { candidateId: 'c9' }]) {
         await rejects(trace.append(event([{ ...candidate(), ...patch }])));
@@ -184,7 +189,7 @@ test('Jev candidates are bounded data snapshots with no getters, raw labels or f
     await trace.append({ type: 'decision', source: 'jev', choice: 'c0' });
     await trace.close();
     const rows = await lines(f.file(h));
-    assert.equal(rows[0].policyVersion, 'search-v1');
+    assert.equal(rows[0].policyVersion, 'search-v9');
     assert.equal(rows.length, 3);
     assert.equal((await fs.readFile(f.file(h), 'utf8')).includes(SECRET), false);
 });

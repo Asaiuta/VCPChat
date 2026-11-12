@@ -18,6 +18,7 @@
 
 const DEFAULT_DISPLAY = 0;
 const MAX_DISPLAY_ID = 999999;
+const MIRROR_CONTEXT_POLICY_VERSION = 'shell-mirror-context-v2';
 
 class DisplayTargetError extends Error {
     constructor(code, message) {
@@ -115,11 +116,20 @@ function isShellPrivateMirror(info, windowSection) {
     if (!info || info.type !== 'VIRTUAL' || info.ownerPackage !== 'com.android.shell' || info.ownerUid !== 2000) return false;
     if (!/^virtual:com\.android\.shell,2000,/.test(info.uniqueId)) return false;
     if (!info.flags.includes('FLAG_PRIVATE') || info.flags.includes('FLAG_OWN_CONTENT_ONLY') || info.flags.includes('FLAG_TRUSTED')) return false;
-    const text = String(windowSection ?? '');
+    const text = String(windowSection ?? '').replace(/\r/g, '');
     const focus = [...text.matchAll(/^[ \t]*mCurrentFocus=([^\n]*)$/gm)].map(m => m[1].trim());
     const focusedApp = [...text.matchAll(/^[ \t]*mFocusedApp=([^\n]*)$/gm)].map(m => m[1].trim());
+    // DisplayContent dumps the shared TransitionController on every display. Its
+    // participants can belong to display 0; they do not establish local ownership.
+    // Only remove one fully delimited controller block at the observed indentation.
+    // An incomplete/duplicate block or ActivityRecord elsewhere remains untrusted.
+    const starts = [...text.matchAll(/^([ \t]+)TransitionController:[ \t]*$/gm)];
+    const ends = [...text.matchAll(/^([ \t]+)BLASTSyncEngine:[ \t]*$/gm)];
+    const local = starts.length === 1 && ends.length === 1 && starts[0][1] === ends[0][1]
+        && starts[0].index < ends[0].index
+        ? text.slice(0, starts[0].index) + text.slice(ends[0].index) : text;
     return focus.length === 1 && focus[0] === 'null' && focusedApp.length === 1 && focusedApp[0] === 'null'
-        && !/ActivityRecord\{/.test(text);
+        && !/ActivityRecord\{/.test(local);
 }
 
 /**
@@ -166,6 +176,7 @@ function filterHierarchyByDisplay(xml, displayId) {
 }
 
 module.exports = {
+    MIRROR_CONTEXT_POLICY_VERSION,
     DEFAULT_DISPLAY,
     DisplayTargetError,
     isDisplayId,

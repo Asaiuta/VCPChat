@@ -40,11 +40,17 @@ function serverFixture(t, options = {}) {
     };
     const server = new StreamServer({ scrcpyHub: hub, frameHub, ...options, logger: { warn() {}, log() {} } });
     t.after(() => { server.stopWatchdog(); server.cancelScrcpyProbe(); });
-    return { server, hub, socket: new Socket() };
+    const socket = new Socket();
+    server.sendScrcpyPacket(socket, { type: 'session', width: 720, height: 1600 });
+    server.sendScrcpyPacket(socket, { type: 'config', data: Buffer.from([1, 2]) });
+    server.sendScrcpyPacket(socket, { type: 'frame', key: true, seq: 1, data: Buffer.from([3]) });
+    server.resetMetrics();
+    socket.sent.length = 0;
+    return { server, hub, socket };
 }
 
 const jpegFrame = (bytes = 32) => ({ seq: 1, capturedAt: 1, buffer: Buffer.alloc(bytes) });
-const deltaPacket = (bytes = 32) => ({ type: 'frame', seq: 2, pts: 1, key: false, data: Buffer.alloc(bytes) });
+const deltaPacket = (bytes = 32, seq = 2) => ({ type: 'frame', seq, pts: seq, key: false, data: Buffer.alloc(bytes) });
 
 // ---------------------------------------------------------------- adb 队列
 
@@ -56,6 +62,8 @@ test('adb 队列计数默认全为零，且 query 不产生副作用', () => {
         peakDepth: 0, completed: 0, failed: 0,
         rejected: { ADB_QUEUE_FULL: 0, ADB_TIMEOUT: 0, ADB_ABORTED: 0 },
         failedByCode: {},
+        keyNamespace: 'adb-selector', exclusiveRunning: false, pendingExclusive: 0,
+        activeKeys: [], pendingByKey: {},
     });
     // 连读两次必须完全等价：观测不得推进任何状态。
     assert.deepEqual(client.queueStats(), first);
@@ -144,7 +152,7 @@ test('H.264 发送计数按包与字节累加', (t) => {
     assert.equal(server.metrics().h264PacketsSent, 0);
 
     server.sendScrcpyPacket(socket, deltaPacket(100));
-    server.sendScrcpyPacket(socket, deltaPacket(50));
+    server.sendScrcpyPacket(socket, deltaPacket(50, 3));
 
     const metrics = server.metrics();
     assert.equal(metrics.h264PacketsSent, 2);

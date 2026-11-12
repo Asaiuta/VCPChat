@@ -20,7 +20,12 @@ async function harness({ serial = 'A', devices, cache = null, mdns = [], shotErr
         async devices() { calls.push(['devices']); return listed; },
         async version() { return 'fake'; },
         async mdnsServices(options) { calls.push(['mdns', options]); return mdns; },
-        async probeScreen(target) { calls.push(['probe', target]); return { focus: {}, size: { width: 100, height: 200 }, wakefulness: 'Awake' }; },
+        async probeScreen(target) {
+            calls.push(['probe', target]);
+            return { focus: { package: 'com.example', component: 'com.example/.Main', window: 'Window{test u0 com.example/.Main}' },
+                size: { width: 100, height: 200 }, wakefulness: 'Awake', rotation: 0, displayId: 0,
+                keyguard: { showing: false, inputRestricted: false } };
+        },
         async screenSize(target) { calls.push(['size', target]); return { width: 100, height: 200 }; },
         async currentFocus(target) { calls.push(['focus', target]); return { package: 'com.example', component: 'com.example/.Main' }; },
         async runText(args, options = {}) {
@@ -29,7 +34,7 @@ async function harness({ serial = 'A', devices, cache = null, mdns = [], shotErr
                 listed = [...listed.filter((d) => d.serial !== args[1]), { serial: args[1], state: 'device' }];
                 return `connected to ${args[1]}`;
             }
-            if (args.includes('uiautomator')) return '<hierarchy><node class="android.widget.Button" package="com.example" text="Go" clickable="true" bounds="[0,0][100,100]" /></hierarchy>';
+            if (args.includes('uiautomator')) return '<hierarchy rotation="0"><node class="android.widget.Button" package="com.example" text="Go" clickable="true" bounds="[0,0][100,100]" /></hierarchy>';
             if (args[0] === 'pair') return 'Successfully paired to 192.168.1.8:41001';
             if (args.includes('packages')) return 'package:com.example';
             if (args.includes('resolve-activity')) return 'com.example/.Main';
@@ -62,21 +67,27 @@ async function harness({ serial = 'A', devices, cache = null, mdns = [], shotErr
             readFileSync() { if (cache) return JSON.stringify({ address: cache }); throw new Error('absent'); },
             mkdirSync() {}, writeFileSync() {}, unlinkSync() {},
         },
-        'node:os': { networkInterfaces() { return { WiFi: [{ family: 'IPv4', internal: false, address: '10.2.3.4' }, { family: 'IPv4', internal: false, address: '172.20.1.2' }] }; } },
-        os: { networkInterfaces() { return { WiFi: [{ family: 'IPv4', internal: false, address: '10.2.3.4' }, { family: 'IPv4', internal: false, address: '172.20.1.2' }] }; } },
-        child_process: { execFileSync() { throw new Error('request path must not spawn sync processes'); } },
+        'node:os': { ...require('node:os'), networkInterfaces() { return { WiFi: [{ family: 'IPv4', internal: false, address: '10.2.3.4' }, { family: 'IPv4', internal: false, address: '172.20.1.2' }] }; } },
+        os: { ...require('node:os'), networkInterfaces() { return { WiFi: [{ family: 'IPv4', internal: false, address: '10.2.3.4' }, { family: 'IPv4', internal: false, address: '172.20.1.2' }] }; } },
+        child_process: {
+            execFileSync() { throw new Error('request path must not spawn sync processes'); },
+            execFile(command, args, _options, callback) {
+                assert.equal(command, 'arp'); assert.deepEqual(Array.from(args), ['-a']);
+                calls.push(['remember-arp']); callback(null, '');
+            },
+        },
     };
     const networkEntry = path.resolve(path.dirname(entry), 'lib/device-network.js');
     const network = { exports: {} };
     vm.runInNewContext(fs.readFileSync(networkEntry, 'utf8'), {
-        module: network, exports: network.exports,
+        module: network, exports: network.exports, __dirname: path.dirname(networkEntry), __filename: networkEntry,
         require(name) { return Object.hasOwn(overrides, name) ? overrides[name] : realRequire(name); },
         setTimeout, clearTimeout,
     }, { filename: networkEntry });
     overrides['./lib/device-network'] = network.exports;
     const module = { exports: {} };
     vm.runInNewContext(fs.readFileSync(entry, 'utf8'), {
-        module, exports: module.exports,
+        module, exports: module.exports, __dirname: path.dirname(entry), __filename: entry,
         require(name) { return Object.hasOwn(overrides, name) ? overrides[name] : realRequire(name); },
         console, Buffer, process, setTimeout, clearTimeout,
     }, { filename: entry });

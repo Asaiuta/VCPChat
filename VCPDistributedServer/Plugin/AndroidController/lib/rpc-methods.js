@@ -14,16 +14,16 @@
  */
 const RPC_METHODS = Object.freeze({
     // 点击/原生长按：click(x,y[,milliseconds])；三参重载在随包 APK 上已确认存在。
-    click: { arity: [2, 3], write: true },
+    click: { arity: [2, 3], write: true, touch: true },
     // 滑动：swipe(x1,y1,x2,y2,steps)，steps ≈ duration/5；同点形状仅作长按回退。
-    swipe: { arity: [5], write: true },
+    swipe: { arity: [5], write: true, touch: true },
     // longClick 只接收 Selector/String，没有坐标重载；语义未做真机准入。
-    longClick: { arity: [1], write: true, experimental: true },
-    drag: { arity: [5], write: true, experimental: true },
-    dragTo: { arity: [4], write: true, experimental: true },
-    pinchIn: { arity: [3], write: true, experimental: true },
-    pinchOut: { arity: [3], write: true, experimental: true },
-    scrollTo: { arity: [3], write: true, experimental: true },
+    longClick: { arity: [1], write: true, touch: true, experimental: true },
+    drag: { arity: [5], write: true, touch: true, experimental: true },
+    dragTo: { arity: [4], write: true, touch: true, experimental: true },
+    pinchIn: { arity: [3], write: true, touch: true, experimental: true },
+    pinchOut: { arity: [3], write: true, touch: true, experimental: true },
+    scrollTo: { arity: [3], write: true, touch: true, experimental: true },
     pressKeyCode: { arity: [1, 2], write: true, experimental: true },
     setText: { arity: [2], write: true },
     clearTextField: { arity: [1], write: true },

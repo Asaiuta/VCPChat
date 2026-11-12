@@ -95,7 +95,7 @@ function createInteractionGuard({ policy, probe, captureGraph, check, fail, huma
             throw deny('POLICY_CONTEXT_UNPROVEN', '未确认醒着且未锁定的输入上下文。');
         }
         let graph = { controls: [] };
-        if (!['system', 'launchapp', 'killapp', 'wake'].includes(state.command)) {
+        if (state.action.taskObservationRequired === true || !['system', 'launchapp', 'killapp', 'wake'].includes(state.command)) {
             try { graph = await captureGraph(serial, { limit: 500, screen: current.size, rpcTarget: true }); }
             catch (error) {
                 if (/^(?:POLICY_|STEP_|DEVICE_STATE_UNCERTAIN)/.test(error.code || '')) throw error;
@@ -111,7 +111,7 @@ function createInteractionGuard({ policy, probe, captureGraph, check, fail, huma
                 throw deny('POLICY_CONTEXT_CHANGED', '派发前安全采样改变了上下文。');
             }
         }
-        assertWrite(serial, current, graph);
+        await assertWrite(serial, current, graph);
         return { probe: current, graph };
     }
     function assertDecision(state, current, graph, defer = false) {

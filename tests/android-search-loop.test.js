@@ -76,8 +76,8 @@ for (const [name, options, code] of [
 test('no candidates exposes only wait/escalate; model cannot invent target or command', async () => {
     const h = await searchWorld({ noRelevant: true, decide(state, questions) {
         assert.equal(state.candidates.length, 0);
-        assert.deepEqual(Object.keys(questions.next.criteria), ['wait', 'escalate']);
-        return { answers: { next: { probabilities: { c0: 1, wait: 0, escalate: 0 } } }, actions: [{ command: 'shell' }], success: true };
+        assert.deepEqual(Object.keys(questions[Object.keys(questions)[0]].criteria), ['wait', 'escalate']);
+        return { answers: { [Object.keys(questions)[0]]: { probabilities: { c0: 1, wait: 0, escalate: 0 } } }, actions: [{ command: 'shell' }], success: true };
     } });
     assert.equal(result(await h.run()).code, 'TASK_JEV_INVALID');
     assert.equal(h.actions.length, 0);
@@ -85,10 +85,10 @@ test('no candidates exposes only wait/escalate; model cannot invent target or co
 
 for (const [name, answer, code] of [
     ['missing', () => ({}), 'TASK_JEV_INVALID'],
-    ['foreign', () => ({ answers: { next: { probabilities: { c9: 1, wait: 0, escalate: 0 } } } }), 'TASK_JEV_INVALID'],
-    ['nonfinite', () => ({ answers: { next: { probabilities: { c0: NaN, wait: 0, escalate: 0 } } } }), 'TASK_JEV_INVALID'],
-    ['unnormalized', () => ({ answers: { next: { probabilities: { c0: 1, wait: 1, escalate: 0 } } } }), 'TASK_JEV_INVALID'],
-    ['uncertain', () => ({ answers: { next: { probabilities: { c0: 0.6, wait: 0.3, escalate: 0.1 } } } }), 'TASK_JEV_UNCERTAIN'],
+    ['foreign', q => ({ answers: { [Object.keys(q)[0]]: { probabilities: { c9: 1, wait: 0, escalate: 0 } } } }), 'TASK_JEV_INVALID'],
+    ['nonfinite', q => ({ answers: { [Object.keys(q)[0]]: { probabilities: { c0: NaN, wait: 0, escalate: 0 } } } }), 'TASK_JEV_INVALID'],
+    ['unnormalized', q => ({ answers: { [Object.keys(q)[0]]: { probabilities: { c0: 1, wait: 1, escalate: 0 } } } }), 'TASK_JEV_INVALID'],
+    ['uncertain', q => ({ answers: { [Object.keys(q)[0]]: { probabilities: { c0: 0.6, wait: 0.3, escalate: 0.1 } } } }), 'TASK_JEV_UNCERTAIN'],
     ['escalate', q => response(q, 'escalate'), 'TASK_ESCALATION_REQUIRED'],
 ]) test(`${name} Jev result causes zero input`, async () => {
     const h = await searchWorld({ decide: (_, questions) => answer(questions) });
@@ -96,38 +96,42 @@ for (const [name, answer, code] of [
     assert.equal(h.actions.length, 0);
 });
 
-test('bounded wait re-observes without input and then may proceed', async () => {
+test('declared loading wait re-observes without input and then may proceed', async () => {
     let calls = 0;
-    const h = await searchWorld({ decide(state, questions) {
+    const h = await searchWorld({ nodes: nodes => calls === 0
+        ? [...nodes, { name: 'loading', label: '', kind: 'ProgressBar', clickable: false }] : nodes,
+        decide(state, questions) {
         return response(questions, ++calls === 1 ? 'wait' : state.candidates[0].candidateId);
     } });
-    const r = result(await h.run());
+    const r = result(await h.run(spec({ loading: { id: id('loading') } })));
     assert.equal(r.status, 'completed', JSON.stringify(r));
     assert.equal(h.actions.length, 3);
     assert.equal(r.counts.modelCalls, 4);
 });
 
-test('unchanging waits stop after two waits without replay', async () => {
-    const h = await searchWorld({ decide: (_, q) => response(q, 'wait') });
+test('missing candidates alone cannot authorize a loading wait', async () => {
+    const h = await searchWorld({ noRelevant: true, decide: (_, q) => response(q, 'wait') });
     const r = result(await h.run());
-    assert.equal(r.code, 'TASK_NO_PROGRESS');
-    assert.equal(r.counts.modelCalls, 3);
+    assert.equal(r.code, 'TASK_WAIT_UNPROVEN');
+    assert.equal(r.counts.modelCalls, 1);
     assert.equal(h.actions.length, 0);
 });
 
-test('model result is bound to the prior observation; page drift blocks dispatch', async () => {
+test('persistent model-time drift stops on the third stale without dispatch', async () => {
     let h;
     h = await searchWorld({ decide: (_, questions) => { h.change(); return response(questions, 'c0'); } });
-    assert.equal(result(await h.run()).code, 'TASK_OBSERVATION_CHANGED');
+    assert.equal(result(await h.run()).code, 'TASK_STALE_LIMIT');
+    assert.equal(h.models.length, 3);
     assert.equal(h.actions.length, 0);
 });
 
-test('last policy sample drift stops after model revalidation but before any input', async () => {
+test('last policy sample drift redecides from a fresh observation before input', async () => {
     const h = await searchWorld({ onCapture(count, tools) { if (count === 4) tools.change(); } });
     const r = result(await h.run());
-    assert.equal(r.status, 'stopped');
-    assert.ok(['TASK_OBSERVATION_CHANGED', 'ELEMENT_TARGET_CHANGED'].includes(r.code), r.code);
-    assert.equal(h.actions.length, 0);
+    assert.equal(r.status, 'completed', JSON.stringify(r));
+    assert.equal(r.receipts[0].outcome, 'failed');
+    assert.deepEqual(h.actions.map(a => a.target), ['open', 'query', 'search_go']);
+    assert.equal(r.counts.staleEvents, 1);
 });
 
 test('changing the filled value before submit stops instead of searching an unrelated input', async () => {
@@ -216,7 +220,7 @@ test('production GlobalJevService receives bounded loop choices and no retries t
     const r = result(await h.run());
     assert.equal(r.status, 'completed', JSON.stringify(r));
     assert.equal(calls.length, 3);
-    assert.ok(calls.every(call => call.maxRetries === 0 && call.timeoutMs <= 2000 && call.signal));
+    assert.ok(calls.every(call => call.maxRetries === 0 && call.timeoutMs <= 30000 && call.signal));
 });
 
 test('model cancellation holds the shared device lease until its dependency drains', async () => {
@@ -266,7 +270,7 @@ test('real trace stores bounded candidates, source evidence and chosen IDs witho
     assert.equal(text.includes(spec().inputs.query), false);
     assert.equal(text.includes('Found results'), false);
     const rows = text.trim().split('\n').map(JSON.parse);
-    assert.equal(rows[0].policyVersion, 'search-v1');
+    assert.equal(rows[0].policyVersion, 'search-v9');
     assert.equal(rows.filter(r => r.type === 'candidates').length, 3);
     assert.equal(rows.filter(r => r.type === 'decision' && r.source === 'jev').length, 3);
     assert.equal(rows.filter(r => r.type === 'action' && r.phase === 'settled').length, 3);

@@ -91,6 +91,7 @@ class DistributedServer {
         this.androidTaskExecutor = createAndroidTaskExecutor({ jev: this.jevService,
             traceStore: createTaskTraceStore({ directory: path.join(__dirname, '..', 'AppData', 'android-task-traces') }) });
         this.activeToolCalls = new Map();
+        this.androidTaskReplans = require('../modules/services/androidTaskReplanChannel').createAndroidTaskReplanChannel();
         this.onToolResult = typeof config.onToolResult === 'function' ? config.onToolResult : null; // 工具调用成功后的旁路通知，不影响返回结果
         this.ws = null;
         this.app = express(); // 创建 Express 应用
@@ -662,6 +663,8 @@ class DistributedServer {
             } else if (parsedMessage.type === 'cancel_tool') {
                 const call = this.activeToolCalls.get(parsedMessage.data?.requestId);
                 if (call?.socket === socket) call.controller.abort();
+            } else if (parsedMessage.type === 'android_task_replan_result') {
+                this.androidTaskReplans.receive(socket, parsedMessage.data);
             }
         } catch (e) {
             console.error(`[${this.serverName}] Error parsing message from main server:`, e);
@@ -732,6 +735,8 @@ class DistributedServer {
             const result = await pluginManager.processToolCall(toolName, toolArgs, {
                 requestId,
                 signal: controller.signal,
+                ...(toolName === 'AndroidController' && data.androidTaskReplan === 1
+                    ? { androidTaskReplan: this.androidTaskReplans.bind(socket, requestId) } : {}),
                 vcpContext: _vcpContext && typeof _vcpContext === 'object'
                     ? { ..._vcpContext, requestId }
                     : { requestId }
@@ -954,6 +959,7 @@ class DistributedServer {
         for (const call of this.activeToolCalls.values()) {
             if (!socket || call.socket === socket) call.controller.abort();
         }
+        this.androidTaskReplans.close(socket);
     }
 
     sendMessage(payload) {

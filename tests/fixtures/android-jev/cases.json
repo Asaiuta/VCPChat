@@ -1,0 +1,216 @@
+{
+  "schemaVersion": 1,
+  "provenance": "Handwritten synthetic offline UI worlds; no device trace or model traffic",
+  "cases": [
+    {
+      "name": "empty-result-placeholder",
+      "world": "completion",
+      "options": {
+        "placeholder": true
+      },
+      "expectedWrites": [
+        "open",
+        "fill",
+        "submit"
+      ],
+      "status": "completed"
+    },
+    {
+      "name": "delayed-result-items",
+      "world": "completion",
+      "options": {
+        "start": "form",
+        "delayItemsReads": 3
+      },
+      "expectedWrites": [
+        "fill",
+        "submit"
+      ],
+      "status": "completed"
+    },
+    {
+      "name": "one-model-time-stale",
+      "world": "search",
+      "modelStales": 1,
+      "expectedWrites": [
+        "open",
+        "query",
+        "search_go"
+      ],
+      "status": "completed",
+      "modelCalls": 4,
+      "staleEvents": 1
+    },
+    {
+      "name": "two-model-time-stales",
+      "world": "search",
+      "modelStales": 2,
+      "expectedWrites": [
+        "open",
+        "query",
+        "search_go"
+      ],
+      "status": "completed",
+      "modelCalls": 5,
+      "staleEvents": 2
+    },
+    {
+      "name": "three-model-time-stales",
+      "world": "search",
+      "modelStales": 3,
+      "expectedWrites": [],
+      "status": "stopped",
+      "code": "TASK_STALE_LIMIT",
+      "modelCalls": 3,
+      "staleEvents": 3
+    },
+    {
+      "name": "one-dispatch-stale",
+      "world": "search",
+      "dispatchStales": 1,
+      "expectedWrites": [
+        "open",
+        "query",
+        "search_go"
+      ],
+      "status": "completed",
+      "modelCalls": 4,
+      "staleEvents": 1
+    },
+    {
+      "name": "two-dispatch-stales",
+      "world": "search",
+      "dispatchStales": 2,
+      "expectedWrites": [
+        "open",
+        "query",
+        "search_go"
+      ],
+      "status": "completed",
+      "modelCalls": 5,
+      "staleEvents": 2
+    },
+    {
+      "name": "three-dispatch-stales",
+      "world": "search",
+      "dispatchStales": 3,
+      "expectedWrites": [],
+      "status": "stopped",
+      "code": "TASK_STALE_LIMIT",
+      "modelCalls": 3,
+      "staleEvents": 3
+    }
+  ],
+  "waitCases": [
+    {
+      "name": "permanent loading",
+      "options": {},
+      "code": "TASK_WAIT_TIMEOUT"
+    },
+    {
+      "name": "missing candidates after clearing",
+      "options": {
+        "clearAt": 4600,
+        "candidatesAt": 5200
+      },
+      "code": "TASK_WAIT_TIMEOUT"
+    },
+    {
+      "name": "trace cost",
+      "options": {
+        "slowTrace": 4900
+      },
+      "code": "TASK_WAIT_TIMEOUT"
+    },
+    {
+      "name": "root deadline",
+      "options": {
+        "rootDeadline": 350
+      },
+      "code": "STEP_DEADLINE"
+    },
+    {
+      "name": "cancellation",
+      "options": {
+        "cancelAt": 200
+      },
+      "code": "STEP_ABORTED"
+    },
+    {
+      "name": "context drift",
+      "options": {
+        "contextAt": 200
+      },
+      "code": "TASK_CONTEXT_UNPROVEN"
+    },
+    {
+      "name": "epoch drift",
+      "options": {
+        "epochAt": 200
+      },
+      "code": "TASK_CONTEXT_UNPROVEN"
+    },
+    {
+      "name": "old result appears",
+      "options": {
+        "oldResultAt": 200
+      },
+      "code": "TASK_COMPLETION_PREEXISTS"
+    },
+    {
+      "name": "observation budget",
+      "options": {
+        "maxObservations": 10
+      },
+      "code": "TASK_BUDGET_EXHAUSTED"
+    }
+  ],
+  "backCases": [
+    {
+      "name": "panel-to-field",
+      "options": {
+        "back": true
+      },
+      "expectedWrites": [
+        "back",
+        "setText",
+        "click"
+      ],
+      "status": "completed",
+      "modelCalls": 3
+    },
+    {
+      "name": "panel-to-ime",
+      "options": {
+        "back": true,
+        "ime": "search"
+      },
+      "expectedWrites": [
+        "back",
+        "setText",
+        "click",
+        "pressKeyCode"
+      ],
+      "status": "completed",
+      "modelCalls": 4
+    },
+    {
+      "name": "original-budget",
+      "options": {
+        "back": true
+      },
+      "task": {
+        "budget": {
+          "maxActions": 2
+        }
+      },
+      "expectedWrites": [
+        "back",
+        "setText"
+      ],
+      "status": "stopped",
+      "code": "TASK_BUDGET_EXHAUSTED",
+      "modelCalls": 2
+    }
+  ]
+}

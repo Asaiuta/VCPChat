@@ -6,63 +6,10 @@ const { randomUUID, createHash } = require('node:crypto');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
-const { harness } = require('./helpers/android-service-harness.cjs');
 const { createAndroidTaskExecutor } = require('../modules/services/androidTaskExecutor');
 const { createTaskTraceStore } = require('../modules/services/androidTaskTrace');
-const { response } = require('./helpers/android-search-world.cjs');
 
-const pkg = 'com.example';
-const id = name => `${pkg}:id/${name}`;
-const query = 'private completion input 943';
-const completion = { type: 'visible', id: id('results'), item: id('item'), minItems: 2,
-    itemMatchesInput: true, absent: id('blocker') };
-const spec = (decision, extra = {}) => ({ serial: 'A', package: pkg, intent: 'search', decision,
-    inputs: { query }, completion,
-    ...(decision === 'jev' ? {} : { targets: { entry: id('open'), field: id('query'), submit: id('search_go') } }), ...extra });
-const escape = value => String(value).replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;');
-const node = (name, value, top, kind = 'Button', children = '') => `<node class="android.widget.${kind}" package="${pkg}" resource-id="${id(name)}" text="${escape(value)}" enabled="true" clickable="${kind !== 'TextView'}" bounds="[0,${top}][90,${top + 35}]">${children}</node>`;
-
-async function fixture(options = {}) {
-    let page = options.start || 'home', value = '', resultReads = 0, submittedAt;
-    const events = [], writes = [], sampleTimes = [];
-    const traceStore = { async open(header) {
-        events.push(header);
-        return { async append(event) {
-            events.push(structuredClone(event));
-            if (event.type === 'observation' && event.step === 'complete') sampleTimes.push(Date.now());
-        }, async close() {} };
-    } };
-    const executor = createAndroidTaskExecutor({ traceStore, jev: { async decide(state, questions) {
-        return questions.next ? response(questions, 'c0') : { answers: { target: { probabilities: { c0: 1, none: 0 } } } };
-    } } });
-    const xml = () => {
-        if (page === 'results') resultReads++;
-        const form = page === 'home' ? node('open', 'Search', 0) : page === 'form'
-            ? node('query', value, 0, 'EditText') + node('search_go', 'Search', 45) : '';
-        const elapsed = submittedAt === undefined ? 0 : Date.now() - submittedAt;
-        const hasItems = page === 'results' ? resultReads > (options.delayItemsReads || 0)
-            && elapsed >= (options.itemsAfterMs || 0) : options.oldItems;
-        const items = hasItems ? node('item', 'other result', 105, 'TextView')
-            + node('item', options.wrongItems ? 'unrelated result' : query, 115, 'TextView') : '';
-        const marker = page === 'results' && elapsed >= (options.delayContainerMs || 0) || options.placeholder
-            ? node('results', 'Results', 90, 'Button', items) : '';
-        const blocker = options.blocked ? node('blocker', 'Loading', 155, 'TextView') : '';
-        const loading = page === 'results' && !marker ? node('loading', 'Loading', 0, 'TextView') : '';
-        return `<hierarchy rotation="0">${form}${marker}${blocker}${loading}</hierarchy>`;
-    };
-    const h = await harness({ services: { androidTaskExecutor: executor }, uiServer: { ok: true, xml,
-        async invoke(method, params) {
-            if (method === 'click') {
-                writes.push(page === 'home' ? 'open' : 'submit');
-                page = page === 'home' ? 'form' : 'results';
-                if (page === 'results') submittedAt = Date.now();
-            }
-            if (method === 'setText') { writes.push('fill'); value = params[1]; }
-            if (method === 'getText') return value;
-            return true;
-        } } });
-    return { events, writes, sampleTimes, run: async task => (await h.service.processToolCall({ command: 'RunTask', task })).details.task };
-}
+const { fixture, spec, pkg, id, query } = require('./helpers/android-completion-world.cjs');
 
 for (const decision of ['rules', 'shadow', 'jev']) {
     test(`${decision} accepts empty result placeholders before and after entry`, async () => {
@@ -129,7 +76,7 @@ test('Service container waiting cannot renew the full-result window after a late
 
 // An injected clock and device port exercise the original shared deadline without
 // sleeping for five seconds. Service-path tests above use actual raw XML evidence.
-for (const scenario of ['late-items', 'flash', 'outside-change', 'context-change', 'late-submit']) {
+for (const scenario of ['late-items', 'flash', 'outside-change', 'context-change', 'late-submit', 'sample-deadline', 'adb-deadline', 'undrained-deadline']) {
     test(`completion keeps one bounded window and requires stable full evidence: ${scenario}`, async t => {
         t.mock.timers.enable({ apis: ['Date'], now: 100000 });
         let stage = 0, reads = 0, total = 0, submitAt;
@@ -145,6 +92,13 @@ for (const scenario of ['late-items', 'flash', 'outside-change', 'context-change
             async observe(task, request) {
                 total++;
                 if (stage === 2) { reads++; requests.push(request); }
+                if (stage === 2 && ['sample-deadline', 'adb-deadline', 'undrained-deadline'].includes(scenario)) {
+                    t.mock.timers.tick(request.deadlineMs - Date.now());
+                    throw Object.assign(new Error('capture exhausted the wait budget'), {
+                        code: scenario === 'adb-deadline' ? 'ADB_TIMEOUT' : 'VERIFICATION_TIMEOUT',
+                        ...(scenario === 'undrained-deadline' ? { drained: false } : {}),
+                    });
+                }
                 const matched = stage === 2 && (scenario === 'flash' ? reads === 1 : scenario === 'late-items' ? Date.now() >= submitAt + 5200 : true);
                 return { complete: true, package: pkg, displayId: 0,
                     observation: { id: randomUUID(), digest: hash(stage === 2 && scenario === 'outside-change' ? reads : `${stage}:${matched}`),
@@ -167,7 +121,7 @@ for (const scenario of ['late-items', 'flash', 'outside-change', 'context-change
             } };
         const result = await executor.run(task, device);
         assert.equal(result.status, 'stopped');
-        assert.equal(result.code, 'TASK_COMPLETION_UNPROVEN');
+        assert.equal(result.code, scenario === 'undrained-deadline' ? 'VERIFICATION_TIMEOUT' : 'TASK_COMPLETION_UNPROVEN');
         assert.deepEqual(writes, ['Fill', 'Tap']);
         assert.equal(result.receipts.length, 2);
         assert.ok(Date.now() <= submitAt + (scenario === 'late-submit' ? 5001 : 5000));
@@ -182,7 +136,7 @@ test('production trace persists the completion policy identity and rejects arbit
     const store = createTaskTraceStore({ directory });
     const header = { schemaVersion: 1, taskId: randomUUID(), serial: 'A', package: pkg, intent: 'search',
         inputRefs: ['query'], budget: { timeoutMs: 60000, maxActions: 6, maxObservations: 96, maxModelCalls: 8 },
-        decision: 'jev', policyVersion: 'search-v1', completionPolicyVersion: 'search-completion-v2' };
+        decision: 'jev', policyVersion: 'search-v9', completionPolicyVersion: 'search-completion-v2' };
     await assert.rejects(store.open({ ...header, completionPolicyVersion: query }), { code: 'TRACE_INVALID_ARGUMENT' });
     const trace = await store.open(header);
     await trace.append({ type: 'stopped', code: 'TASK_COMPLETION_UNPROVEN' });
@@ -191,6 +145,6 @@ test('production trace persists the completion policy identity and rejects arbit
     assert.equal(text.includes(query), false);
     const rows = text.trim().split('\n').map(JSON.parse);
     assert.equal(rows[0].completionPolicyVersion, header.completionPolicyVersion);
-    assert.equal(rows[0].policyVersion, 'search-v1');
+    assert.equal(rows[0].policyVersion, 'search-v9');
     assert.equal(rows.at(-1).code, 'TASK_COMPLETION_UNPROVEN');
 });

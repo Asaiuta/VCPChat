@@ -46,6 +46,19 @@ test('ScrollUntil already-visible target is read-only and intrinsically verified
     assert.equal(h.dumpCount, 1);
 });
 
+test('ScrollUntil uses fresh logical dimensions when the legacy probe retains natural portrait size', async () => {
+    let swipes = 0;
+    const h = await shellHarness({ dump: () => tree({ bounds: '[0,0][200,100]',
+        children: swipes ? leaf({ bounds: '[10,20][190,50]' }) : '' }).replace('rotation="0"', 'rotation="1"'),
+        run: args => { if (args[1] === 'input') swipes++; } });
+    const probe = h.client.probeScreen.bind(h.client);
+    h.client.probeScreen = async (serial, options = {}) => ({ ...await probe(serial, options), rotation: 1,
+        size: options.fresh === true ? { width: 200, height: 100 } : { width: 100, height: 200 } });
+    const result = await run(h, { target: 'text=Goal', strategy: 'host', maxSwipes: 1 });
+    assert.equal(result.details.execution.outcome, 'verified');
+    assert.equal(inputs(h).length, 1, 'landscape geometry must reach the bounded scroll instead of rejecting its container');
+});
+
 test('ScrollUntil exact raw text works without relying on normalized or merged labels', async () => {
     const h = await shellHarness({ dump: () => tree({ children: leaf({ text: 'A #1 &amp; B' }) }) });
     const result = await run(h, { target: 'text=A %231 & B' });
@@ -68,7 +81,7 @@ test('ScrollUntil host repeatedly rebinds live container and accumulates one she
         ['shell', 'input', 'swipe', '50', '136', '50', '64', '300'],
     ]);
     assert.deepEqual(Array.from(result.details.attempts, a => a.channel), ['shell', 'shell']);
-    assert.equal(h.dumpCount, 5);
+    assert.equal(h.dumpCount, 7, '原有五次绑定/验证采样，另两次对应两个swipe的最终policy gate');
     assert.equal(rpcs(h).length, 0);
 });
 
@@ -126,6 +139,12 @@ test('ScrollUntil host enforces same package after first input and never retries
     let moved = false;
     const h = await shellHarness({ dump: () => tree({ package: moved ? 'com.changed' : 'com.example' }),
         run: args => { if (args[1] === 'input') moved = true; } });
+    const probe = h.client.probeScreen.bind(h.client);
+    h.client.probeScreen = async (...args) => ({ ...await probe(...args), focus: {
+        package: moved ? 'com.changed' : 'com.example',
+        component: moved ? 'com.changed/.Main' : 'com.example/.Main',
+        window: moved ? 'Window{changed u0 com.changed/.Main}' : 'Window{test u0 com.example/.Main}',
+    } });
     await assert.rejects(run(h, { strategy: 'host' }), error => {
         assert.equal(error.code, 'SCROLL_CONTEXT_CHANGED');
         assert.equal(error.execution.outcome, 'unknown');
@@ -136,9 +155,11 @@ test('ScrollUntil host enforces same package after first input and never retries
 });
 
 test('ScrollUntil refuses changed screen dimensions before another input', async () => {
-    const h = await shellHarness();
-    let reads = 0;
-    h.client.screenSize = async () => (++reads > 2 ? { width: 200, height: 100 } : { width: 100, height: 200 });
+    let moved = false;
+    const h = await shellHarness({ run: args => { if (args[1] === 'input') moved = true; } });
+    const probe = h.client.probeScreen.bind(h.client);
+    h.client.probeScreen = async (...args) => ({ ...await probe(...args),
+        size: moved ? { width: 200, height: 100 } : { width: 100, height: 200 } });
     await assert.rejects(run(h, { strategy: 'host' }), error => error.execution.outcome === 'unknown');
     assert.equal(inputs(h).length, 1);
 });
@@ -149,7 +170,11 @@ for (const probe of [
     { wakefulness: 'Awake', focus: { package: 'com.android.systemui' } },
 ]) test(`ScrollUntil checks awake/unlocked without autoWake: ${JSON.stringify(probe)}`, async () => {
     const h = await shellHarness({ config: { UI_SERVER: false, AUTO_WAKE: true } });
-    h.client.probeScreen = async () => probe;
+    const fresh = h.client.probeScreen.bind(h.client);
+    h.client.probeScreen = async (...args) => {
+        const baseline = await fresh(...args);
+        return { ...baseline, ...probe, focus: { ...baseline.focus, ...probe.focus } };
+    };
     await assert.rejects(run(h));
     assert.equal(h.dumpCount, 0);
     assert.equal(inputs(h).length, 0);
@@ -158,8 +183,15 @@ for (const probe of [
 test('ScrollUntil stops immediately when device locks after one swipe', async () => {
     let moved = false;
     const h = await shellHarness({ run: args => { if (args[1] === 'input') moved = true; } });
-    h.client.probeScreen = async () => ({ wakefulness: 'Awake', size: { width: 100, height: 200 },
-        focus: { package: moved ? 'com.android.systemui' : 'com.example' } });
+    const probe = h.client.probeScreen.bind(h.client);
+    h.client.probeScreen = async (...args) => {
+        const baseline = await probe(...args);
+        return { ...baseline,
+            keyguard: { showing: moved, inputRestricted: moved },
+            focus: moved ? { package: 'com.android.systemui', component: 'com.android.systemui/.Keyguard',
+                window: 'Window{lock u0 com.android.systemui/.Keyguard}' } : baseline.focus,
+        };
+    };
     await assert.rejects(run(h, { strategy: 'host' }), error => error.code === 'DEVICE_LOCKED' && error.execution.outcome === 'unknown');
     assert.equal(inputs(h).length, 1);
 });
@@ -186,7 +218,7 @@ for (const kind of ['id', 'text']) test(`ScrollUntil RPC compiles exact ${kind} 
     assert.equal(result.details.strategy, 'rpc');
     assert.equal(result.details.execution.outcome, 'verified');
     assert.equal(inputs(h).length, 0);
-    assert.equal(h.uiServer.dumped, 3);
+    assert.equal(h.uiServer.dumped, 4, '原有三次绑定/验证采样加唯一RPC的最终policy gate');
 });
 
 for (const direction of ['right']) test(`ScrollUntil RPC ${direction} uses horizontal scrollTo`, async () => {

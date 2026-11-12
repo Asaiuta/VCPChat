@@ -1,0 +1,1488 @@
+{
+  "schemaVersion": 1,
+  "provenance": "Handwritten synthetic offline UI worlds for J5.3 unified replay; no device trace, production UI text or model traffic. Expectations are independent predictions cross-checked against the per-family suites named in source.derivedFrom.",
+  "transforms": {
+    "synthetic-ids": "All resource IDs are synthetic under com.example; no real package or view identity.",
+    "placeholder-labels": "Visible labels are private placeholder strings that must never leave the host.",
+    "input-refs": "Inputs are fixed synthetic values addressed only by role reference in expectations.",
+    "semantic-targets": "Resource IDs removed; exact raw descriptions and text bind input and completion. Offline placeholders only."
+  },
+  "cases": [
+    {
+      "name": "search-form-direct",
+      "family": "search",
+      "source": {
+        "kind": "handwritten-synthetic",
+        "derivedFrom": "tests/android-jev-search-actions.test.js"
+      },
+      "transforms": [
+        "synthetic-ids",
+        "placeholder-labels",
+        "input-refs"
+      ],
+      "expect": {
+        "status": "completed",
+        "writes": [
+          {
+            "op": "fill",
+            "target": "query",
+            "value": "query"
+          },
+          {
+            "op": "tap",
+            "target": "search_go"
+          }
+        ],
+        "effect": {
+          "page": "results",
+          "query": "query"
+        },
+        "receipts": [
+          "verified",
+          "verified"
+        ],
+        "modelCalls": 2,
+        "staleEvents": 0,
+        "replanCalls": 0
+      }
+    },
+    {
+      "name": "search-back-ime",
+      "family": "search",
+      "source": {
+        "kind": "handwritten-synthetic",
+        "derivedFrom": "tests/android-jev-back.test.js"
+      },
+      "transforms": [
+        "synthetic-ids",
+        "placeholder-labels",
+        "input-refs"
+      ],
+      "world": {
+        "back": true,
+        "ime": "search"
+      },
+      "expect": {
+        "status": "completed",
+        "writes": [
+          {
+            "op": "back"
+          },
+          {
+            "op": "fill",
+            "target": "query",
+            "value": "query"
+          },
+          {
+            "op": "tap",
+            "target": "query"
+          },
+          {
+            "op": "key",
+            "target": "ime"
+          }
+        ],
+        "effect": {
+          "page": "results",
+          "query": "query"
+        },
+        "modelCalls": 4,
+        "staleEvents": 0,
+        "replanCalls": 0
+      }
+    },
+    {
+      "name": "search-model-stale",
+      "family": "search",
+      "source": {
+        "kind": "handwritten-synthetic",
+        "derivedFrom": "tests/android-jev-recovery.test.js"
+      },
+      "transforms": [
+        "synthetic-ids",
+        "placeholder-labels",
+        "input-refs"
+      ],
+      "transitions": [
+        {
+          "on": "model",
+          "call": 1,
+          "effect": "bump-version"
+        }
+      ],
+      "expect": {
+        "status": "completed",
+        "writes": [
+          {
+            "op": "fill",
+            "target": "query",
+            "value": "query"
+          },
+          {
+            "op": "tap",
+            "target": "search_go"
+          }
+        ],
+        "effect": {
+          "page": "results",
+          "query": "query"
+        },
+        "receipts": [
+          "verified",
+          "verified"
+        ],
+        "modelCalls": 3,
+        "staleEvents": 1
+      }
+    },
+    {
+      "name": "search-third-stale",
+      "family": "search",
+      "source": {
+        "kind": "handwritten-synthetic",
+        "derivedFrom": "tests/android-jev-recovery.test.js"
+      },
+      "transforms": [
+        "synthetic-ids",
+        "placeholder-labels",
+        "input-refs"
+      ],
+      "transitions": [
+        {
+          "on": "model",
+          "call": [
+            1,
+            2,
+            3
+          ],
+          "effect": "bump-version"
+        }
+      ],
+      "expect": {
+        "status": "stopped",
+        "code": "TASK_STALE_LIMIT",
+        "writes": [],
+        "effect": {
+          "page": "form",
+          "query": ""
+        },
+        "receipts": [],
+        "modelCalls": 3,
+        "staleEvents": 3
+      }
+    },
+    {
+      "name": "search-fill-lost-transport",
+      "family": "search",
+      "source": {
+        "kind": "handwritten-synthetic",
+        "derivedFrom": "tests/android-jev-search-actions.test.js"
+      },
+      "transforms": [
+        "synthetic-ids",
+        "placeholder-labels",
+        "input-refs"
+      ],
+      "transitions": [
+        {
+          "on": "write",
+          "index": 1,
+          "effect": "lost-transport"
+        }
+      ],
+      "expect": {
+        "status": "stopped",
+        "writes": [
+          {
+            "op": "fill",
+            "target": "query",
+            "value": "query"
+          }
+        ],
+        "effect": {
+          "page": "form",
+          "query": "query"
+        },
+        "receipts": [
+          "unknown"
+        ],
+        "modelCalls": 1
+      }
+    },
+    {
+      "name": "search-main-agent-select",
+      "family": "search",
+      "source": {
+        "kind": "handwritten-synthetic",
+        "derivedFrom": "tests/android-jev-assistance.test.js"
+      },
+      "transforms": [
+        "synthetic-ids",
+        "placeholder-labels",
+        "input-refs"
+      ],
+      "task": {
+        "assistance": "main_agent"
+      },
+      "answers": [
+        "escalate"
+      ],
+      "assistance": {
+        "advice": "select"
+      },
+      "expect": {
+        "status": "completed",
+        "writes": [
+          {
+            "op": "fill",
+            "target": "query",
+            "value": "query"
+          },
+          {
+            "op": "tap",
+            "target": "search_go"
+          }
+        ],
+        "effect": {
+          "page": "results",
+          "query": "query"
+        },
+        "replanCalls": 1
+      }
+    },
+    {
+      "name": "search-assistance-missing",
+      "family": "search",
+      "source": {
+        "kind": "handwritten-synthetic",
+        "derivedFrom": "tests/android-jev-assistance.test.js"
+      },
+      "transforms": [
+        "synthetic-ids",
+        "placeholder-labels",
+        "input-refs"
+      ],
+      "task": {
+        "assistance": "main_agent"
+      },
+      "answers": [
+        "escalate"
+      ],
+      "assistance": {
+        "service": false
+      },
+      "expect": {
+        "status": "stopped",
+        "code": "TASK_ASSISTANCE_UNAVAILABLE",
+        "writes": [],
+        "effect": {
+          "page": "form",
+          "query": ""
+        },
+        "receipts": [],
+        "modelCalls": 1,
+        "replanCalls": 0
+      }
+    },
+    {
+      "name": "toggle-on",
+      "family": "toggle",
+      "source": {
+        "kind": "handwritten-synthetic",
+        "derivedFrom": "tests/android-jev-toggle.test.js"
+      },
+      "transforms": [
+        "synthetic-ids",
+        "placeholder-labels"
+      ],
+      "expect": {
+        "status": "completed",
+        "writes": [
+          {
+            "op": "tap",
+            "target": "notifications"
+          }
+        ],
+        "effect": {
+          "checked": true
+        },
+        "receipts": [
+          "verified"
+        ],
+        "modelCalls": 1,
+        "staleEvents": 0,
+        "replanCalls": 0
+      }
+    },
+    {
+      "name": "toggle-already-satisfied",
+      "family": "toggle",
+      "source": {
+        "kind": "handwritten-synthetic",
+        "derivedFrom": "tests/android-jev-toggle.test.js"
+      },
+      "transforms": [
+        "synthetic-ids",
+        "placeholder-labels"
+      ],
+      "world": {
+        "checked": true
+      },
+      "task": {
+        "budget": {
+          "maxModelCalls": 0
+        }
+      },
+      "expect": {
+        "status": "completed",
+        "writes": [],
+        "effect": {
+          "checked": true
+        },
+        "receipts": [],
+        "modelCalls": 0
+      }
+    },
+    {
+      "name": "toggle-satisfied-during-model",
+      "family": "toggle",
+      "source": {
+        "kind": "handwritten-synthetic",
+        "derivedFrom": "tests/android-jev-toggle.test.js"
+      },
+      "transforms": [
+        "synthetic-ids",
+        "placeholder-labels"
+      ],
+      "transitions": [
+        {
+          "on": "model",
+          "call": 1,
+          "effect": "satisfy"
+        }
+      ],
+      "expect": {
+        "status": "completed",
+        "writes": [],
+        "effect": {
+          "checked": true
+        },
+        "receipts": [],
+        "modelCalls": 1,
+        "staleEvents": 1
+      }
+    },
+    {
+      "name": "toggle-dispatch-stale",
+      "family": "toggle",
+      "source": {
+        "kind": "handwritten-synthetic",
+        "derivedFrom": "tests/android-jev-toggle.test.js"
+      },
+      "transforms": [
+        "synthetic-ids",
+        "placeholder-labels"
+      ],
+      "transitions": [
+        {
+          "on": "model",
+          "call": 1,
+          "effect": "bump-version",
+          "afterCaptures": 2
+        }
+      ],
+      "expect": {
+        "status": "completed",
+        "writes": [
+          {
+            "op": "tap",
+            "target": "notifications"
+          }
+        ],
+        "effect": {
+          "checked": true
+        },
+        "receipts": [
+          "failed",
+          "verified"
+        ],
+        "staleEvents": 1
+      }
+    },
+    {
+      "name": "toggle-no-effect",
+      "family": "toggle",
+      "source": {
+        "kind": "handwritten-synthetic",
+        "derivedFrom": "tests/android-jev-toggle.test.js"
+      },
+      "transforms": [
+        "synthetic-ids",
+        "placeholder-labels"
+      ],
+      "task": {
+        "budget": {
+          "maxObservations": 18
+        }
+      },
+      "transitions": [
+        {
+          "on": "write",
+          "index": 1,
+          "effect": "no-effect"
+        }
+      ],
+      "expect": {
+        "status": "stopped",
+        "writes": [
+          {
+            "op": "tap",
+            "target": "notifications"
+          }
+        ],
+        "effect": {
+          "checked": false
+        },
+        "receipts": [
+          "unknown"
+        ],
+        "modelCalls": 1
+      }
+    },
+    {
+      "name": "toggle-lost-transport-effect-retained",
+      "family": "toggle",
+      "source": {
+        "kind": "handwritten-synthetic",
+        "derivedFrom": "tests/android-jev-toggle.test.js"
+      },
+      "transforms": [
+        "synthetic-ids",
+        "placeholder-labels"
+      ],
+      "task": {
+        "assistance": "main_agent"
+      },
+      "assistance": {
+        "advice": "select"
+      },
+      "transitions": [
+        {
+          "on": "write",
+          "index": 1,
+          "effect": "lost-transport"
+        }
+      ],
+      "expect": {
+        "status": "stopped",
+        "writes": [
+          {
+            "op": "tap",
+            "target": "notifications"
+          }
+        ],
+        "effect": {
+          "checked": true
+        },
+        "receipts": [
+          "unknown"
+        ],
+        "replanCalls": 0
+      }
+    },
+    {
+      "name": "toggle-uncertain",
+      "family": "toggle",
+      "source": {
+        "kind": "handwritten-synthetic",
+        "derivedFrom": "tests/android-jev-toggle.test.js"
+      },
+      "transforms": [
+        "synthetic-ids",
+        "placeholder-labels"
+      ],
+      "answers": [
+        "uncertain"
+      ],
+      "expect": {
+        "status": "stopped",
+        "code": "TASK_JEV_UNCERTAIN",
+        "writes": [],
+        "effect": {
+          "checked": false
+        },
+        "receipts": [],
+        "modelCalls": 1
+      }
+    },
+    {
+      "name": "toggle-human-reobserve",
+      "family": "toggle",
+      "source": {
+        "kind": "handwritten-synthetic",
+        "derivedFrom": "tests/android-jev-toggle.test.js"
+      },
+      "transforms": [
+        "synthetic-ids",
+        "placeholder-labels"
+      ],
+      "task": {
+        "assistance": "human"
+      },
+      "answers": [
+        "escalate"
+      ],
+      "assistance": {
+        "human": "accept",
+        "effect": "satisfy"
+      },
+      "expect": {
+        "status": "completed",
+        "writes": [],
+        "effect": {
+          "checked": true
+        },
+        "receipts": [],
+        "modelCalls": 1,
+        "replanCalls": 1
+      }
+    },
+    {
+      "name": "toggle-human-reject",
+      "family": "toggle",
+      "source": {
+        "kind": "handwritten-synthetic",
+        "derivedFrom": "tests/android-jev-toggle.test.js"
+      },
+      "transforms": [
+        "synthetic-ids",
+        "placeholder-labels"
+      ],
+      "task": {
+        "assistance": "human"
+      },
+      "answers": [
+        "escalate"
+      ],
+      "assistance": {
+        "human": "reject"
+      },
+      "expect": {
+        "status": "stopped",
+        "code": "TASK_HANDOFF_REJECTED",
+        "writes": [],
+        "effect": {
+          "checked": false
+        },
+        "receipts": [],
+        "replanCalls": 1
+      }
+    },
+    {
+      "name": "route-origin-first",
+      "family": "route",
+      "source": {
+        "kind": "handwritten-synthetic",
+        "derivedFrom": "tests/android-jev-route.test.js"
+      },
+      "transforms": [
+        "synthetic-ids",
+        "placeholder-labels",
+        "input-refs"
+      ],
+      "expect": {
+        "status": "completed",
+        "writes": [
+          {
+            "op": "fill",
+            "target": "route_origin",
+            "value": "origin"
+          },
+          {
+            "op": "fill",
+            "target": "route_destination",
+            "value": "destination"
+          },
+          {
+            "op": "tap",
+            "target": "route_go"
+          }
+        ],
+        "effect": {
+          "submitted": [
+            "origin",
+            "destination"
+          ]
+        },
+        "receipts": [
+          "verified",
+          "verified",
+          "verified"
+        ],
+        "modelCalls": 3,
+        "staleEvents": 0,
+        "replanCalls": 0
+      }
+    },
+    {
+      "name": "route-destination-first",
+      "family": "route",
+      "source": {
+        "kind": "handwritten-synthetic",
+        "derivedFrom": "tests/android-jev-route.test.js"
+      },
+      "transforms": [
+        "synthetic-ids",
+        "placeholder-labels",
+        "input-refs"
+      ],
+      "answers": [
+        "role:destination",
+        "role:origin",
+        "c0"
+      ],
+      "expect": {
+        "status": "completed",
+        "writes": [
+          {
+            "op": "fill",
+            "target": "route_destination",
+            "value": "destination"
+          },
+          {
+            "op": "fill",
+            "target": "route_origin",
+            "value": "origin"
+          },
+          {
+            "op": "tap",
+            "target": "route_go"
+          }
+        ],
+        "effect": {
+          "submitted": [
+            "origin",
+            "destination"
+          ]
+        },
+        "receipts": [
+          "verified",
+          "verified",
+          "verified"
+        ],
+        "modelCalls": 3
+      }
+    },
+    {
+      "name": "route-prefilled-origin",
+      "family": "route",
+      "source": {
+        "kind": "handwritten-synthetic",
+        "derivedFrom": "tests/android-jev-route.test.js"
+      },
+      "transforms": [
+        "synthetic-ids",
+        "placeholder-labels",
+        "input-refs"
+      ],
+      "world": {
+        "prefilled": [
+          "origin"
+        ]
+      },
+      "expect": {
+        "status": "completed",
+        "writes": [
+          {
+            "op": "fill",
+            "target": "route_destination",
+            "value": "destination"
+          },
+          {
+            "op": "tap",
+            "target": "route_go"
+          }
+        ],
+        "effect": {
+          "submitted": [
+            "origin",
+            "destination"
+          ]
+        },
+        "receipts": [
+          "verified",
+          "verified"
+        ],
+        "modelCalls": 2
+      }
+    },
+    {
+      "name": "route-model-stale",
+      "family": "route",
+      "source": {
+        "kind": "handwritten-synthetic",
+        "derivedFrom": "tests/android-jev-route.test.js"
+      },
+      "transforms": [
+        "synthetic-ids",
+        "placeholder-labels",
+        "input-refs"
+      ],
+      "transitions": [
+        {
+          "on": "model",
+          "call": 1,
+          "effect": "bump-version"
+        }
+      ],
+      "expect": {
+        "status": "completed",
+        "writes": [
+          {
+            "op": "fill",
+            "target": "route_origin",
+            "value": "origin"
+          },
+          {
+            "op": "fill",
+            "target": "route_destination",
+            "value": "destination"
+          },
+          {
+            "op": "tap",
+            "target": "route_go"
+          }
+        ],
+        "effect": {
+          "submitted": [
+            "origin",
+            "destination"
+          ]
+        },
+        "modelCalls": 4,
+        "staleEvents": 1
+      }
+    },
+    {
+      "name": "route-readback-mismatch",
+      "family": "route",
+      "source": {
+        "kind": "handwritten-synthetic",
+        "derivedFrom": "tests/android-jev-route.test.js"
+      },
+      "transforms": [
+        "synthetic-ids",
+        "placeholder-labels",
+        "input-refs"
+      ],
+      "transitions": [
+        {
+          "on": "write",
+          "index": 1,
+          "effect": "no-effect"
+        }
+      ],
+      "expect": {
+        "status": "stopped",
+        "code": "FILL_READBACK_MISMATCH",
+        "writes": [
+          {
+            "op": "fill",
+            "target": "route_origin",
+            "value": "origin"
+          }
+        ],
+        "effect": {
+          "submitted": null
+        },
+        "receipts": [
+          "unknown"
+        ],
+        "modelCalls": 1
+      }
+    },
+    {
+      "name": "route-submit-lost-transport",
+      "family": "route",
+      "source": {
+        "kind": "handwritten-synthetic",
+        "derivedFrom": "tests/android-jev-route.test.js"
+      },
+      "transforms": [
+        "synthetic-ids",
+        "placeholder-labels",
+        "input-refs"
+      ],
+      "transitions": [
+        {
+          "on": "write",
+          "index": 3,
+          "effect": "lost-transport"
+        }
+      ],
+      "expect": {
+        "status": "stopped",
+        "writes": [
+          {
+            "op": "fill",
+            "target": "route_origin",
+            "value": "origin"
+          },
+          {
+            "op": "fill",
+            "target": "route_destination",
+            "value": "destination"
+          },
+          {
+            "op": "tap",
+            "target": "route_go"
+          }
+        ],
+        "effect": {
+          "submitted": [
+            "origin",
+            "destination"
+          ]
+        },
+        "receipts": [
+          "verified",
+          "verified",
+          "unknown"
+        ],
+        "modelCalls": 3
+      }
+    },
+    {
+      "name": "route-main-agent-select",
+      "family": "route",
+      "source": {
+        "kind": "handwritten-synthetic",
+        "derivedFrom": "tests/android-jev-route.test.js"
+      },
+      "transforms": [
+        "synthetic-ids",
+        "placeholder-labels",
+        "input-refs"
+      ],
+      "task": {
+        "assistance": "main_agent"
+      },
+      "answers": [
+        "escalate"
+      ],
+      "assistance": {
+        "advice": "select"
+      },
+      "expect": {
+        "status": "completed",
+        "writes": [
+          {
+            "op": "fill",
+            "target": "route_origin",
+            "value": "origin"
+          },
+          {
+            "op": "fill",
+            "target": "route_destination",
+            "value": "destination"
+          },
+          {
+            "op": "tap",
+            "target": "route_go"
+          }
+        ],
+        "effect": {
+          "submitted": [
+            "origin",
+            "destination"
+          ]
+        },
+        "replanCalls": 1
+      }
+    },
+    {
+      "name": "route-main-agent-stop",
+      "family": "route",
+      "source": {
+        "kind": "handwritten-synthetic",
+        "derivedFrom": "tests/android-jev-route.test.js"
+      },
+      "transforms": [
+        "synthetic-ids",
+        "placeholder-labels",
+        "input-refs"
+      ],
+      "task": {
+        "assistance": "main_agent"
+      },
+      "answers": [
+        "escalate"
+      ],
+      "assistance": {
+        "advice": "stop"
+      },
+      "expect": {
+        "status": "stopped",
+        "code": "TASK_ASSISTANCE_STOPPED",
+        "writes": [],
+        "effect": {
+          "submitted": null
+        },
+        "receipts": [],
+        "modelCalls": 1,
+        "replanCalls": 1
+      }
+    },
+    {
+      "family": "ui_task",
+      "source": {
+        "kind": "handwritten-synthetic",
+        "derivedFrom": "tests/android-ui-task-assistance.test.js"
+      },
+      "transforms": [
+        "synthetic-ids",
+        "input-refs"
+      ],
+      "name": "ui-navigation-form",
+      "expect": {
+        "status": "completed",
+        "writes": [
+          {
+            "op": "tap",
+            "target": "entry"
+          },
+          {
+            "op": "fill",
+            "target": "query",
+            "value": "query"
+          },
+          {
+            "op": "tap",
+            "target": "submit"
+          }
+        ],
+        "effect": {
+          "page": "results",
+          "query": "query"
+        },
+        "receipts": [
+          "dispatched",
+          "verified",
+          "dispatched"
+        ],
+        "modelCalls": 4,
+        "staleEvents": 0,
+        "replanCalls": 0
+      }
+    },
+    {
+      "family": "ui_task",
+      "source": {
+        "kind": "handwritten-synthetic",
+        "derivedFrom": "tests/android-ui-task-assistance.test.js"
+      },
+      "transforms": [
+        "synthetic-ids",
+        "input-refs"
+      ],
+      "name": "ui-back-navigation",
+      "world": {
+        "back": true
+      },
+      "expect": {
+        "status": "completed",
+        "writes": [
+          {
+            "op": "back"
+          },
+          {
+            "op": "tap",
+            "target": "entry"
+          },
+          {
+            "op": "fill",
+            "target": "query",
+            "value": "query"
+          },
+          {
+            "op": "tap",
+            "target": "submit"
+          }
+        ],
+        "effect": {
+          "page": "results",
+          "query": "query"
+        },
+        "receipts": [
+          "dispatched",
+          "dispatched",
+          "verified",
+          "dispatched"
+        ],
+        "modelCalls": 5,
+        "staleEvents": 0,
+        "replanCalls": 0
+      }
+    },
+    {
+      "family": "ui_task",
+      "source": {
+        "kind": "handwritten-synthetic",
+        "derivedFrom": "tests/android-ui-task-assistance.test.js"
+      },
+      "transforms": [
+        "synthetic-ids",
+        "input-refs"
+      ],
+      "name": "ui-scroll-navigation",
+      "world": {
+        "scroll": true
+      },
+      "expect": {
+        "status": "completed",
+        "writes": [
+          {
+            "op": "scroll"
+          },
+          {
+            "op": "fill",
+            "target": "query",
+            "value": "query"
+          },
+          {
+            "op": "tap",
+            "target": "submit"
+          }
+        ],
+        "effect": {
+          "page": "results",
+          "query": "query"
+        },
+        "receipts": [
+          "dispatched",
+          "verified",
+          "dispatched"
+        ],
+        "modelCalls": 4,
+        "staleEvents": 0,
+        "replanCalls": 0
+      }
+    },
+    {
+      "family": "ui_task",
+      "source": {
+        "kind": "handwritten-synthetic",
+        "derivedFrom": "tests/android-ui-task-assistance.test.js"
+      },
+      "transforms": [
+        "synthetic-ids",
+        "input-refs"
+      ],
+      "name": "ui-host-loading",
+      "world": {
+        "loading": true
+      },
+      "expect": {
+        "status": "completed",
+        "writes": [],
+        "effect": {
+          "page": "results",
+          "query": ""
+        },
+        "receipts": [],
+        "modelCalls": 1,
+        "staleEvents": 0,
+        "replanCalls": 0
+      }
+    },
+    {
+      "family": "ui_task",
+      "source": {
+        "kind": "handwritten-synthetic",
+        "derivedFrom": "tests/android-ui-task-assistance.test.js"
+      },
+      "transforms": [
+        "synthetic-ids",
+        "input-refs"
+      ],
+      "name": "ui-stale-reobserve",
+      "transitions": [
+        {
+          "on": "model",
+          "call": 1,
+          "effect": "bump-version"
+        }
+      ],
+      "expect": {
+        "status": "completed",
+        "writes": [
+          {
+            "op": "tap",
+            "target": "entry"
+          },
+          {
+            "op": "fill",
+            "target": "query",
+            "value": "query"
+          },
+          {
+            "op": "tap",
+            "target": "submit"
+          }
+        ],
+        "effect": {
+          "page": "results",
+          "query": "query"
+        },
+        "receipts": [
+          "dispatched",
+          "verified",
+          "dispatched"
+        ],
+        "modelCalls": 5,
+        "staleEvents": 1,
+        "replanCalls": 0
+      }
+    },
+    {
+      "family": "ui_task",
+      "source": {
+        "kind": "handwritten-synthetic",
+        "derivedFrom": "tests/android-ui-task-assistance.test.js"
+      },
+      "transforms": [
+        "synthetic-ids",
+        "input-refs"
+      ],
+      "name": "ui-invalid-response",
+      "answers": [
+        "invalid"
+      ],
+      "expect": {
+        "status": "stopped",
+        "writes": [],
+        "effect": {
+          "page": "home",
+          "query": ""
+        },
+        "receipts": [],
+        "modelCalls": 1,
+        "staleEvents": 0,
+        "replanCalls": 0,
+        "code": "TASK_JEV_INVALID"
+      }
+    },
+    {
+      "family": "ui_task",
+      "source": {
+        "kind": "handwritten-synthetic",
+        "derivedFrom": "tests/android-ui-task-assistance.test.js"
+      },
+      "transforms": [
+        "synthetic-ids",
+        "input-refs"
+      ],
+      "name": "ui-unknown-write",
+      "transitions": [
+        {
+          "on": "write",
+          "index": 1,
+          "effect": "lost-transport"
+        }
+      ],
+      "expect": {
+        "status": "stopped",
+        "writes": [
+          {
+            "op": "tap",
+            "target": "entry"
+          }
+        ],
+        "effect": {
+          "page": "form",
+          "query": ""
+        },
+        "receipts": [
+          "unknown"
+        ],
+        "modelCalls": 1,
+        "staleEvents": 0,
+        "replanCalls": 0
+      }
+    },
+    {
+      "family": "ui_task",
+      "source": {
+        "kind": "handwritten-synthetic",
+        "derivedFrom": "tests/android-ui-task-assistance.test.js"
+      },
+      "transforms": [
+        "synthetic-ids",
+        "input-refs"
+      ],
+      "name": "ui-main-agent",
+      "task": {
+        "assistance": "main_agent"
+      },
+      "answers": [
+        "escalate"
+      ],
+      "assistance": {
+        "advice": "select"
+      },
+      "expect": {
+        "status": "completed",
+        "writes": [
+          {
+            "op": "tap",
+            "target": "entry"
+          },
+          {
+            "op": "fill",
+            "target": "query",
+            "value": "query"
+          },
+          {
+            "op": "tap",
+            "target": "submit"
+          }
+        ],
+        "effect": {
+          "page": "results",
+          "query": "query"
+        },
+        "receipts": [
+          "dispatched",
+          "verified",
+          "dispatched"
+        ],
+        "modelCalls": 4,
+        "staleEvents": 0,
+        "replanCalls": 1
+      }
+    },
+    {
+      "family": "ui_task",
+      "source": {
+        "kind": "handwritten-synthetic",
+        "derivedFrom": "tests/android-ui-task-assistance.test.js"
+      },
+      "transforms": [
+        "synthetic-ids",
+        "input-refs"
+      ],
+      "name": "ui-human-handoff",
+      "task": {
+        "assistance": "human"
+      },
+      "answers": [
+        "escalate"
+      ],
+      "assistance": {
+        "human": "accept"
+      },
+      "expect": {
+        "status": "completed",
+        "writes": [
+          {
+            "op": "tap",
+            "target": "entry"
+          },
+          {
+            "op": "fill",
+            "target": "query",
+            "value": "query"
+          },
+          {
+            "op": "tap",
+            "target": "submit"
+          }
+        ],
+        "effect": {
+          "page": "results",
+          "query": "query"
+        },
+        "receipts": [
+          "dispatched",
+          "verified",
+          "dispatched"
+        ],
+        "modelCalls": 5,
+        "staleEvents": 0,
+        "replanCalls": 1
+      }
+    },
+    {
+      "family": "ui_task",
+      "source": {
+        "kind": "handwritten-synthetic",
+        "derivedFrom": "tests/android-ui-task-assistance.test.js"
+      },
+      "transforms": [
+        "synthetic-ids",
+        "input-refs"
+      ],
+      "name": "ui-cancel-before-write",
+      "transitions": [
+        {
+          "on": "model",
+          "call": 1,
+          "effect": "cancel"
+        }
+      ],
+      "expect": {
+        "status": "stopped",
+        "writes": [],
+        "effect": {
+          "page": "home",
+          "query": ""
+        },
+        "receipts": [],
+        "modelCalls": 1,
+        "staleEvents": 0,
+        "replanCalls": 0
+      }
+    },
+    {
+      "family": "ui_task",
+      "source": {
+        "kind": "handwritten-synthetic",
+        "derivedFrom": "tests/android-ui-task-target.test.js"
+      },
+      "transforms": [
+        "synthetic-ids",
+        "input-refs",
+        "semantic-targets"
+      ],
+      "name": "ui-semantic-form",
+      "expect": {
+        "status": "completed",
+        "writes": [
+          {
+            "op": "tap",
+            "target": "entry"
+          },
+          {
+            "op": "fill",
+            "target": "query",
+            "value": "query"
+          },
+          {
+            "op": "tap",
+            "target": "submit"
+          }
+        ],
+        "effect": {
+          "page": "results",
+          "query": "query"
+        },
+        "receipts": [
+          "dispatched",
+          "verified",
+          "dispatched"
+        ],
+        "modelCalls": 4,
+        "staleEvents": 0,
+        "replanCalls": 0
+      },
+      "world": {
+        "semantic": true
+      }
+    },
+    {
+      "family": "ui_task",
+      "source": {
+        "kind": "handwritten-synthetic",
+        "derivedFrom": "tests/android-ui-task-target.test.js"
+      },
+      "transforms": [
+        "synthetic-ids",
+        "input-refs",
+        "semantic-targets"
+      ],
+      "name": "ui-semantic-stale",
+      "transitions": [
+        {
+          "on": "model",
+          "call": 1,
+          "effect": "bump-version"
+        }
+      ],
+      "expect": {
+        "status": "completed",
+        "writes": [
+          {
+            "op": "tap",
+            "target": "entry"
+          },
+          {
+            "op": "fill",
+            "target": "query",
+            "value": "query"
+          },
+          {
+            "op": "tap",
+            "target": "submit"
+          }
+        ],
+        "effect": {
+          "page": "results",
+          "query": "query"
+        },
+        "receipts": [
+          "dispatched",
+          "verified",
+          "dispatched"
+        ],
+        "modelCalls": 5,
+        "staleEvents": 1,
+        "replanCalls": 0
+      },
+      "world": {
+        "semantic": true
+      }
+    },
+    {
+      "family": "ui_task",
+      "source": {
+        "kind": "handwritten-synthetic",
+        "derivedFrom": "tests/android-ui-task-target.test.js"
+      },
+      "transforms": [
+        "synthetic-ids",
+        "input-refs",
+        "semantic-targets"
+      ],
+      "name": "ui-semantic-unknown",
+      "transitions": [
+        {
+          "on": "write",
+          "index": 1,
+          "effect": "lost-transport"
+        }
+      ],
+      "expect": {
+        "status": "stopped",
+        "writes": [
+          {
+            "op": "tap",
+            "target": "entry"
+          }
+        ],
+        "effect": {
+          "page": "form",
+          "query": ""
+        },
+        "receipts": [
+          "unknown"
+        ],
+        "modelCalls": 1,
+        "staleEvents": 0,
+        "replanCalls": 0
+      },
+      "world": {
+        "semantic": true
+      }
+    }
+  ]
+}

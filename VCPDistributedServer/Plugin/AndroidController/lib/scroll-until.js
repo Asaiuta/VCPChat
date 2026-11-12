@@ -12,7 +12,7 @@ function intersect(a, b) {
 }
 
 function createScrollUntil({ stepRuntime, prepareTargets, rpcNodeSelector, dispatchInput, rpcAction,
-    requireAdb, uiServerEnabled, uiServerFor, getGraph, textResult, channelReceipt }) {
+    requireAdb, freshProbe, uiServerEnabled, uiServerFor, getGraph, textResult, channelReceipt }) {
     const fail = (code, message) => { throw stepRuntime.failure(code, message); };
     const invalid = () => fail('INVALID_ARGUMENT', 'ScrollUntil 需要 container=id=…、target=id=…或text=…，以及有效策略、方向和host滚动上限；不接受序号或像素寻址。');
     const selector = (value, container = false) => {
@@ -59,7 +59,9 @@ function createScrollUntil({ stepRuntime, prepareTargets, rpcNodeSelector, dispa
         async function sample() {
             stepRuntime.check();
             try {
-                const probe = await client.probeScreen(serial);
+                // Target binding uses the current logical display. The legacy probe caches
+                // wm size (natural orientation), which rejects valid landscape containers.
+                const probe = await freshProbe(serial);
                 stepRuntime.check();
                 if (probe?.wakefulness !== 'Awake') fail('DEVICE_NOT_AWAKE', '设备未确认醒着；ScrollUntil不唤醒设备。');
                 if (!probe.focus?.package || /systemui|keyguard/i.test(probe.focus.package)) {

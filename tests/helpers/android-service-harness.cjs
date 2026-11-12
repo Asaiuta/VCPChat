@@ -11,6 +11,7 @@ const realRequire = createRequire(entry);
 const xml = (label = 'Go', top = 0) => `<hierarchy rotation="0"><node class="android.widget.Button" package="com.example" resource-id="com.example:id/go" text="${label}" clickable="true" bounds="[0,${top}][100,${top + 40}]" /></hierarchy>`;
 
 async function harness(options = {}) {
+    const dataDir = options.dataDir || fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'android-service-'));
     const calls = [];
     let dumps = 0;
     const client = {
@@ -26,6 +27,9 @@ async function harness(options = {}) {
         async currentFocus(serial) { calls.push(['focus', serial]); return { package: options.foreground || 'com.example', component: 'com.example/.Main' }; },
         async runText(args, request = {}) {
             calls.push(['adb', args, request]);
+            if (args[1] === 'cat /proc/sys/kernel/random/boot_id && settings get secure android_id') {
+                return (options.bootId?.() || '12345678-1234-1234-1234-123456789012') + '\n1234567890abcdef';
+            }
             if (options.run) {
                 const custom = await options.run(args, request);
                 if (custom !== undefined) return custom;
@@ -43,7 +47,8 @@ async function harness(options = {}) {
         async enqueue(args, request) { return { stdout: await this.runText(args, request), stderr: '' }; },
     };
     Object.assign(client, options.client || {});
-        const hub = { async stop() {}, configure() {}, status() { return {}; } };
+    const hub = options.hub || {};
+    for (const [name, fn] of Object.entries({ async stop() {}, configure() {}, status() { return {}; } })) hub[name] ??= fn;
     // 常驻 UI 采集服务替身：默认「起不来」，保持既有回退语义，但不再真的 spawn adb。
     // 记录 start 次数，供「配置关掉时连尝试都不该有」这类断言使用。
     const uiServer = { started: 0, stopped: 0, dumped: 0 };
@@ -109,8 +114,8 @@ async function harness(options = {}) {
         require(name) { return Object.hasOwn(overrides, name) ? overrides[name] : realRequire(name); },
         console, Buffer, process, Date, setTimeout, clearTimeout, AbortController,
     }, { filename: entry });
-    await module.exports.initialize({ config: { DEVICE_SERIAL: client.serial, ...(options.config || {}) }, services: options.services, logger: { log() {}, warn() {} } });
-    return { service: module.exports, client, api, takeoverApi, calls, uiServer, get dumpCount() { return dumps; } };
+    await module.exports.initialize({ dataDir, config: { DEVICE_SERIAL: client.serial, ...(options.config || {}) }, services: options.services, logger: { log() {}, warn() {} } });
+    return { service: module.exports, client, api, takeoverApi, calls, uiServer, dataDir, get dumpCount() { return dumps; } };
 }
 
 module.exports = { harness, xml };

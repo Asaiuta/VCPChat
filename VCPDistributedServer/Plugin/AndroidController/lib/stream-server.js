@@ -227,7 +227,10 @@ class StreamServer {
             return true;
         }
         // ---- 1) 设备还在吗？----
-        const deviceGone = await this.deviceVanished();
+        const hub = this.scrcpyHub, serial = hub.serial, token = this.lifecycle;
+        const deviceGone = await this.deviceVanished(serial);
+        if (hub !== this.scrcpyHub || serial !== hub.serial || token !== this.lifecycle
+            || this.recovering || hub.status().state !== 'streaming' || this.scrcpyStreamers.size === 0) return false;
         if (deviceGone) {
             this.logger.warn?.('[AndroidController] 设备已掉线，开始恢复');
             await this.handleScrcpyLoss('设备掉线');
@@ -273,19 +276,18 @@ class StreamServer {
     /**
      * 设备是否已经不在了。
      *
-     * 用 listDevices 而不是 devices()：前者已经封装好错误处理。
      * 拿不到结果时返回 false —— 查不清就别乱重启。
      */
-    async deviceVanished() {
-        if (!this.deviceApi?.listDevices) return false;
+    async deviceVanished(serial) {
+        if (!serial || !this.deviceApi?.listDevices) return false;
         let info;
         try {
             info = await this.deviceApi.listDevices();
         } catch {
             return false;
         }
-        if (!info?.devices?.length) return true;        // 一台都没了
-        return !info.devices.some((d) => d.state === 'device');
+        if (info?.ok !== true || !Array.isArray(info.devices)) return false;
+        return !info.devices.some(d => d.serial === serial && d.state === 'device');
     }
 
     /**
@@ -839,6 +841,12 @@ class StreamServer {
                 case '/api/pair':
                     sendJson(res, 200, await manage(() => this.deviceApi.pair(body)));
                     return;
+                case '/api/pair/qr/start':
+                    sendJson(res, 200, await this.deviceApi.pairQrStart());
+                    return;
+                case '/api/pair/qr/poll':
+                    sendJson(res, 200, await this.deviceApi.pairQrPoll(body));
+                    return;
                 case '/api/connect':
                     sendJson(res, 200, await manage(() => this.deviceApi.connect(body)));
                     return;
@@ -1020,6 +1028,9 @@ class StreamServer {
                 this.attachFrames(socket);
             } else if (payload?.type === 'request-keyframe') {
                 if (!this.scrcpyStreamers.has(socket)) return;
+                // Configuration is already in this ordered transport. Replaying it
+                // again would reset both the viewer and its bounded IDR wait.
+                if (this.h264Decoders.get(socket)?.waiting) return;
                 // Replay current configuration, then wait for a fresh IDR if any
                 // delta has already followed the cached keyframe.
                 const replayed = this.replayInit(socket);

@@ -78,12 +78,17 @@ class GlobalJevService {
             throw error;
         }
 
+        // Host-owned observer; it receives identifiers only, never credentials/config.
+        if (typeof options.onRequestMetadata === 'function') {
+            options.onRequestMetadata({ provider: config.provider, requestedModel: config.model });
+        }
         return this.client.decide(state, questions, {
             ...config,
-            timeoutMs: parseInteger(options.timeoutMs, config.timeoutMs, 1, 300000),
+            timeoutMs: Math.min(config.timeoutMs, parseInteger(options.timeoutMs, config.timeoutMs, 1, 300000)),
             maxRetries: parseInteger(options.maxRetries, config.maxRetries, 0, 10),
             signal: options.signal,
-            headers: options.headers
+            headers: options.headers,
+            onTransportMetadata: options.onTransportMetadata
         });
     }
 }

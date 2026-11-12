@@ -48,6 +48,7 @@ async function fixture(options = {}) {
     let h;
     h = await harness({ config: options.config, services: { androidTaskExecutor: executor, ...(options.services || {}) },
         client: { ...(options.coldTransport ? { async runText(args) {
+            if (args[1] === 'cat /proc/sys/kernel/random/boot_id && settings get secure android_id') return '12345678-1234-1234-1234-123456789012\n1234567890abcdef';
             if (args.includes('uiautomator')) {
                 coldReads++;
                 if (!ready) throw Object.assign(Error('cold CLI must not become task evidence'), { code: 'COLD_CLI_EVIDENCE' });
@@ -151,7 +152,7 @@ test('model wait holds ownership, shadow answer never authorizes or declares tas
     assert.doesNotMatch(JSON.stringify(seen), /独立输入/); release.resolve();
     const result = await pending;
     assert.equal(result.details.task.status, 'completed'); assert.equal(result.details.task.counts.modelCalls, 3);
-    assert.equal(writes(h).length, 3); assert.equal(h.events.filter(e => e.source === 'shadow').length, 3);
+    assert.equal(writes(h).length, 3); assert.equal(h.events.filter(e => e.type === 'decision' && e.source === 'shadow').length, 3);
 });
 
 test('page changes during model latency stop before the first input, even with one candidate', async () => {
@@ -326,8 +327,14 @@ test('completion rejects remaining input, offscreen container, password items an
     for (const options of [{ keepInput: true }, { offscreenResult: true }, { passwordItems: true }, { itemsOutside: true }]) {
         const h = await fixture({ items: ['独立输入'], ...options });
         const result = await h.run(task({ completion }));
-        assert.equal(result.details.task.code, options.offscreenResult ? 'TASK_ACTION_UNVERIFIED' : 'TASK_COMPLETION_UNPROVEN', JSON.stringify(options));
-        assert.equal(writes(h).length, 3);
+        // A missing offscreen marker can exhaust polling between samples or while
+        // the last sample crosses its deadline. Both retain the same unknown write.
+        const codes = options.offscreenResult ? ['TASK_ACTION_UNVERIFIED', 'VERIFICATION_TIMEOUT'] : ['TASK_COMPLETION_UNPROVEN'];
+        assert.ok(codes.includes(result.details.task.code), JSON.stringify({ options, code: result.details.task.code }));
+        assert.equal(result.details.task.status, 'stopped');
+        assert.deepEqual(writes(h).map(call => call[1]), ['click', 'setText', 'click']);
+        assert.equal(result.details.task.receipts.length, 3);
+        assert.equal(result.details.task.receipts.at(-1).outcome, options.offscreenResult ? 'unknown' : 'verified');
         assert.equal(result.details.execution.outcome, 'unknown');
     }
 });

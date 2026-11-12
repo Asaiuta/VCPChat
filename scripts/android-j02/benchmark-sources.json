@@ -1,0 +1,16 @@
+{
+  "androidworld": {
+    "repository": "https://github.com/google-research/android_world",
+    "revision": "55ddaf5edc6f6c25673aed343907d5b9dca66f84",
+    "expectedTasks": 116,
+    "license": "Apache-2.0",
+    "setupGuide": "docs/tasks_guide.md"
+  },
+  "androidlab": {
+    "repository": "https://github.com/THUDM/Android-Lab",
+    "revision": "4bfe108cf3883b710e8e5c6fba288161c830e504",
+    "expectedTasks": 138,
+    "license": "MIT",
+    "setupGuide": "docs/prepare_for_linux.md"
+  }
+}
