@@ -33,7 +33,10 @@ function partialFailure(error, statuses) {
 test('DoubleTap 同一目标两次20ms RPC短按，派发间隔100ms，两击各有回执', async t => {
     const advance = clock(t);
     const times = [];
-    const h = await harness({ uiServer: { ok: true, invoke() { times.push(Date.now()); return true; } } });
+    const captures = [];
+    const h = await harness({ uiServer: { ok: true, invoke() {
+        times.push(Date.now()); captures.push(h.uiServer.dumped); return true;
+    } } });
     const work = observeWork(h.service.processToolCall({ command: 'ExecuteStep', action }));
     await tick();
     assert.equal(clicks(h).length, 1);
@@ -55,7 +58,8 @@ test('DoubleTap 同一目标两次20ms RPC短按，派发间隔100ms，两击各
     assert.equal(value.details.experimental, true);
     assert.equal(value.details.pressDurationMs, 20);
     assert.match(modelText(value), /"experimental":true/);
-    assert.equal(h.uiServer.dumped, 1, '不在两击之间重采样目标');
+    assert.equal(h.uiServer.dumped, 2, '首击前一次目标采样与一次最终policy gate');
+    assert.deepEqual(captures, [2, 2], '两击之间不得再采树');
     assert.equal(inputs(h).length, 0, '绝不拼两次shell tap');
 });
 
@@ -153,13 +157,13 @@ test('DoubleTap 仅完整两击后才验证外层expect，验证不代表系统�
     const work = observeWork(h.service.processToolCall({ command: 'ExecuteStep', action,
         expect: { type: 'visible', selector: 'text=Go' }, afterObserve: true }));
     await tick();
-    assert.equal(h.uiServer.dumped, 1, '首击后不能提前验证');
+    assert.equal(h.uiServer.dumped, 2, '目标采样与policy gate后，首击不能提前验证');
     advance(100);
     const { value, error } = await work;
     assert.ifError(error);
     assert.equal(value.details.execution.outcome, 'verified');
     assert.equal(clicks(h).length, 2);
-    assert.equal(h.uiServer.dumped, 2, '验证成功样本与afterObserve复用');
+    assert.equal(h.uiServer.dumped, 3, '两击之后只采一次验证样本，afterObserve复用');
     assert.equal(value.details.observation.status, 'observed');
 });
 
@@ -304,3 +308,16 @@ for (const ackMs of [50, 110, 121]) {
         assert.equal(inputs(h).length, 0);
     });
 }
+
+test('DoubleTap 持久化耗时也占原第二击窗口，过窗不派发', async t => {
+    const advance = clock(t), { InputRecovery } = require('../VCPDistributedServer/Plugin/AndroidController/lib/input-recovery');
+    const original = InputRecovery.prototype.begin; let begins = 0, writes = 0;
+    t.mock.method(InputRecovery.prototype, 'begin', function(...args) {
+        const record = original.apply(this, args); if (++begins === 2) advance(50); return record;
+    });
+    const h = await harness({ uiServer: { ok: true, invoke() { writes++; return true; } } });
+    const work = observeWork(h.service.processToolCall({ command: 'ExecuteStep', action }));
+    await tick(); advance(100); const { error } = await work;
+    assert.equal(error.code, 'DOUBLE_TAP_WINDOW_MISSED'); partialFailure(error, ['dispatched', 'not-dispatched']);
+    assert.equal(writes, 1); assert.deepEqual(h.service.getRuntimeStatus().quarantinedDevices, []);
+});

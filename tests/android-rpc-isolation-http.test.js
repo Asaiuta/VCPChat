@@ -22,12 +22,12 @@ async function setup(t, respond) {
         server.closeAllConnections();
         await new Promise(resolve => server.close(resolve));
     });
-    const transport = new UiServer();
-    transport._port = server.address().port;
-    transport._ready = true;
+    const client = new UiServer();
+    client.transport.port = server.address().port;
+    client.transport.ready = true;
     const h = await harness({ uiServer: { ok: true,
-        async xml() { return (await transport.dump()).xml; },
-        invoke: (method, params, options) => transport.invoke(method, params, options),
+        async xml() { return (await client.dump()).xml; },
+        invoke: (method, params, options) => client.invoke(method, params, options),
     } });
     t.after(() => h.service.cleanup());
     return { h, requests };
@@ -82,6 +82,7 @@ for (const code of [-32601, -32001]) {
         else await assert.rejects(tap(h), error => error.execution.outcome === 'unknown' && !error.message.includes('private content'));
         assert.equal(requests.filter(request => request.method === 'click').length, 1);
         assert.equal(h.calls.filter(call => call[0] === 'adb' && call[1].includes('input')).length, code === -32601 ? 1 : 0);
-        assert.equal((await observe(h)).details.execution.outcome, 'observed');
+        if (code === -32601) assert.equal((await observe(h)).details.execution.outcome, 'observed');
+        else await assert.rejects(observe(h), { code: 'DEVICE_STATE_UNCERTAIN' });
     });
 }

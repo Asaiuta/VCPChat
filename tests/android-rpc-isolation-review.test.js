@@ -3,6 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { harness } = require('./helpers/android-service-harness.cjs');
+const { RemoteOwner } = require('../VCPDistributedServer/Plugin/AndroidController/lib/ui-owner');
 const observe = (h, serial = 'A') => h.service.processToolCall({ command: 'Observe', serial });
 const tap = h => h.service.processToolCall({ command: 'ExecuteStep', serial: 'A', action: { command: 'Tap', id: 'com.example:id/go' } });
 const fault = (code, details = {}) => Object.assign(new Error('private transport payload'), { code, dispatched: true, ...details });
@@ -22,6 +23,38 @@ async function assertIsolated(h) {
     assert.equal(h.uiServer.started, starts);
     await h.service.processToolCall({ command: 'Manage', operation: 'displayStatus' });
 }
+
+for (const request of [
+    { command: 'Observe', serial: 'A' },
+    { command: 'ExecuteStep', serial: 'A', action: { command: 'KeyEvent', key: 'back' } },
+]) test(`${request.command} cannot fall back after owner startup quarantine`, async () => {
+    const h = await harness({ uiServer: { start: async () => ({ ok: false,
+        code: 'UI_SERVER_OWNER_QUARANTINED', owner: { status: 'quarantined' } }) } });
+    try {
+        await assert.rejects(h.service.processToolCall(request), { code: 'DEVICE_STATE_UNCERTAIN' });
+        assert.equal(h.dumpCount, 0, 'no CLI acquisition over the unresolved owner');
+        assert.equal(h.calls.some(call => call[0] === 'rpc' || (call[0] === 'adb' && call[1].includes('input'))), false);
+        await assertIsolated(h);
+    } finally { await h.service.cleanup(); }
+});
+
+test('a new service with RPC disabled still respects a quarantined owner from another instance', async () => {
+    const owner = new RemoteOwner({ serial: 'A', generation: 1, backend: {
+        async prepare() { return { endpointBinding: true, atomicTermination: true }; },
+        launch() {},
+        async terminate(context) { return { verified: true, gone: true, nonce: context.nonce, serial: context.serial }; },
+    } });
+    await owner.prepare();
+    owner.begin(9001);
+    owner.quarantine('UNKNOWN_PREVIOUS_REQUEST');
+    const h = await harness({ config: { UI_SERVER: false } });
+    try {
+        await assert.rejects(h.service.processToolCall({ command: 'Observe', mode: 'image', serial: 'A' }),
+            { code: 'DEVICE_STATE_UNCERTAIN' });
+        assert.equal(h.calls.length, 0, 'the tombstone is checked before device I/O');
+        await assertIsolated(h);
+    } finally { await owner.release(); await h.service.cleanup(); }
+});
 
 for (const code of unknownCodes) {
     test(`ordinary Observe ${code} stops without CLI fallback and isolates future device operations`, async () => {
@@ -45,7 +78,7 @@ for (const code of unknownCodes) {
     });
 }
 
-const field = '<hierarchy><node class="android.widget.EditText" package="com.example" resource-id="com.example:id/editor" text="old" enabled="true" bounds="[0,0][100,40]"/></hierarchy>';
+const field = '<hierarchy rotation="0"><node class="android.widget.EditText" package="com.example" resource-id="com.example:id/editor" text="old" enabled="true" bounds="[0,0][100,40]"/></hierarchy>';
 test('Fill readback transport unknown blocks same-call afterObserve and later calls', async () => {
     const h = await harness({ uiServer: { ok: true, xml: field, invoke(method) {
         if (method === 'getText') throw fault('UI_SERVER_RPC_FAILED');
@@ -57,7 +90,7 @@ test('Fill readback transport unknown blocks same-call afterObserve and later ca
         assert.equal(result.details.execution.outcome, 'unknown');
         assert.equal(result.details.observation.status, 'failed');
         assert.equal(result.details.attempts.find(attempt => attempt.method === 'getText').status, 'unknown');
-        assert.equal(h.uiServer.dumped, 1, 'no observation request after uncertain readback');
+        assert.equal(h.uiServer.dumped, 2, 'target + final policy gate; no observation request after uncertain readback');
         assert.equal(h.calls.filter(call => call[0] === 'rpc' && call[1] === 'getText').length, 1);
         await assertIsolated(h);
     } finally { await h.service.cleanup(); }
@@ -75,14 +108,14 @@ for (const details of [{ dispatched: false }, { drained: true }]) {
 }
 
 for (const outcome of ['false-result', 'device-error']) {
-    test(`completed write ${outcome} remains unknown but does not quarantine a drained device`, async () => {
+    test(`completed touch ${outcome} keeps input isolation despite drained HTTP`, async () => {
         const h = await harness({ uiServer: { ok: true, invoke() {
             if (outcome === 'false-result') return false;
             throw fault('UI_SERVER_RPC_ERROR', { rpcCode: -32001, drained: true });
         } } });
         try {
             await assert.rejects(tap(h), error => error.execution.outcome === 'unknown');
-            assert.equal((await observe(h)).details.execution.outcome, 'observed');
+            await assert.rejects(observe(h), { code: 'DEVICE_STATE_UNCERTAIN' });
             assert.equal(h.calls.filter(call => call[0] === 'rpc').length, 1);
         } finally { await h.service.cleanup(); }
     });
@@ -173,17 +206,20 @@ for (const code of ['STEP_ABORTED', 'STEP_DEADLINE']) test(`post-response ${code
     let completed = false;
     const module = { exports: {} };
     // Expose lexical bindings only in this VM; the production function body is unchanged.
-    vm.runInNewContext(fs.readFileSync(entry, 'utf8') + '\nmodule.exports.review = { rpcAction, uiServers };', {
+    vm.runInNewContext(fs.readFileSync(entry, 'utf8') + '\ninputRecovery = { identityFor: async () => null, blocked: () => false }; module.exports.review = { rpcAction, uiSessions };', {
         module, exports: module.exports, console, Buffer, process, Date, setTimeout, clearTimeout, AbortController,
         require(name) {
+            if (name === './lib/interaction-guard') return { createInteractionGuard: () => ({
+                async preflight() {}, async write() {}, async read() {},
+            }) };
             return name === './lib/step-runtime' ? { ...runtime, check() {
                 if (completed) throw runtime.failure(code, 'post-response boundary');
             } } : realRequire(name);
         },
     }, { filename: entry });
-    const { rpcAction, uiServers } = module.exports.review;
+    const { rpcAction, uiSessions } = module.exports.review;
     let calls = 0;
-    uiServers.set('A', { async start() { return { ok: true }; }, async invoke() { calls++; completed = true; return true; } });
+    Object.assign(uiSessions.get('A'), { async start() { return { ok: true }; }, async invoke() { calls++; completed = true; return true; } });
     await assert.rejects(rpcAction('A', 'click', [1, 2], [], 'write'), error => {
         assert.equal(error.code, code);
         assert.equal(error.dispatched, true);
