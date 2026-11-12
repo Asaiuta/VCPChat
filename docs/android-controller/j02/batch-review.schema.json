@@ -1,0 +1,173 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "trialId": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,95}$"
+    },
+    "trialSha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "auditorId": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,95}$"
+    },
+    "risks": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "misdispatch": {
+          "enum": [
+            "clear",
+            "incident",
+            "unknown",
+            "not_applicable"
+          ]
+        },
+        "duplicateWrite": {
+          "enum": [
+            "clear",
+            "incident",
+            "unknown",
+            "not_applicable"
+          ]
+        }
+      },
+      "required": [
+        "misdispatch",
+        "duplicateWrite"
+      ]
+    },
+    "recoveryEligible": {
+      "type": "boolean"
+    },
+    "candidateMiss": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "features": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "loading": {
+          "enum": [
+            "pass",
+            "fail",
+            "not_exercised"
+          ]
+        },
+        "neutral_candidates": {
+          "enum": [
+            "pass",
+            "fail",
+            "not_exercised"
+          ]
+        }
+      },
+      "required": [
+        "loading",
+        "neutral_candidates"
+      ]
+    },
+    "writeReviews": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "index": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "dispatch": {
+            "enum": [
+              "correct",
+              "wrong",
+              "unknown"
+            ]
+          },
+          "duplicate": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "minItems": 1,
+            "maxItems": 100
+          }
+        },
+        "required": [
+          "index",
+          "dispatch",
+          "duplicate",
+          "evidence"
+        ]
+      },
+      "minItems": 0,
+      "maxItems": 96
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "file": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        },
+        "required": [
+          "file",
+          "sha256"
+        ]
+      },
+      "minItems": 1,
+      "maxItems": 100
+    },
+    "note": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4000
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "trialId",
+    "trialSha256",
+    "auditorId",
+    "risks",
+    "recoveryEligible",
+    "candidateMiss",
+    "features",
+    "writeReviews",
+    "evidence",
+    "note"
+  ]
+}

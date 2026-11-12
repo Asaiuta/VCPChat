@@ -1,0 +1,538 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "urn:vcpchat:android:j02:exploration-report:3",
+  "title": "J0.2 search exploration report; deliberately cannot grant admission",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "batchId",
+    "stage",
+    "calibrated",
+    "protocolSha256",
+    "status",
+    "invalidations",
+    "promotion",
+    "trials",
+    "denominators",
+    "risks",
+    "models",
+    "coverage",
+    "cleanup"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 3
+    },
+    "batchId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "stage": {
+      "const": "exploration"
+    },
+    "calibrated": {
+      "const": false
+    },
+    "protocolSha256": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "status": {
+      "enum": [
+        "completed",
+        "blocked",
+        "invalidated"
+      ]
+    },
+    "invalidations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
+    "promotion": {
+      "const": "not_evaluated"
+    },
+    "trials": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {
+        "$ref": "#/definitions/trial"
+      }
+    },
+    "denominators": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "planned",
+        "started",
+        "notRun",
+        "independentClusters",
+        "acceptanceSamples"
+      ],
+      "properties": {
+        "planned": {
+          "const": 3
+        },
+        "started": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "notRun": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 3
+        },
+        "independentClusters": {
+          "const": 1
+        },
+        "acceptanceSamples": {
+          "const": 0
+        }
+      }
+    },
+    "risks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "misdispatch",
+        "falseCompletion",
+        "duplicateWrite"
+      ],
+      "properties": {
+        "misdispatch": {
+          "$ref": "#/definitions/risk"
+        },
+        "falseCompletion": {
+          "$ref": "#/definitions/risk"
+        },
+        "duplicateWrite": {
+          "$ref": "#/definitions/risk"
+        }
+      }
+    },
+    "models": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestedAlias",
+        "observedReturnedVersions",
+        "expectedReturnedVersion",
+        "usageKnownCalls",
+        "usageTotalCalls"
+      ],
+      "properties": {
+        "requestedAlias": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expectedReturnedVersion": {
+          "type": "null"
+        },
+        "observedReturnedVersions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "usageKnownCalls": {
+          "$ref": "#/definitions/count"
+        },
+        "usageTotalCalls": {
+          "$ref": "#/definitions/count"
+        }
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ordinarySearch",
+        "neutralCandidateDiscrimination",
+        "loading",
+        "recovery",
+        "mainAgent",
+        "handoff",
+        "independentWriteAudit"
+      ],
+      "properties": {
+        "ordinarySearch": {
+          "type": "boolean"
+        },
+        "neutralCandidateDiscrimination": {
+          "const": "not_established"
+        },
+        "loading": {
+          "const": "not_exercised"
+        },
+        "recovery": {
+          "enum": [
+            "observed",
+            "not_exercised"
+          ]
+        },
+        "mainAgent": {
+          "const": "not_exercised"
+        },
+        "handoff": {
+          "const": "not_exercised"
+        },
+        "independentWriteAudit": {
+          "const": false
+        }
+      }
+    },
+    "cleanup": {
+      "type": [
+        "object",
+        "null"
+      ]
+    }
+  },
+  "definitions": {
+    "count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "unknownCount": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "risk": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "numerator",
+        "denominator",
+        "unassessable",
+        "confidenceUpper",
+        "admitted"
+      ],
+      "properties": {
+        "numerator": {
+          "$ref": "#/definitions/unknownCount"
+        },
+        "denominator": {
+          "$ref": "#/definitions/count"
+        },
+        "unassessable": {
+          "$ref": "#/definitions/count"
+        },
+        "confidenceUpper": {
+          "type": "null"
+        },
+        "admitted": {
+          "const": false
+        }
+      }
+    },
+    "independent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "verdict",
+        "uiMatched",
+        "matchingRows",
+        "queryMatches",
+        "code"
+      ],
+      "properties": {
+        "verdict": {
+          "enum": [
+            "pass",
+            "fail",
+            "unknown"
+          ]
+        },
+        "uiMatched": {
+          "type": "boolean"
+        },
+        "matchingRows": {
+          "$ref": "#/definitions/count"
+        },
+        "queryMatches": {
+          "type": "boolean"
+        },
+        "code": {
+          "type": "string"
+        }
+      }
+    },
+    "modelEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "requestedModel",
+        "returnedModel",
+        "usage",
+        "elapsedMs"
+      ],
+      "properties": {
+        "provider": {
+          "enum": [
+            "typesafe",
+            "openrouter",
+            null
+          ]
+        },
+        "requestedModel": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "returnedModel": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "elapsedMs": {
+          "$ref": "#/definitions/count"
+        },
+        "usage": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "inputTokens",
+            "outputTokens",
+            "totalTokens"
+          ],
+          "properties": {
+            "inputTokens": {
+              "$ref": "#/definitions/unknownCount"
+            },
+            "outputTokens": {
+              "$ref": "#/definitions/unknownCount"
+            },
+            "totalTokens": {
+              "$ref": "#/definitions/unknownCount"
+            }
+          }
+        },
+        "transport": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "requestId",
+              "stage",
+              "elapsedMs"
+            ],
+            "properties": {
+              "requestId": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "stage": {
+                "enum": [
+                  "request_created",
+                  "socket_assigned",
+                  "dns_resolved",
+                  "tcp_connected",
+                  "tls_connected",
+                  "request_finished",
+                  "http_response",
+                  "failed"
+                ]
+              },
+              "elapsedMs": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1000000000
+              },
+              "httpStatus": {
+                "type": "integer",
+                "minimum": 100,
+                "maximum": 599
+              },
+              "reusedSocket": {
+                "type": "boolean"
+              },
+              "errorCode": {
+                "enum": [
+                  "ENOTFOUND",
+                  "EAI_AGAIN",
+                  "ECONNREFUSED",
+                  "ECONNRESET",
+                  "ETIMEDOUT",
+                  "ECONNABORTED",
+                  "ERR_CANCELED",
+                  "ERR_TLS_CERT_ALTNAME_INVALID",
+                  "CERT_HAS_EXPIRED",
+                  "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+                  "DEPTH_ZERO_SELF_SIGNED_CERT",
+                  "OTHER"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "trial": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "arm",
+        "taskId",
+        "clusterId",
+        "outcome",
+        "code"
+      ],
+      "properties": {
+        "arm": {
+          "enum": [
+            "rules-current",
+            "jev-original-search-v1",
+            "jev-candidate-search-v9"
+          ]
+        },
+        "taskId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "clusterId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "outcome": {
+          "enum": [
+            "success",
+            "failed",
+            "unknown",
+            "refused",
+            "escalated",
+            "cancelled",
+            "not_run"
+          ]
+        },
+        "code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "started": {
+          "type": "boolean"
+        },
+        "independent": {
+          "$ref": "#/definitions/independent"
+        },
+        "path": {
+          "enum": [
+            "normal",
+            "recovery",
+            "escalation",
+            "recovery_and_escalation"
+          ]
+        },
+        "recoveryEligible": {
+          "type": "boolean"
+        },
+        "recoveryAttempted": {
+          "type": "boolean"
+        },
+        "escalationRequested": {
+          "type": "boolean"
+        },
+        "jevCalls": {
+          "$ref": "#/definitions/unknownCount"
+        },
+        "mainAgentCalls": {
+          "$ref": "#/definitions/unknownCount"
+        },
+        "mainModelRequests": {
+          "$ref": "#/definitions/unknownCount"
+        },
+        "humanHandoffs": {
+          "$ref": "#/definitions/unknownCount"
+        },
+        "models": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/modelEvidence"
+          }
+        },
+        "timings": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "taskMs",
+            "resetMs",
+            "independentCheckMs",
+            "endToEndMs"
+          ],
+          "properties": {
+            "taskMs": {
+              "$ref": "#/definitions/unknownCount"
+            },
+            "resetMs": {
+              "$ref": "#/definitions/unknownCount"
+            },
+            "independentCheckMs": {
+              "$ref": "#/definitions/unknownCount"
+            },
+            "endToEndMs": {
+              "$ref": "#/definitions/unknownCount"
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "arm": {
+                "const": "jev-candidate-search-v9"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "started",
+              "independent",
+              "path",
+              "recoveryEligible",
+              "recoveryAttempted",
+              "escalationRequested",
+              "jevCalls",
+              "mainAgentCalls",
+              "mainModelRequests",
+              "humanHandoffs",
+              "timings",
+              "models"
+            ]
+          },
+          "else": {
+            "properties": {
+              "outcome": {
+                "const": "not_run"
+              },
+              "code": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

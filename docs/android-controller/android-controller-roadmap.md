@@ -124,12 +124,14 @@ Android 侧原先只有链条的两端：**语义树**（`ui-graph.js`）和**�
 
 性质：`正确性`＝结果是错的或证据是假的 / `表达力`＝能做的少 / `工程化`＝能跑但不好维护 / `刻意`＝设计取舍。判据沿用 A/B/C/D 分层：A=真机效果，B=本地生产路径离线复现，C=静态代码链与外部源码核对，D=产品能力差距判断。
 
+> 本节 G1–G13 与 §0.5.1 的 H1–H7 均为对应调查轮的快照，行状态随批次演进可能滞后；完整对照与更新说明见[competitive-gap](android-controller-competitive-gap-2026-11.md)，里程碑现状以[状态表](README.md)为准。
+
 | # | 维度 | 本插件现状 | 社区最强 | 性质 | 判据 |
 | --- | --- | --- | --- | --- | --- |
 | G1 | 元素身份 | 每步按语义 rebind；`index` 靠位置 + 15s 快照 | Appium：UUID=`windowId`+`sourceNodeId`，miss 时按 `By` 重定位后重算 UUID 二次校验才判 stale | 正确性 | C |
 | G2 | text / content-desc 分源 | 调查时合并label；本批严格text/desc/any已落代码，设备新验收未做 | Appium / u2 分列 `text` 与 `contentDescription` | 正确性 | B |
 | G3 | 显示/窗口维度 | 本批普通语义链与frame统一新鲜上下文/epoch；多root仅诊断，完整窗口元数据与多屏输入未交付；虚拟屏已立为 M4.5（零实现） | Appium `listWindows/listDisplays` + `currentDisplayId`；scrcpy `--display-id` | 正确性 | C |
-| G4 | 载体身份 | 本批SHA内容路径+每generation启动文件证据；运行owner未绑定 | scrcpy：启动首参=客户端版本，不等直接失败 | 正确性 | B |
+| G4 | 载体身份 | 本批SHA内容路径+每generation启动文件证据；运行owner已按wrapper绑定并通过本机专项（2026-11-05，见状态表） | scrcpy：启动首参=客户端版本，不等直接失败 | 正确性 | B |
 | G5 | stable 语义 | 本批统一200ms完整raw布局/上下文，动态text与像素不在保证内；设备未准入 | Maestro层级settle与像素static分开，部分超时仍成功 | 正确性 | B |
 | G6 | 选择器关系 | 一层 `within`、`nth` 位置 | Maestro 关系选择器 + traits + state + 容差；u2 child/sibling/上下左右 | 表达力 | C |
 | G7 | 多点手势 | 仅 `pinchIn/Out` 固定两指 | 设备端 `gesture` / `swipePoints` / `flingTo*`（已证存在，未接线） | 表达力 | A |
@@ -161,15 +163,15 @@ Android 侧原先只有链条的两端：**语义树**（`ui-graph.js`）和**�
 | H1 | 屏幕文本字符预算 | 本批textLength默认120、detail默认false，坐标/短ID按需，公开裁剪不改完整证据；通用收益未实采 | 坐标仅 `detail:true` 才附，短 id 不给模型，flags 折进角色名，标签上限 60，分区 顶部/中部/底部，`+` 标新增、`…另有 N 项` 记账 | 工程化 | B |
 | H2 | 敏感动作预标记 | 本批唯一短标签/ID风险词表与派发共用，启发式不证明完整敏感效果 | 词表单源，`SafetyGate` 与渲染器同读，`⚠` 即会被问的 | 正确性 | C |
 | H3 | 包级拒绝名单 | 本批deny读写/readOnly禁写/confirmEveryWrite拒绝门已落代码，System grant仍独立必需 | `DEFAULT_DENY` 30+ 包（支付/银行/券商，连读都不给）+ `SYSTEM_PACKAGES`（可读绝不动作）+ `DEFAULT_CONFIRM_EVERY_WRITE` | 正确性 | C |
-| H4 | 交还用户的通道 | 无独立动作 | `handoff(reason)`，等「继续」/「停止」，最长 10 分钟 | 表达力 | D |
+| H4 | 交还用户的通道 | 调查时无独立动作；本插件 `Handoff` 已于 2026-11-05 落地（M4.0，真机 4/4） | `handoff(reason)`，等「继续」/「停止」，最长 10 分钟 | 表达力 | D |
 | H5 | stale 拒绝时回什么 | 本批保留原错误，读策略/预算/取消/隔离允许才附一次新屏，否则screen=null+reason | 拒绝时先 observe，把新屏幕随错误回执一起返回 | 工程化 | B |
 | H6 | Intent 优先 | `LaunchApp` 仅 `url`；`System` 的 `navigate/set/draft` 只碰白名单四项设置 | 8 类固定 intent：alarm/timer/calendar/dial/sms_draft/share/navigate/settings，**全不需要无障碍** | 表达力 | C |
-| H7 | 整列表收集 | `ScrollUntil` 必须给 `container` + `target` | `collect`：自动翻页、按文字去重、只读不点，`max_pages 1–30` | 表达力 | C |
+| H7 | 整列表收集 | `ScrollUntil` 必须给 `container` + `target`；本插件 `Collect`（M2.6.6）已落地 | `collect`：自动翻页、按文字去重，实际调用 scroll 翻页改变 UI，不点业务控件但不是零输入只读，`max_pages 1–30` | 表达力 | C |
 
 #### 0.5.2 本轮改动的优先级
 
 - **H3、H2 定为 P1，且排在 H1 之前。** 两者都是「派发链路上没有任何拦截点」：`flagsOfNode` 只标状态不标风险，一屏里 `[4] 立即购买 (850,615) #:id/btn_buy [click]` 这样的行配一句 `Tap id=…` 就付了。§0.4 的「可验证契约」解决的是**事后能不能证明**，这一条解决的是**事前要不要问**，不能互相替代。
-- **H1 定为 P1，但它是成本项不是正确性项。** 本机实测（同一份 6 控件样本、同一棵树、两套渲染器）：本插件 258 字符 / 43 每控件，紧凑格式 99 / 16 每控件。按 `DEFAULT_LIMIT=60` 推算一屏 **2580 vs 990**，白烧约 1590 字符（≈800 token）；二十步任务累计约 16000 token 纯坐标与短 id。**这是每步都在漏，不是某一步会错**，所以放 P1。
+- **H1 定为 P1，但它是成本项不是正确性项。** 本机实测（同一份 6 控件样本、同一棵树、两套渲染器）：本插件 258 字符 / 43 每控件，紧凑格式 99 / 16 每控件。按 `DEFAULT_LIMIT=60` 推算一屏 **2580 vs 990**，白烧约 1590 字符（≈800 token）；二十步任务累计约 16000 token 纯坐标与短 id。这是 6 控件样本的线性外推，只说明量级，不是通用实测收益（外推禁令见 [competitive-gap §9.1](android-controller-competitive-gap-2026-11.md)）。**这是每步都在漏，不是某一步会错**，所以放 P1。
 - **H5 维持 P2**：纯机械改动，但影响每一步的往返次数（拒绝后要模型多走一次 Observe）。
 - **H6 高于 H7**：定闹钟/日程/导航/短信/分享这几件事，走固定 intent 不点界面，稳定性差一个量级；`collect` 只省调用次数。
 - **H4 不进 M2.6，单列为 M4.0**：它是 M4「人机协同」的**不依赖 `control=true` 的前置路径**——交还用户不需要开 scrcpy 控制通道，也不需要接管状态机。这也让 M4 第一次有了「即使接管决定不做，也能先交付一半」的可能。
@@ -229,7 +231,7 @@ M1 把通道接通了，动作集却只有十个。**§0.2 的实测把这件事
 | 项 | 交付 | 契约测试锚点 |
 | --- | --- | --- |
 | M1.5.0 | **修正 LongPress 与签名表**：`click` arity 放行 `[2,3]`，第三参标注为**按压时长 ms**；LongPress 改走 `click(x,y,duration)`，同点 `swipe` 仅作明确未执行时的回退；同步修正 `lib/rpc-methods.js:18` 与 `lib/ui-server.js:350` 的「displayId」错误注释 | `tests/android-rpc-actions-contract.test.js`：三参 `click` 通过、四参本地拒绝；LongPress 首选通道 `channels[0]==='rpc'` 且方法为 `click`；`steps↔duration` 断言只约束回退通道 |
-| M1.5.1 | `DoubleTap`：两次 `click`，间隔 60–120ms（Maestro 默认 100ms 可作参考）；第二击前重新 `check()` 预算与取消 | `tests/android-double-tap-contract.test.js`：间隔落入窗口、两击间取消不补第二击、两击各记一条 attempt、不得提前置 `verified` |
+| M1.5.1 | `DoubleTap`：两次 `click`，间隔 60–120ms（实现档：目标派发间隔 100ms、第二击须在 120ms 内开始派发，见插件 README DoubleTap 节）；第二击前重新 `check()` 预算与取消 | `tests/android-double-tap-contract.test.js`：间隔落入窗口、两击间取消不补第二击、两击各记一条 attempt、不得提前置 `verified` |
 | M1.5.2 | `ScrollUntil`：优先 `scrollTo(containerSelector, targetSelector, isVertical)` 一次 RPC 完成；RPC 不可用或需每轮重采样时退到宿主有限循环（轮数上限 + 共享总预算 + 到上限报 `unknown`） | `tests/android-scroll-until-contract.test.js`：只滚不点、不唤醒、轮数上限生效、总预算不被拉长、两条路径不静默互切 |
 | M1.5.3 | 键盘补齐：`imeAction`（`pressKeyCode(KEYCODE_ENTER` / `SEARCH`, `metaState`)）、`EraseText count`（`pressKeyCode(DEL)` × N，上限 100）、`KeyCombo`（双参 metaState） | `tests/android-keyboard-contract.test.js`：`eraseText` 不越删到空、组合键 meta 透传、`imeAction` 不越权成提交 |
 | M1.5.4 | `Drag`：接设备端 `drag` / `dragTo`（按下→保持→移动→抬起），不是「长按 + Swipe」 | `tests/android-drag-contract.test.js`：一条触摸流、终点落在目标可见矩形内、失败不重放 |
@@ -278,7 +280,7 @@ M1 把通道接通了，动作集却只有十个。**§0.2 的实测把这件事
 
 **对外部对标的修正**：关系定位、下推语义、现代框架暴露不足与遮挡确实是差距，但不把其它工具等同于万能穿透。Compose testTag 需要应用暴露（如 testTagsAsResourceId），Flutter/Canvas 受自身无障碍语义约束；waitForIdle 的事件静默不是每次动态重绘都可见，故「动画 App 100%超时」「各家固定500ms」「所有主线程停稳」均不能作为通用事实；本随包构建的500ms静默窗口则已由DEX证实。M2 仅补轻量祖先锚点与布局后备，不照搬重型框架。
 
-**准入**：2026-11-03最新完整隔离回归1425/1425通过、0失败/跳过，15.140s（含两套CLI安全测试33条）；含真实loopback HTTP、有界正则独立参考、跨入口sequence/expect、未知传输隔离、hidden/disabled/长label、真实carrier声明与CLI尾行，以及安全切出传输cleanup。JS语法与限定差分空白检查通过。真机独立验证已经执行；首轮5/14暴露XML声明、次轮12/14暴露CLI尾行与运动存活断言，第三轮因切前台安全停，用户切回后第四轮13/14，host CLI已通过，动态idle截止边缘ADB_TIMEOUT收尾已先红后绿（定向87/87）；第五轮安全停止；第六轮运动窗口12秒过期，操作员显式授权后仅fixture延至30秒，第七轮完整13/14、0未执行、正常cleanup/exit1。动态运动前后存活、ticks48→157，idle却verified/layout_stable，独立断言未过；两次同布局与连续运动的采样轨迹/期望契约仍需核清，不直接归因为生产漏运动或改期望追绿，最终真机NOT_PASSED；详见[M2真机记录](android-m2-device-validation.md)，不复用M1/M1.5或拼接局部绿灯。仍为experimental，固定单ROM靶场不代表跨ROM准入。
+**准入**：2026-11-03当时完整隔离回归1425/1425通过、0失败/跳过，15.140s（含两套CLI安全测试33条）；含真实loopback HTTP、有界正则独立参考、跨入口sequence/expect、未知传输隔离、hidden/disabled/长label、真实carrier声明与CLI尾行，以及安全切出传输cleanup。JS语法与限定差分空白检查通过。真机独立验证已经执行；首轮5/14暴露XML声明、次轮12/14暴露CLI尾行与运动存活断言，第三轮因切前台安全停，用户切回后第四轮13/14，host CLI已通过，动态idle截止边缘ADB_TIMEOUT收尾已先红后绿（定向87/87）；第五轮安全停止；第六轮运动窗口12秒过期，操作员显式授权后仅fixture延至30秒，第七轮完整13/14、0未执行、正常cleanup/exit1。动态运动前后存活、ticks48→157，idle却verified/layout_stable，独立断言未过；两次同布局与连续运动的采样轨迹/期望契约仍需核清，不直接归因为生产漏运动或改期望追绿，该轮真机记 NOT_PASSED（2026-11-05 基线改造后已复验 14/14，档位见[状态表](README.md)）；详见[M2真机记录](android-m2-device-validation.md)，不复用M1/M1.5或拼接局部绿灯。仍为experimental，固定单ROM靶场不代表跨ROM准入。
 
 #### M2 实施前发现的 carrier ABI 与证据（2026-11-03，离线只读）
 
@@ -315,7 +317,7 @@ M2 交付的是「寻址表达力」，M2.5 交付的是「寻址所依赖的事
 - M2.5.3 不能声称「原子防外部 UI 变化」。能给的只有「派发前最后一次复核」，与既有凭据 TTL 的口径一致。
 - **G1（元素身份）不在 M2.5 交付**。它需要 M2.5.1 的干净字段与 M2.5.3 的稳定上下文作为输入，排在 M3 之后单独准入；XML结构哈希不能冒充Appium真实sourceNodeId+windowId身份；没有独立身份依据前不静默恢复句柄。
 
-**当前次序与未闭环项**：身份/分源/上下文/布局stable/分层摘要/策略门及owner集成已完成本轮离线验证（见 [README](README.md) 状态表）。2026-11-05 晚间的真机矩阵：M2 本机 14/14、M1.5 14/14（`DoubleTap` 复跑 4/4）、结构/Collect 5/5、原生批准/交还 4/4，均 exit 0；owner 生命周期验证通过。仍欠：真实在途未知RPC注入、跨ROM/多display、长稳与性能基线迁移。Manage recoverOwner只凭本会话独立消失证明解隔离，不收force/approval、不重放；不以单ROM固定靶场结果宣布全部M3前置完成。
+**当前次序与未闭环项**：身份/分源/上下文/布局stable/分层摘要/策略门及owner集成已完成本轮离线验证（见 [README](README.md) 状态表）。2026-11-05 晚间的真机矩阵：M2 本机 14/14、M1.5 14/14（`DoubleTap` 单独复跑 3 次连续通过，连首轮共 4 次）、结构/Collect 5/5、原生批准/交还 4/4，均 exit 0；owner 生命周期验证通过。仍欠：真实在途未知RPC注入、跨ROM/多display、长稳与性能基线迁移。Manage recoverOwner只凭本会话独立消失证明解隔离，不收force/approval、不重放；不以单ROM固定靶场结果宣布全部M3前置完成。
 
 **为什么 M3 要等**：M3 的 OCR 通道对同一个文字会给出与语义树不同的 bbox，既有约定是「语义树优先、OCR 只填空」。这个约定只有在语义树的字段来源（M2.5.1）与上下文（M2.5.3）可信时才有意义；否则「谁优先」的争论会变成在两个都不可信的来源之间挑一个。
 
@@ -411,7 +413,7 @@ M4 的详细源码、协议和验收研究见[2026-11-05 M4 调研报告](2026-1
 
 ### M5 长任务与生态沉淀
 
-**2026-11-07 补齐路线与首批启动**：意图执行 → 可追溯轨迹 → Skill 草稿/复用 → 版本修复的方向保留，但基础恢复必须前移。J1.1 已统一 rules/shadow/jev 的预存结果与完整完成等待，容器和条目共用提交尝试的 5 秒窗口；J0.1 已补完成策略身份和对应离线夹具，详见 [首批记录](2026-11-07_jev-j1-completion.md)。下一步补校准证据、明确未派发 stale 的重新观察/候选生成/决策，以及显式宿主升级，再按任务族扩展语义和动作。正常路径中间主模型调用为零，异常升级单独计数。当前 Jev 仍限搜索词表与 Tap/Fill、失配即停，`escalate` 只返回停止码；首批修复不代表完整自修复。详细证据、取舍和 Gate 统一见 [J 系列](2026-11-07_jev-loop-roadmap.md)，不另设第二份 Jev 详细计划。
+**2026-11-07 补齐路线与首批启动**：意图执行 → 可追溯轨迹 → Skill 草稿/复用 → 版本修复的方向保留，但基础恢复必须前移。J1.1 已统一 rules/shadow/jev 的预存结果与完整完成等待，容器和条目共用提交尝试的 5 秒窗口；J0.1 模型标识/usage/拒绝证据、J5.3 共享夹具与 J1.2 有界未派发重决策随后已实现，详见 [续批记录](2026-11-07_jev-evidence-recovery.md)。随后 J1.3 声明加载等待与进度边界、J5.1 结构化升级证据已落地，见 [等待/升级记录](2026-11-07_jev-wait-escalation.md)。此后 J5.2 实际主 Agent/Handoff 升级、J2 语义、J3.1/J3.2a/J3.3a 动作与开关、J4a 双字段路线和 J5.3 统一夹具回放均已完成限定离线验收（档位见 README）；下一步为 J0.2 真实校准协议或其余任务族。正常路径中间主模型调用为零，异常升级单独计数。当前 Jev 限 search-v8 / toggle-v1 / route-v1 三个声明任务族，可恢复明确未派发的内容 stale，连续第三次停止；上下文变化硬停止，`escalate` 仅在任务显式声明 assistance 且通道存在时同任务升级一次，否则停止；本批修复不代表完整自修复。详细证据、取舍和 Gate 统一见 [J 系列](2026-11-07_jev-loop-roadmap.md)，不另设第二份 Jev 详细计划。
 
 **2026-11-06 增量**：`decision=jev` 受限搜索循环已集成并离线验证，支持当前完整树候选生成、Jev候选/wait/escalate选择、多级入口、Fill读回与独立完成验证；不再只记录shadow。搜索词表与唯一同包资源ID仍是边界，暂定概率策略未校准，真实Jev与App联合准入未做。最新数字见[状态表](README.md)，契约及证据见[Jev循环记录](2026-11-06_android-jev-loop-report.md)。以下首批段落保留2026-11-05切片范围。
 
@@ -454,7 +456,7 @@ M4 的详细源码、协议和验收研究见[2026-11-05 M4 调研报告](2026-1
 
 **页面变化分级。** 坐标移动但语义 selector 和前后条件成立时直接重定位，无需模型；文字/结构改变时先重观察，在同一步意图与上下文中生成新候选，由 Jev 选择，再实时验证唯一身份后派发。未知弹窗、路径分支或前置条件变化可转入 M5.1a 的有界探索，并只从独立确认的状态衔接未执行部分；需要修改业务目标、完成谓词、动作权限或无法区分已派发效果时返回主模型/人工。屏幕文本始终是证据，不能成为新增任务或放宽授权的指令。修复不得把未校验长序列盲发出去，也不能重放结局未知的写。
 
-上述为目标行为，当前 Jev 整树失配仍立即停止。J1 先处理有可信未派发证明的重新决策；任何缩小派发检查范围或完成等待范围的方案，都需 [区域证据](2026-11-06_m5-context-diff-report.md) 支持并另立策略/批次。J5 的同调用升级沿用租约/截止；M4.1 viewer 接管会取消原任务，不能当作暂停后自然恢复。
+上述为目标行为，当前 J1.2 已实现有可信未派发证明的内容 stale 重决策；上下文/epoch 变化仍停止。任何缩小派发检查范围或完成等待范围的方案，都需 [区域证据](2026-11-06_m5-context-diff-report.md) 支持并另立策略/批次。J5 的同调用升级沿用租约/截止；M4.1 viewer 接管会取消原任务，不能当作暂停后自然恢复。
 
 **例子（规划用任务，非已交付接口）：** 首次“在指定App搜索本次关键词并读取前十条结果”，宿主依次定位搜索入口、填写参数、提交、验证结果页并采集；任务有证据完成后，Agent 提炼带关键词参数、搜索框/结果列表语义定位和结果完成谓词的 Skill。下次同类任务直接运行；入口仅换位置无需 Jev，文案改变则局部候选重定位，改为新的搜索流程则进入有界探索，验证后的修复保存新版本。结果不足十条而又无可证明的列表结束时返回部分结果，不把“队列执行完”当成任务成功。
 
@@ -524,7 +526,7 @@ M4.2设备队列已实现，M4.3只补跨设备凭据/序列边界
 
 ## 6. 后续工作（基础项为2026-11-05复核，M5于2026-11-07更新）
 
-1. **M1.5 当前回归与推广边界**：历史14项通过不覆盖本次代码；新回归发现主机滚动正面积可见与靶场至少32dp标准不一致，须单独定义可见性契约，保留失败；后续若推广到其它ROM/分辨率、选区/Unicode/空字段删除、其它键码meta、Pinch极值或横向滚动，应另按明确矩阵独立准入。M1既有6/6不复用新增证据，本机14项也不外推所有参数。unknown不直接重放，不拿shell补动作或放宽时序/读回标准；未覆盖形状继续experimental。
+1. **M1.5 当前回归与推广边界**：历史14项通过不覆盖本次代码；新回归发现主机滚动正面积可见与靶场至少32dp标准不一致，须单独定义可见性契约（2026-11-05 已由 `scroll-axis-interior` 契约收口并通过 14/14，不再列为保留失败，见[状态表](README.md)）；后续若推广到其它ROM/分辨率、选区/Unicode/空字段删除、其它键码meta、Pinch极值或横向滚动，应另按明确矩阵独立准入。M1既有6/6不复用新增证据，本机14项也不外推所有参数。unknown不直接重放，不拿shell补动作或放宽时序/读回标准；未覆盖形状继续experimental。
 2. **IME 租约（技能型优化，非阻塞）**：现在 `ADB_KEYBOARD_NOT_ACTIVE` 把「用户没手工装/没手工切输入法」当成能力缺失。若真要做成能力而非环境要求，就实现 `ime enable` → 记录 `settings get secure default_input_method` → `ime set` → 广播 base64 → 还原。风险开关进 `plugin-manifest.json` 的 `configSchema` 与 `modules/settings/schema/android-system.js`（与 M4 接管同一张人类授权面），默认关。
 3. **M2.5.5实现后续**：分层摘要纯模块及Observe接入已实现；后续迁移历史性能采集/基线并补齐ROM/workload，不以同一code hash合并不可比性能条件或推导设备授权。
 4. **M2 按 §2 最新契约实施**：完整宿主匹配、一层祖先锚点、元素图像与有界idle；设备 Selector 下推与真实遮挡检测不混进本轮承诺。
@@ -533,7 +535,7 @@ M4.2设备队列已实现，M4.3只补跨设备凭据/序列边界
 7. **M4.0（handoff）可以随时插入，不必等接管决定**：它只要暂停态与人的回执，不碰 `control=true`。现已提供原调用内人工交还；不含viewer控制通道或持久化任务恢复。
 8. **A/B/C路线复核**：当前继续ADB+app_process(A)，不启动安装helper直连(B)或自维护shell后端(C)；明确窗口/事件/owner协议缺口才评估小范围C。随包DEX已确认rootInActive=false遍历窗口根、API30+全display枚举及内部event listener，当前host默认true且未建window envelope，不把这些底层能力误归B独占。B的理由应是无需开发者调试与用户安装启停/直连体验；普通App不继承shell权限，需新后端/认证/生命周期/能力协商，非只换Transport。61ms不能否定事件价值，敏感数据空壳也不构成确定归因；完整hash/分支证据与官方边界见[路线复核](android-controller-route-review-2026-11.md)。
 9. **M4.5 虚拟屏（2026-11-06 P0首轮未通过；同日F1焦点修复单机20/20，见[报告](2026-11-06_android-m4-focus-report.md)）**：独立探针/靶场及真机建屏出图已完成，默认屏焦点保持未通过，尚无生产准入。P1之前不改`parseFreshScreenProbe`的单display硬判；本轮没有输入、IME或20次生命周期验证。后续新启动/焦点方案须保留既有失败重新验证，不能通过删除隔离判据晋级。
-10. **M5.1/J 系列补齐**：J1.1 已实现共用预存完成判据与有界完整谓词等待，J0.1 已补完成策略身份和离线夹具，见[首批记录](2026-11-07_jev-j1-completion.md)。下一批按[J路线图](2026-11-07_jev-loop-roadmap.md)补齐校准证据、可信未派发 stale 重决策及显式主Agent/Handoff升级，随后扩语义、操作与多字段。各版本分别校准和独立验收；已通过范围才进入Skill草稿/复用/版本修复。复用GlobalJevService与原子动作/策略/租约/排干链；不新增设备RPC查询，不以脱敏摘要冒充完整回放，不因已有动作原语放开任意导航。J1.2/J5及后续新增项仍为规划，实施档位以README为准。
+10. **M5.1/J 系列补齐**：J1.1 已实现共用预存完成判据与有界完整谓词等待，J0.1 已补完成策略身份和离线夹具，见[首批记录](2026-11-07_jev-j1-completion.md)。同日续批已补最小模型证据、共享夹具和可信未派发 stale 重决策，见[续批记录](2026-11-07_jev-evidence-recovery.md)。随后显式主Agent/Handoff升级、语义、操作、开关、双字段路线与统一夹具回放均已离线落地，下一批按[J路线图](2026-11-07_jev-loop-roadmap.md)冻结真实校准协议或扩展其余任务族。各版本分别校准和独立验收；已通过范围才进入Skill草稿/复用/版本修复。复用GlobalJevService与原子动作/策略/租约/排干链；不新增设备RPC查询，不以脱敏摘要冒充完整回放，不因已有动作原语放开任意导航。跨调用恢复、真实校准与其余扩展仍为规划，实施档位以README为准。
 
 ### 6.1 通用闸门：device conformance
 

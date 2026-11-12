@@ -1,0 +1,146 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "serial": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4000
+    },
+    "model": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4000
+    },
+    "android": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4000
+    },
+    "romFingerprint": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4000
+    },
+    "displayId": {
+      "const": 0
+    },
+    "rotation": {
+      "enum": [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    "viewport": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "width": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "width",
+        "height"
+      ]
+    },
+    "apps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "package": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000
+          },
+          "versionName": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000
+          },
+          "versionCode": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000
+          },
+          "apks": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "file": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4000
+                },
+                "sha256": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                }
+              },
+              "required": [
+                "file",
+                "sha256"
+              ]
+            },
+            "minItems": 1,
+            "maxItems": 64
+          }
+        },
+        "required": [
+          "package",
+          "versionName",
+          "versionCode",
+          "apks"
+        ]
+      },
+      "minItems": 1,
+      "maxItems": 16
+    },
+    "stateFiles": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "file": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        },
+        "required": [
+          "file",
+          "sha256"
+        ]
+      },
+      "minItems": 0,
+      "maxItems": 128
+    }
+  },
+  "required": [
+    "serial",
+    "model",
+    "android",
+    "romFingerprint",
+    "displayId",
+    "rotation",
+    "viewport",
+    "apps",
+    "stateFiles"
+  ]
+}

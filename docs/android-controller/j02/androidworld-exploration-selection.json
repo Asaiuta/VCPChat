@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "suite": "androidworld",
+  "sourceRevision": "55ddaf5edc6f6c25673aed343907d5b9dca66f84",
+  "purpose": "首批公开基准可行性准备：系统开关、联系人多字段、笔记、日历及地图标记。原版环境和检查器就绪后另冻执行批次；不作为 PJZ110 真机准入。",
+  "taskIds": [
+    "SystemWifiTurnOn",
+    "SystemBluetoothTurnOff",
+    "ContactsNewContactDraft",
+    "ContactsAddContact",
+    "MarkorCreateNote",
+    "SimpleCalendarAddOneEvent",
+    "OsmAndMarker"
+  ]
+}

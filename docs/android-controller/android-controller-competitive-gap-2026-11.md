@@ -1,6 +1,6 @@
 # AndroidController：社区成熟实现对照与差距分析
 
-**2026-11-05状态覆盖说明：** 下文为2026-11-04的对标快照；其中“运行owner未绑定”“普通语义链未统一”“下一批分源/策略门”等旧状态已由[收口报告](2026-11-05_audit-android-pre-m3-report.md)更新。当前完整离线1885/1885、PJZ110 M2新矩阵14/14及owner生命周期验证通过；M1.5新完整回归13/14，主机滚动可见性标准差异保留。外部研究记录与历史数字保持原样，不代表当前缺口清单。
+**2026-11-05状态覆盖说明（2026-11-07 审计补注）：** 下文为2026-11-04的对标快照；其中“运行owner未绑定”“普通语义链未统一”“下一批分源/策略门”等旧状态已由[收口报告](2026-11-05_audit-android-pre-m3-report.md)更新。当前完整离线1885/1885（同日晚批已演进至1925/1925）、PJZ110 M2新矩阵14/14及owner生命周期验证通过；M1.5 13/14 的主机滚动可见性标准差异已由 `scroll-axis-interior` 收口并通过 14/14，不再列为保留失败。H4 的 Handoff 亦已落地（M4.0，真机 4/4）；§1 能力基线表「动作」行的 18 项，2026-11-06 起新增 Handoff/Collect 后为 20 项。外部研究记录与历史数字保持原样，不代表当前缺口清单。
 
 日期：2026-11-04。范围 M0–M2 已实现面，不含 M3 OCR/模板与 M4 接管。下列版本号为历史调查记录，本次不重新实测所有软件；对照对象：scrcpy v5.0.1、appium-uiautomator2-driver 9.0.1 / server 10.7.10、openatx/uiautomator2 3.7.1、Maestro 2.12.1、Airtest 1.4.3（Poco 1.0.94，2024-01 后停更）、Mobile-Agent v3.5、droidrun Portal、mobile-mcp、AndroidWorld / AndroidLab。
 
@@ -11,7 +11,7 @@
 | 层 | 现状 | 关键文件 |
 | --- | --- | --- |
 | 入口 | 四入口 `Describe / Observe / ExecuteStep / Manage`，旧命令无兼容转译 | `AndroidControllerService.js`、`plugin-manifest.json` |
-| 动作 | 17 个：Wait/Tap/DoubleTap/Swipe/Scroll/ScrollUntil/Drag/Pinch/LongPress/InputText/Fill/ImeAction/EraseText/KeyCombo/KeyEvent/LaunchApp/KillApp/System | `lib/tool-catalog.js` |
+| 动作 | 18 个（快照时点）：Wait/Tap/DoubleTap/Swipe/Scroll/ScrollUntil/Drag/Pinch/LongPress/InputText/Fill/ImeAction/EraseText/KeyCombo/KeyEvent/LaunchApp/KillApp/System | `lib/tool-catalog.js` |
 | 感知 | `mode=ui` 语义表+snapshotId、`image` 截图+frameId、`arbitrate` 只读建议、`api` 只读 GitHub | `lib/ui-graph.js`、`lib/vision.js` |
 | 寻址 | `id=/text=/contains=/regex=/class=/role=`、组合对象 AND、`nth`、一层 `within`；RE2 优先、线性语法兜底 | `lib/selector.js` |
 | 凭据 | `index` 需同设备 snapshotId、像素需 frameId，15s TTL，执行前复核内容/布局/尺寸 | `Service.prepareTargets` |

@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "suite": "androidlab",
+  "sourceRevision": "4bfe108cf3883b710e8e5c6fba288161c830e504",
+  "purpose": "首批公开基准可行性准备：深色模式、蓝牙、多字段联系人、闹钟及路线。查询题保留裁判模型和答案通道阻塞；不作为 PJZ110 真机准入。",
+  "taskIds": [
+    "setting_7",
+    "setting_3",
+    "contacts_2",
+    "clock_1",
+    "map_1",
+    "map_12"
+  ]
+}
