@@ -22,6 +22,10 @@ class Socket extends EventEmitter {
 function fixture(t, gate) {
     const packets = new Set(), frames = new Set();
     const hub = {
+        seq: 1,
+        lastSession: { type: 'session', width: 720, height: 1600 },
+        lastConfig: { type: 'config', data: Buffer.from([1, 2, 3]) },
+        lastKeyFrame: { type: 'frame', key: true, seq: 1, pts: 0, data: Buffer.alloc(32) },
         state: gate ? 'starting' : 'streaming', stopCalls: 0, lastPacketAt: 1, startedAt: Date.now(),
         subscribe(fn) { packets.add(fn); return () => packets.delete(fn); },
         status() { return { state: this.state, width: 720, height: 1600, codecString: 'avc1.64001e' }; },
@@ -125,7 +129,7 @@ test('H264 never silently drops delta: overflow closes and detaches the slow sub
     server.sendScrcpyPacket(socket, delta);
     assert.equal(socket.sent.length, 1);
     socket.bufferedAmount = 17;
-    server.sendScrcpyPacket(socket, delta);
+    server.sendScrcpyPacket(socket, { ...delta, seq: 3 });
     assert.equal(socket.closeCode, 1013);
     assert.equal(packets.size, 0);
     assert.equal(socket.sent.length, 1);
@@ -144,6 +148,7 @@ test('session wire packet carries the dimensions expected by viewer', (t) => {
 test('replay overflow closes without reviving watchdog after initialization', async (t) => {
     const { server, socket, hub, packets } = fixture(t);
     hub.lastKeyFrame = { ...delta, key: true, data: Buffer.alloc(1024) };
+    hub.seq = hub.lastKeyFrame.seq;
     server.maxBufferedBytes = 512;
     await server.attachScrcpy(socket);
     assert.equal(socket.closeCode, 1013);
@@ -196,18 +201,24 @@ function viewer() {
     const html = fs.readFileSync(path.join(__dirname, '../VCPDistributedServer/Plugin/AndroidController/lib/viewer.html'), 'utf8');
     const source = html.slice(html.indexOf('    function setupH264('), html.indexOf('    function handleBinary('));
     const element = () => ({ classList: { add() {}, remove() {} }, textContent: '' });
-    const context = vm.createContext({ Uint8Array, DataView, ArrayBuffer, setTimeout() {},
+    const paints = new Map(), timers = new Map(); let paintId = 0, timerId = 0;
+    const context = vm.createContext({ Uint8Array, DataView, ArrayBuffer,
+        setTimeout(fn) { timers.set(++timerId, fn); return timerId; }, clearTimeout(id) { timers.delete(id); }, timers, streamNoticeTimer: null,
+        now: 10000, Date: class extends Date { static now() { return context.now; } },
+        requestAnimationFrame(fn) { paints.set(++paintId, fn); return paintId; },
+        cancelAnimationFrame(id) { paints.delete(id); }, paints,
+        $: () => ({ dataset: { streamState: 'ready' } }),
         HEADER_BYTES: 16, H264_MAGIC: 0x56434831, H264_FLAG_SESSION: 4, H264_FLAG_CONFIG: 2, H264_FLAG_KEY: 1,
         window: { VideoDecoder: true }, els: { screen: element(), h264: element(), errorBox: element() },
-        setDot() {}, sendToServer(message) { context.requests.push(message); }, decoded: [], requests: [],
+        setDot() {}, sendToServer(message) { context.requests.push(message); }, decoded: [], requests: [], instances: [],
         VideoDecoder: class {
-            constructor() { this.state = 'unconfigured'; this.decodeQueueSize = 0; }
+            constructor(callbacks) { this.callbacks = callbacks; this.state = 'unconfigured'; this.decodeQueueSize = 0; context.instances.push(this); }
             configure(info) { this.info = info; this.state = 'configured'; }
             close() { this.state = 'closed'; }
             decode(chunk) { context.decoded.push(chunk); }
         }, EncodedVideoChunk: class { constructor(info) { Object.assign(this, info); } },
     });
-    vm.runInContext(`let useH264 = true, h264Interrupted = false, h264Info = {width:720,height:1600,codecString:'avc1.64001e'}, h264Pending = null, h264ConfigBytes = null, h264Seq = 99, decodedSeq = -1, decoder = null, frameTimes = [], pendingPts = 0;\n${source}`, context);
+    vm.runInContext(`let useH264 = true, h264Interrupted = false, h264Info = {width:720,height:1600,codecString:'avc1.64001e'}, h264Pending = null, h264ConfigBytes = null, h264Seq = 99, decodedSeq = -1, decoder = null, frameTimes = [], pendingPts = 0, streamNoticeTimer = null;\n${source}`, context);
     return context;
 }
 function wire(flags, seq, bytes) {
@@ -239,14 +250,166 @@ test('viewer ignores late H264 session/config after explicit JPEG fallback', () 
     assert.equal(vm.runInContext('decoder', context), null);
 });
 
-test('viewer decode backlog requests a clean resync rather than dropping delta and continuing', () => {
+test('viewer sustained decode backlog requests one resync and retains codec configuration', () => {
     const context = viewer();
     context.packet = wire(2, 0, config);
-    vm.runInContext('handleH264Packet(packet); decoder.decodeQueueSize = 9;', context);
-    context.packet = wire(0, 100, Buffer.from([0, 0, 1, 0x41, 1]));
     vm.runInContext('handleH264Packet(packet)', context);
-    assert.equal(vm.runInContext('decoder', context), null);
+    context.packet = wire(1, 1, Buffer.from([0, 0, 1, 0x65, 1]));
+    vm.runInContext('handleH264Packet(packet); decoder.decodeQueueSize = 60;', context);
+    context.packet = wire(0, 2, Buffer.from([0, 0, 1, 0x41, 1]));
+    vm.runInContext('handleH264Packet(packet)', context);
+    assert.equal(context.instances[0].state, 'closed');
+    assert.equal(vm.runInContext('decoder.state', context), 'configured');
+    assert.ok(vm.runInContext('h264ConfigBytes', context));
     assert.equal(vm.runInContext('h264Seq', context), -1);
+    assert.equal(context.requests[0]?.type, 'request-keyframe');
+    vm.runInContext('handleH264Packet(packet); resetDecoderForResync()', context);
+    assert.equal(context.requests.length, 1);
+    assert.equal(context.decoded.length, 1, 'no dependent delta submitted after reset');
+});
+
+test('viewer drains a short contiguous burst without resetting the decoder', () => {
+    const context = viewer();
+    context.packet = wire(2, 0, config); vm.runInContext('handleH264Packet(packet)', context);
+    context.packet = wire(1, 1, Buffer.from([0,0,1,0x65,1]));
+    vm.runInContext('handleH264Packet(packet); decoder.decodeQueueSize = 9', context);
+    for (let seq = 2; seq <= 12; seq++) {
+        context.packet = wire(0, seq, Buffer.from([0,0,1,0x41,1]));
+        vm.runInContext('handleH264Packet(packet)', context);
+    }
+    assert.equal(context.requests.length, 0);
+    assert.equal(context.instances.length, 1);
+    assert.equal(context.decoded.length, 12);
+    vm.runInContext('decoder.decodeQueueSize = 0', context);
+    context.packet = wire(0, 13, Buffer.from([0,0,1,0x41,1]));
+    vm.runInContext('handleH264Packet(packet)', context);
+    assert.equal(vm.runInContext('playback.backlogAt', context), null);
+});
+
+test('viewer uses an arriving IDR immediately even when the old decoder is overloaded', () => {
+    const context = viewer();
+    context.packet = wire(2, 0, config); vm.runInContext('handleH264Packet(packet)', context);
+    context.packet = wire(1, 1, Buffer.from([0,0,1,0x65,1]));
+    vm.runInContext('handleH264Packet(packet); decoder.decodeQueueSize = 60', context);
+    context.packet = wire(1, 600, Buffer.from([0,0,1,0x65,2]));
+    vm.runInContext('handleH264Packet(packet)', context);
+    assert.equal(context.instances[0].state, 'closed');
+    assert.equal(context.decoded.length, 2);
+    assert.equal(context.decoded.at(-1).type, 'key');
+    assert.equal(context.requests.length, 0);
+    assert.equal(vm.runInContext('h264Seq', context), 600);
+});
+
+test('a low but persistent decoder backlog reaches the elapsed-time bound', () => {
+    const context = viewer();
+    context.packet = wire(2, 0, config); vm.runInContext('handleH264Packet(packet)', context);
+    context.packet = wire(1, 1, Buffer.from([0,0,1,0x65,1]));
+    vm.runInContext('handleH264Packet(packet); decoder.decodeQueueSize = 9', context);
+    context.packet = wire(0, 2, Buffer.from([0,0,1,0x41,1]));
+    vm.runInContext('handleH264Packet(packet)', context);
+    context.now += 250;
+    context.packet = wire(0, 3, Buffer.from([0,0,1,0x41,1]));
+    vm.runInContext('handleH264Packet(packet)', context);
+    assert.equal(context.requests.length, 1);
+    assert.equal(context.decoded.length, 2);
+    assert.equal(context.instances[0].state, 'closed');
+});
+
+test('a synchronous decode rejection does not advance reference sequence or become permanent JPEG', () => {
+    const context = viewer();
+    context.packet = wire(2, 0, config); vm.runInContext('handleH264Packet(packet)', context);
+    context.packet = wire(1, 1, Buffer.from([0,0,1,0x65,1]));
+    vm.runInContext('handleH264Packet(packet); decoder.decode = () => { throw new Error("rejected"); }', context);
+    context.packet = wire(0, 2, Buffer.from([0,0,1,0x41,1]));
+    vm.runInContext('handleH264Packet(packet)', context);
+    assert.equal(vm.runInContext('h264Seq', context), -1);
+    assert.equal(context.requests.at(-1).type, 'request-keyframe');
+    assert.equal(vm.runInContext('useH264', context), true);
+});
+
+test('decoder errors retry H264, ignore retired callbacks and stop after three consecutive failures', () => {
+    const context = viewer();
+    context.packet = wire(2, 0, config); vm.runInContext('handleH264Packet(packet)', context);
+    const old = context.instances[0];
+    old.callbacks.error(new Error('transient decode failure'));
+    assert.equal(context.requests[0].type, 'request-keyframe');
+    assert.equal(vm.runInContext('useH264', context), true);
+    old.callbacks.error(new Error('late callback'));
+    assert.equal(context.requests.length, 1);
+    context.instances.at(-1).callbacks.error(new Error('second failure'));
+    assert.equal(context.requests.at(-1).type, 'request-keyframe');
+    context.instances.at(-1).callbacks.error(new Error('third failure'));
+    assert.equal(context.requests.at(-1).type, 'request-jpeg');
+    assert.equal(vm.runInContext('useH264', context), false);
+});
+
+test('decoded bursts paint only the latest frame and release all frames on replacement or close', () => {
+    const context = viewer();
+    context.packet = wire(2, 0, config); vm.runInContext('handleH264Packet(packet)', context);
+    context.rendered = [];
+    vm.runInContext('renderFrame = frame => rendered.push(frame.id)', context);
+    const frames = [1,2,3].map(id => ({ id, closes: 0, close() { this.closes++; } }));
+    const instance = context.instances.at(-1);
+    frames.forEach(frame => instance.callbacks.output(frame));
+    assert.equal(context.paints.size, 1);
+    assert.deepEqual(frames.map(frame => frame.closes), [1,1,0]);
+    const paint = [...context.paints.values()][0]; context.paints.clear(); paint();
+    assert.deepEqual(context.rendered, [3]);
+    assert.deepEqual(frames.map(frame => frame.closes), [1,1,1]);
+    const pending = { closes: 0, close() { this.closes++; } };
+    instance.callbacks.output(pending);
+    vm.runInContext('closeDecoder()', context);
+    assert.equal(pending.closes, 1);
+    assert.equal(context.paints.size, 0);
+    assert.equal(context.timers.size, 0);
+    const late = { closes: 0, close() { this.closes++; } };
+    instance.callbacks.output(late);
+    assert.equal(late.closes, 1);
+    assert.equal(context.paints.size, 0);
+});
+
+test('a throttled animation callback cannot hold a decoded frame beyond its timer deadline', () => {
+    const context = viewer();
+    context.packet = wire(2, 0, config); vm.runInContext('handleH264Packet(packet)', context);
+    context.rendered = [];
+    vm.runInContext('renderFrame = frame => rendered.push(frame.id)', context);
+    const frame = {id: 1, closes: 0, close() {this.closes++;}};
+    context.instances[0].callbacks.output(frame);
+    const delayedRaf = [...context.paints.values()][0];
+    [...context.timers.values()][0]();
+    assert.deepEqual(context.rendered, [1]);
+    assert.equal(frame.closes, 1);
+    assert.equal(context.paints.size, 0);
+    assert.equal(context.timers.size, 0);
+    delayedRaf();
+    assert.deepEqual(context.rendered, [1], 'late callback cannot draw a released frame');
+    assert.equal(frame.closes, 1);
+});
+
+test('60 and 120 fps streams update the rolling fps display', () => {
+    const html = fs.readFileSync(path.join(__dirname, '../VCPDistributedServer/Plugin/AndroidController/lib/viewer.html'), 'utf8');
+    const source = html.slice(html.indexOf('    function recordFrame('), html.indexOf('    function startStaleWatch('));
+    for (const rate of [60, 120]) {
+        const context = vm.createContext({ publishViewerStatus() {}, statusPublishedAt: 0,
+            els: { fps: { textContent: '-- fps' }, interval: {}, lat: {} } });
+        vm.runInContext(`let lastFrameAt=0, lastStatsAt=0, frameTimes=[], latencySamples=[];\n${source}`, context);
+        for (let i=1; i<=rate*2; i++) vm.runInContext(`recordFrame(${10000+i*1000/rate})`, context);
+        assert.equal(context.els.fps.textContent, `${rate.toFixed(1)} fps`);
+    }
+});
+
+test('viewer rejects a delta before IDR and detects missing frame references after IDR', () => {
+    const context = viewer();
+    context.packet = wire(2, 0, config);
+    vm.runInContext('handleH264Packet(packet)', context);
+    context.packet = wire(0, 3, Buffer.from([0, 0, 1, 0x41, 1]));
+    vm.runInContext('handleH264Packet(packet)', context);
+    assert.equal(context.decoded.length, 0);
+    context.packet = wire(1, 5, Buffer.from([0, 0, 1, 0x65, 1]));
+    vm.runInContext('handleH264Packet(packet)', context);
+    context.packet = wire(0, 101, Buffer.from([0, 0, 1, 0x41, 1]));
+    vm.runInContext('handleH264Packet(packet)', context);
+    assert.equal(context.decoded.length, 1);
     assert.equal(context.requests[0]?.type, 'request-keyframe');
 });
 

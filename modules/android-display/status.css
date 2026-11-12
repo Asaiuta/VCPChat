@@ -1,0 +1,38 @@
+:root {
+    color-scheme: dark;
+    --bg: #101316;
+    --panel: #171b20;
+    --line: #2f3942;
+    --text: #f1f5f9;
+    --muted: #94a3b8;
+    --accent: #e53935;
+    --on-accent: #f8fafc;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body {
+    margin: 0;
+    min-height: 100vh;
+    display: grid;
+    grid-template-rows: 48px 1fr auto;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.7 "Segoe UI", "Microsoft YaHei UI", sans-serif;
+}
+header { display: flex; align-items: center; gap: 12px; padding: 0 20px; border-bottom: 1px solid var(--line); background: var(--panel); }
+header svg { width: 18px; height: 24px; fill: none; stroke: currentColor; stroke-width: 1.5; }
+header strong { font-size: 13px; font-weight: 600; }
+header span { color: var(--muted); font-size: 12px; }
+main { display: flex; align-items: center; justify-content: center; gap: 40px; padding: 48px 32px; }
+section { max-width: 420px; }
+.device-outline { width: 88px; flex: none; color: var(--muted); }
+.device-outline svg { display: block; width: 100%; fill: none; stroke: currentColor; stroke-width: 1.5; }
+.signal { color: var(--accent); stroke: currentColor; }
+.eyebrow { color: var(--muted); font-size: 12px; margin: 0 0 8px; }
+h1 { margin: 0 0 12px; font-size: 24px; line-height: 1.35; font-weight: 600; letter-spacing: -.02em; }
+#message { margin: 0; color: var(--muted); overflow-wrap: anywhere; }
+a { display: inline-flex; gap: 16px; align-items: center; margin-top: 24px; padding: 8px 16px; border-radius: 6px; color: var(--on-accent); background: var(--accent); text-decoration: none; font-weight: 600; }
+a:hover { filter: brightness(1.08); }
+a:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+footer { padding: 12px 20px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+@media (max-width: 640px) { main { flex-direction: column; align-items: center; gap: 24px; padding: 32px; text-align: center; } .device-outline { width: 56px; } }

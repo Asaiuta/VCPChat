@@ -168,8 +168,9 @@ function viewer(socket) {
     const html = fs.readFileSync(path.join(__dirname, '../VCPDistributedServer/Plugin/AndroidController/lib/viewer.html'), 'utf8');
     const source = html.slice(html.indexOf('    function handleText('), html.indexOf('    function handleBinary('));
     const element = () => ({ classList: { add() {}, remove() {} }, textContent: '' });
-    const context = vm.createContext({ Uint8Array, DataView, ArrayBuffer, setTimeout() {}, window: { VideoDecoder: true },
-        els: { screen: element(), h264: element(), errorBox: element() }, setDot() {},
+    const context = vm.createContext({ Uint8Array, DataView, ArrayBuffer, setTimeout() {}, clearTimeout() {}, streamNoticeTimer: null, window: { VideoDecoder: true },
+        $: () => ({ dataset: { streamState: 'ready' } }),
+        els: { screen: element(), h264: element(), errorBox: element(), lat: element() }, setDot() {},
         sendToServer(payload) { socket.send(JSON.stringify(payload)); } });
     vm.runInContext(`let useH264 = true, h264Interrupted = false, h264Info = null, h264Pending = null, h264ConfigBytes = null, h264Seq = -1, decodedSeq = -1, decoder = null, frameTimes = [];\n${source}`, context);
     return context;

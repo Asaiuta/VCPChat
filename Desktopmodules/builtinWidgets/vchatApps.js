@@ -34,6 +34,11 @@
     // 使用 currentColor 实现主题自适应（跟随 CSS --primary-text 等变量）
     // ============================================================
     const SVG_ICONS = {
+        android: `<svg viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect x="11" y="3" width="26" height="42" rx="5" fill="currentColor" opacity="0.1"/>
+            <rect x="11" y="3" width="26" height="42" rx="5" stroke="currentColor" stroke-width="2.5"/>
+            <path d="M20 9h8M21 39h6" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
+        </svg>`,
         chat: `<svg viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
             <rect x="4" y="6" width="40" height="30" rx="6" fill="currentColor" opacity="0.12"/>
             <rect x="4" y="6" width="40" height="30" rx="6" stroke="currentColor" stroke-width="2.5" fill="none"/>
@@ -213,6 +218,16 @@
      *   - appAction:    主进程执行的动作标识
      */
     const VCHAT_APPS = [
+        {
+            id: 'vchat-app-android',
+            name: '安卓',
+            icon: null,
+            animatedIcon: null,
+            svgIcon: SVG_ICONS.android,
+            emoji: '📱',
+            description: '打开安卓设备显示屏',
+            appAction: 'open-android-display-window',
+        },
         {
             id: 'vchat-app-game',
             name: 'VCPgame',

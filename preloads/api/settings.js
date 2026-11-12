@@ -11,6 +11,7 @@ module.exports = {
         loadSettings: invoke('load-settings'),
         saveSettings: invoke('save-settings', 'settings'),
         onSettingsExternalUpdated: on('settings-external-updated').roles('chat'),
+        onOpenSettingsSection: on('open-settings-section').roles('chat'),
         loadWebindexModels: invoke('load-webindex-models').roles('chat'),
 
         saveUserAvatar: invoke('save-user-avatar', 'avatarData'),

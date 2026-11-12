@@ -12,6 +12,7 @@ const desktopMetrics = require('./desktopMetrics');
 const windowService = require('../services/windowService');
 const WINDOW_APP_IDS = require('../services/windowAppIds');
 const { PRELOAD_ROLES, resolveAppPreload } = require('../services/preloadPaths');
+const { createApplicationSenderGuard } = require('./applicationSender');
 
 // --- 模块状态 ---
 let desktopWindow = null;
@@ -860,6 +861,8 @@ function resolveAppActionToAppId(appAction) {
             return WINDOW_APP_IDS.TRANSLATOR;
         case 'open-music-window':
             return WINDOW_APP_IDS.MUSIC;
+        case 'open-android-display-window':
+            return WINDOW_APP_IDS.ANDROID_DISPLAY;
         case 'open-themes-window':
             return WINDOW_APP_IDS.THEMES;
         case 'open-game-window':
@@ -1690,7 +1693,17 @@ function initialize(params) {
     });
 
     ipcMain.removeHandler('desktop-launch-vchat-app');
-    ipcMain.handle('desktop-launch-vchat-app', (_event, appAction) => launchVchatApp(appAction));
+    const canOpenAndroidDisplay = createApplicationSenderGuard({
+        pages: ['main.html', 'Desktopmodules/desktop.html'],
+        projectRoot: PROJECT_ROOT,
+        getMainWebContents: () => mainWindow?.webContents,
+    });
+    ipcMain.handle('desktop-launch-vchat-app', (event, appAction) => {
+        if (appAction === 'open-android-display-window' && !canOpenAndroidDisplay(event)) {
+            return { success: false, error: '安卓显示屏只能由应用窗口打开。' };
+        }
+        return launchVchatApp(appAction);
+    });
 
     // ============================================================
     // --- IPC: 快捷方式解析 & 启动 ---

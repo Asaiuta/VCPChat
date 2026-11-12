@@ -88,6 +88,21 @@ test('stopped FrameHub rejects new captures without calling ADB', async () => {
     assert.equal(calls, 0);
 });
 
+for (const kind of ['capture', 'captureOneShot']) test(`FrameHub stop drains ${kind} and prevents late retry/fallback`, async () => {
+    const gate = deferred(); let calls = 0;
+    const hub = new FrameHub({ logger, adb: { execOutBinary() { calls++; return gate.promise; } } });
+    const work = hub[kind]().catch(error => error);
+    hub.invalidateSelection(); // invalidation must not lose ownership of the old capture
+    let stopped = false;
+    const stopping = hub.stop().then(() => { stopped = true; });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(stopped, false);
+    gate.resolve(Buffer.alloc(0));
+    await work; await stopping;
+    assert.equal(calls, 1);
+    assert.equal(hub.latest, null);
+});
+
 
 
 test('stop during initial bind drains startup and allows a fresh start', async t => {

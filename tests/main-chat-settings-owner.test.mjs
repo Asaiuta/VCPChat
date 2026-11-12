@@ -5,6 +5,29 @@ import { createMainChatSettingsOwner } from '../modules/renderer/mainChatSetting
 import { createDomListenerOwner } from '../modules/renderer/domListenerOwner.js';
 import { createMainChatThemeOwner } from '../modules/renderer/mainChatThemeOwner.js';
 import { createMainChatSettingsPresentationOwner } from '../modules/renderer/mainChatSettingsPresentationOwner.js';
+import { takeRequestedSettingsSection } from '../modules/settings/extensions.js';
+
+test('native Android authorization navigation reuses the settings section request and releases its subscription', async () => {
+    const dom = new JSDOM('<!doctype html><body></body>');
+    let navigate, released = 0;
+    const opened = [];
+    dom.window.uiHelperFunctions = { openModal(id) { opened.push(id); } };
+    const owner = createMainChatSettingsPresentationOwner({ documentRef: dom.window.document,
+        settingsOwner: createMainChatSettingsOwner(), listenerOwner: createDomListenerOwner(),
+        chatAPI: { onOpenSettingsSection(callback) { navigate = callback; return () => { released++; }; } },
+    });
+    navigate('arbitrary-section');
+    assert.equal(takeRequestedSettingsSection(), null);
+    navigate('android-system');
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(opened, ['globalSettingsModal']);
+    assert.equal(takeRequestedSettingsSection(), 'android-system');
+    await owner.dispose();
+    assert.equal(released, 1);
+    navigate('android-system');
+    assert.equal(takeRequestedSettingsSection(), null);
+    dom.window.close();
+});
 
 test('settings owner publishes replacements and isolates snapshots', () => {
     const published = []; const owner = createMainChatSettingsOwner({ initial: { theme: 'dark' }, publish: value => published.push(value) });

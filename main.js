@@ -130,6 +130,7 @@ const { AndroidSystemAuthorization } = require('./modules/services/androidSystem
 // 仅在首次真正使用文坊时（IPC 打开、V 桌面图标、Agent 调用）按需加载。
 const windowService = require('./modules/services/windowService');
 const WINDOW_APP_IDS = require('./modules/services/windowAppIds');
+const { createAndroidDisplayWindow, createAndroidDisplayResolver } = require('./modules/services/androidDisplayWindow');
 let docxHandlersModule = null;
 let docxHandlersLoadPromise = null;
 let docxHandlersInitializeOptions = null;
@@ -364,6 +365,7 @@ let gameService = null;
 let appSettingsManager = null;
 let globalJevService = null;
 let androidSystemAuthorization = null;
+let androidDisplayWindow = null;
 let loomManager = null;
 let scriptoriumAgentControl = null;
 let networkNotesTreeCache = null; // In-memory cache for the network notes
@@ -568,6 +570,9 @@ function startDistributedServerAfterRenderer() {
                 workspaceService: workspaceHandlers.workspaceService,
                 jevService: globalJevService,
                 systemAuthorization: androidSystemAuthorization,
+                humanInteraction: require('./modules/services/humanInteraction').createHumanInteraction({
+                    dialog, getWindow: () => mainWindow,
+                }),
                 // 工具调用成功后通知挂钩的功能（例如播报闹钟、新话题）
                 onToolResult: (...args) => hostHooks.emit('tools:result', ...args)
             });
@@ -738,6 +743,8 @@ async function performQuitCleanup() {
     }
 
     appQuitCleanupPromise = (async () => {
+        androidDisplayWindow?.dispose();
+        androidDisplayWindow = null;
         await historyWatcherLeases.dispose();
         await getAgentMoodStore()?.flush().catch(() => {});
         await appFeatures.disposeAll();
@@ -1220,6 +1227,7 @@ if (!gotTheLock) {
                 if (contents.isDestroyed() || !BrowserWindow.fromWebContents(contents)) return;
                 // <webview> guests (side-pane browser) route their popups through modules/ipc/browserHandlers.js
                 if (contents.getType() === 'webview') return;
+                if (androidDisplayWindow?.getWindow()?.webContents === contents) return;
                 contents.setWindowOpenHandler(({ url }) => {
                     if (url.startsWith('http:') || url.startsWith('https:')) {
                         shell.openExternal(url);
@@ -1859,6 +1867,25 @@ if (!gotTheLock) {
             documentHandlers: docxHandlers,
             logger: console,
         });
+        if (!androidDisplayWindow) {
+            androidDisplayWindow = createAndroidDisplayWindow({
+                BrowserWindow, session: require('electron').session, nativeTheme, windowService, ipcMain, screen,
+                projectRoot: PROJECT_ROOT, openChildWindows,
+                getControllerService: () => require('./VCPDistributedServer/Plugin').getServiceModule('AndroidController'),
+                openSystemAuthorization: () => {
+                    if (!mainWindow || mainWindow.isDestroyed()) throw new Error('主窗口不可用。');
+                    if (mainWindow.isMinimized()) mainWindow.restore();
+                    mainWindow.show();
+                    mainWindow.focus();
+                    mainWindow.webContents.send('open-settings-section', 'android-system');
+                },
+                resolveDisplayUrl: createAndroidDisplayResolver({
+                    ensureServer: startDistributedServerAfterRenderer,
+                    getServiceModule: name => require('./VCPDistributedServer/Plugin').getServiceModule(name),
+                }),
+            });
+        }
+        mainWindow.webContents.on('did-finish-load', () => { void androidDisplayWindow?.refreshTheme(); });
         desktopHandlers.initialize({
             mainWindow,
             openChildWindows,

@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'">
+    <title>安卓显示屏</title>
+    <link rel="stylesheet" href="status.css">
+    <script src="status.js" defer></script>
+</head>
+<body class="vcp-ui-scope">
+    <header><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="2" width="12" height="20" rx="3"/><path d="M10 5h4M11 19h2"/></svg><strong>安卓显示屏</strong><span>VCPChat</span></header>
+    <main>
+        <div class="device-outline" aria-hidden="true"><svg viewBox="0 0 64 88"><rect x="8" y="2" width="48" height="84" rx="10"/><path d="M25 10h14M27 76h10"/><path class="signal" d="M21 43h22M27 35h10M27 51h10"/></svg></div>
+        <section aria-live="polite" aria-atomic="true">
+            <p class="eyebrow" id="state-label">本地显示服务</p>
+            <h1 id="title">正在打开显示屏</h1>
+            <p id="message">等待已有安卓服务就绪，不会重复启动控制器。</p>
+            <a href="?state=retry" id="retry" class="vcp-ui-button" data-size="sm" data-variant="primary" hidden>重新连接服务</a>
+        </section>
+    </main>
+    <footer>只读投屏 · 关闭窗口不会停止正在执行的任务</footer>
+</body>
+</html>

@@ -3,6 +3,7 @@
     'use strict';
     const keys = Object.freeze({
         'open-game-window': 'game',
+        'open-android-display-window': 'android',
         'open-notes-window': 'notes', 'open-memo-window': 'memo',
         'open-forum-window': 'forum', 'open-rag-observer-window': 'rag',
         'open-dice-window': 'dice', 'open-canvas-window': 'canvas',

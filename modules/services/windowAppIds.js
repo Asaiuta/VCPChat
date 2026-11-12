@@ -11,6 +11,7 @@ module.exports = Object.freeze({
     CANVAS: 'canvas',
     TRANSLATOR: 'translator',
     MUSIC: 'music',
+    ANDROID_DISPLAY: 'android-display',
     THEMES: 'themes',
     GAME: 'game-hall',
     TASK: 'task',

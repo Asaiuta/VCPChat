@@ -1,5 +1,6 @@
 import { applyUserMessageLayoutState } from './domBuilder.js';
 import { syncDependentRows } from '../ui-system/settings/dependent-rows.js';
+import { requestSettingsSection } from '../settings/extensions.js';
 
 /** Owns global-settings DOM projection, chat layout controls and presentation bindings. */
 export function createMainChatSettingsPresentationOwner({
@@ -37,6 +38,12 @@ export function createMainChatSettingsPresentationOwner({
         task.finally(() => tasks.delete(task)).catch(() => {});
         return task;
     };
+    const stopSettingsNavigation = chatAPI?.onOpenSettingsSection?.(section => {
+        if (disposed || section !== 'android-system') return;
+        requestSettingsSection(section);
+        track(Promise.resolve().then(() => !disposed && windowRef?.uiHelperFunctions?.openModal?.('globalSettingsModal')))
+            .catch(error => console.warn('打开系统授权设置失败:', error));
+    });
 
     async function loadAndApply() {
         const token = generation;
@@ -955,6 +962,7 @@ transform-origin: center bottom;`;
         async dispose() {
             if (disposed) return;
             disposed = true;
+            stopSettingsNavigation?.();
             generation += 1;
             await Promise.allSettled([...tasks]);
             themeOwner = null;
