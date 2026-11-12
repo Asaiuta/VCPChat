@@ -44,7 +44,7 @@ test('M1.5 新增RPC参数门禁在真实invoke入口本地拒绝，无HTTP副�
     server.on('connection', socket => { sockets.add(socket); socket.on('close', () => sockets.delete(socket)); });
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
     t.after(async () => { for (const socket of sockets) socket.destroy(); await new Promise(resolve => server.close(resolve)); });
-    const client = new UiServer(); client._port = server.address().port; client._ready = true;
+    const client = new UiServer(); client.transport.port = server.address().port; client.transport.ready = true;
     for (const [method, params] of invalid) {
         const before = calls.length;
         assert.equal(validate(method, params).ok, false, method);

@@ -227,7 +227,8 @@ test('ui-graph: 渲染成折叠视图，字节数远小于扁平表', () => {
 
     assert.ok(view.includes('控件'), '表头应带控件计数');
     assert.ok(view.includes('[1] 微信支付 / 11:41'), '索引从 1 起、可被模型直接引用');
-    assert.ok(view.includes('(820,238)'));
+    assert.equal(view.includes('(820,238)'), false, 'coordinates are opt-in presentation detail');
+    assert.ok(graph.renderView(result, { includeCoordinates: true }).includes('(820,238)'));
     const lines = view.split('\n');
     assert.ok(lines.some((line) => /^\s+\[2\]/.test(line)), '列表项应相对容器缩进');
     assert.ok(Buffer.byteLength(view) < 800, `折叠视图应紧凑，实际 ${Buffer.byteLength(view)} 字节`);
@@ -319,7 +320,8 @@ test('ui-graph: 占位 desc 不作为标签，但可点控件不因此消失', (
     const { controls } = graph.parseUiGraph(xml);
     assert.equal(controls.length, 1, '可点控件不能凭空消失');
     assert.equal(controls[0].label, '', '但 "Image" 这种占位文本不能当标签');
-    assert.equal(controls[0].desc, '');
+    assert.equal(controls[0].text, 'Image', 'raw source survives placeholder display filtering');
+    assert.equal(controls[0].desc, 'Image');
     assert.match(graph.renderView(graph.parseUiGraph(xml)), /\(无标签\)/, '渲染时明说是无标签，而不是编一个名字');
 
     // 纯装饰（不可点、无有效描述）仍应剔除

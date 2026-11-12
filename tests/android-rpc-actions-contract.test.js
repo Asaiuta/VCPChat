@@ -155,8 +155,8 @@ test('pasteClipboard 失败一次后，同世代内改走 KEYCODE_PASTE 而不�
             invoke: async method => {
                 if (method === 'pasteClipboard' && failPaste) {
                     throw Object.assign(new Error('镜像失配'), {
-                        code: 'UI_SERVER_RPC_ERROR',
-                        dispatched: false
+                        code: 'UI_SERVER_RPC_ERROR', rpcCode: -32001,
+                        dispatched: true, drained: true
                     });
                 }
                 return true;

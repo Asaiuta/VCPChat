@@ -45,7 +45,7 @@ test('已唤醒时不点亮、不额外轮询', async () => {
     await observe(h);
     const probes = h.calls.filter(([kind]) => kind === 'probe').length - probesBefore;
     assert.equal(inputs(h).length, 0, '已唤醒不得派发 input');
-    assert.equal(probes, 1, '已唤醒时只做初始那次 probeScreen');
+    assert.equal(probes, 3, 'initial reused as dump-before + dump-after + read-return; no wake polling');
     assert.deepEqual(counts, { wakefulness: 0, currentFocus: 0 }, '不得走独立的两段式探针');
 });
 

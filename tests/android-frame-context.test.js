@@ -85,7 +85,7 @@ test('stable context supports exactly one pixel action', async () => {
     } finally { await h.service.cleanup(); }
 });
 test('fresh logical dimensions permit landscape coordinates despite stale wm cache', async () => {
-    const h = await setup();
+    const h = await setup({ uiServer: { xml: '<hierarchy rotation="1"><node class="android.widget.Button" package="com.example" text="Go" enabled="true" clickable="true" bounds="[0,0][80,40]"/></hierarchy>' } });
     try {
         h.probe.rotation = 1; h.probe.size = { width: 200, height: 100 };
         const frameId = (await shot(h)).details.frameId;
@@ -148,7 +148,7 @@ for (const [rotation, pkg] of [[2, 'com.example'], [0, 'other.app']]) test(`mixe
         assert.equal(mutations(h).length, 0);
     } finally { await h.service.cleanup(); }
 });
-test('expired pixel credential fails before device discovery or fresh probe', async t => {
+test('expired pixel credential rejects input and attaches only a fresh read-only tree', async t => {
     const h = await setup();
     try {
         const frameId = (await shot(h)).details.frameId;
@@ -157,9 +157,15 @@ test('expired pixel credential fails before device discovery or fresh probe', as
         const beforeReads = h.reads;
         const now = Date.now();
         t.mock.method(Date, 'now', () => now + 16000);
-        await assert.rejects(input(h, frameId), { code: 'STALE_FRAME' });
-        assert.equal(discoveries, 0);
-        assert.equal(h.reads, beforeReads);
+        await assert.rejects(input(h, frameId), error => {
+            assert.equal(error.code, 'STALE_FRAME');
+            assert.equal(error.details.screenReason, 'OBSERVED');
+            assert.equal(error.details.screen.image, null);
+            assert.ok(error.details.screen.snapshotId);
+            return true;
+        });
+        assert.equal(discoveries, 1, 'the single stale observation resolves the pinned device');
+        assert.ok(h.reads > beforeReads);
         assert.equal(mutations(h).length, 0);
     } finally { await h.service.cleanup(); }
 });

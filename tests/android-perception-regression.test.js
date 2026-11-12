@@ -68,11 +68,13 @@ test('perception: selectors round-trip empty labels, literal ordinals, percent a
         node('resource-id="com.demo:id/key" clickable="true"'),
         node('resource-id="com.demo:id/key" clickable="true"'),
     ].join(''));
-    assert.equal(new Set(result.controls.map((c) => c.selector)).size, result.controls.length);
-    for (const control of result.controls) {
+    const addressable = result.controls.filter(c => c.selector !== null);
+    assert.equal(new Set(addressable.map((c) => c.selector)).size, addressable.length);
+    assert.equal(result.controls.filter(c => c.selector === null).length, 2, 'unnamed no-id shells are snapshot-only');
+    for (const control of addressable) {
         assert.equal(graph.resolveSelector(result, control.selector), control, control.selector);
     }
-    assert.deepEqual(graph.findControls(result, { text: '' }), result.controls.filter((c) => c.label === ''));
+    assert.deepEqual(graph.findControls(result, { text: '' }), []);
     assert.equal(graph.resolveSelector(result, 'text=First#0'), null);
     assert.equal(graph.resolveSelector(result, 'text=Missing'), null);
 });
@@ -102,4 +104,10 @@ test('perception: samePage observes checked and input value state without coordi
     assert.equal(graph.samePage(input('a@example.com'), input('b@example.com')), false);
     assert.equal(graph.samePage(input('a@example.com'), input('a@example.com')), true);
     assert.equal(graph.samePage(parse(node('text="Stable"')), parse(node('text="Stable"').replace('[0,0][400,100]', '[0,100][400,200]'))), true);
+});
+
+test('AutoCompleteTextView search boxes are text fields, not static text', () => {
+    const g = parse(node('class="android.widget.AutoCompleteTextView" resource-id="com.demo:id/search_src_text" clickable="true" focusable="true" text="q"'));
+    const field = g.controls.find(item => item.id === 'com.demo:id/search_src_text');
+    assert.equal(field.role, 'textfield');
 });

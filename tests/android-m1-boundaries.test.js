@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const { harness } = require('./helpers/android-service-harness.cjs');
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
-const field = extra => `<hierarchy><node class="android.widget.EditText" package="com.example" resource-id="com.example:id/editor" text="old" enabled="true" bounds="[0,0][100,40]" ${extra || ''}/></hierarchy>`;
+const field = extra => `<hierarchy rotation="0"><node class="android.widget.EditText" package="com.example" resource-id="com.example:id/editor" text="old" enabled="true" bounds="[0,0][100,40]" ${extra || ''}/></hierarchy>`;
 const input = {
     command: 'ExecuteStep',
     action: {
@@ -44,13 +44,13 @@ for (const boundary of ['abort', 'deadline']) {
             }
         });
         const work = h.service.processToolCall(
-            { ...input, timeoutMs: boundary === 'deadline' ? 60 : 1000 },
+            { ...input, timeoutMs: 1000 },
             { signal: controller.signal }
         );
         const rejected = assert.rejects(work, error => {
             assert.equal(error.code, boundary === 'abort' ? 'STEP_ABORTED' : 'STEP_DEADLINE');
-            // 已经没有只读探针了：paste 没有无副作用的问法，所以第一步就是 setClipboard（写）。
-            // 在写动作里被中止，回执必须是 unknown（可能已执行），不能是 failed。
+            // 界面策略采样已完成，enteredRpc独立证明setClipboard已在途。
+            // 预算包含采样但不能假设并行测试在60ms内必定开始RPC。
             assert.equal(error.execution.outcome, 'unknown');
             assert.ok(error.message.includes('channels'));
             assert.equal(error.message.includes('机密文本'), false);
@@ -110,18 +110,23 @@ for (const boundary of ['abort', 'deadline']) {
     });
 }
 
-test('password Fill outer expect never verifies a secret value', async () => {
+test('password Fill without approval is rejected before mutation regardless of outer expect', async () => {
     const h = await harness({
         uiServer: { ok: true, xml: field('password="true"') }
     });
-    const result = await h.service.processToolCall({
+    await assert.rejects(h.service.processToolCall({
         ...fillRequest('private-secret'),
         expect: { type: 'foreground', package: 'com.example' }
+    }), error => {
+        assert.equal(error.code, 'POLICY_CONFIRMATION_REQUIRED');
+        assert.equal(error.needsConfirmation, true);
+        assert.equal(error.execution.outcome, 'failed');
+        assert.equal(error.execution.verification, null);
+        assert.equal(JSON.stringify(error).includes('private-secret'), false);
+        return true;
     });
-
-    assert.equal(result.details.execution.outcome, 'dispatched');
-    assert.equal(h.calls.some(call => call[0] === 'rpc' && call[1] === 'getText'), false);
-    assert.equal(JSON.stringify(result).includes('private-secret'), false);
+    assert.equal(h.calls.some(call => call[0] === 'rpc'), false, '既不写秘密也不读取秘密');
+    assert.equal(h.calls.some(call => call[0] === 'adb' && call[1].includes('input')), false);
 });
 
 test('Fill rejects invalid fields before mutation', async () => {
@@ -129,7 +134,7 @@ test('Fill rejects invalid fields before mutation', async () => {
         'enabled="false" bounds="[0,0][100,40]"',
         'enabled="true" bounds="[0,220][100,260]"'
     ]) {
-        const xml = `<hierarchy><node class="android.widget.EditText" package="com.example" resource-id="com.example:id/editor" text="old" ${attrs}/></hierarchy>`;
+        const xml = `<hierarchy rotation="0"><node class="android.widget.EditText" package="com.example" resource-id="com.example:id/editor" text="old" ${attrs}/></hierarchy>`;
         const h = await harness({ uiServer: { ok: true, xml } });
 
         await assert.rejects(
@@ -157,6 +162,7 @@ test('Fill index requires fresh snapshot and attaches refreshed raw identity', a
     const h = await harness({ uiServer: { ok: true, xml: field(), text: 'new' } });
     const observed = await h.service.processToolCall({ command: 'Observe' });
     const index = observed.details.controls[0].index;
+    let refreshedSnapshotId = observed.details.snapshotId;
 
     for (const snapshotId of [undefined, 'wrong']) {
         await assert.rejects(
@@ -164,7 +170,14 @@ test('Fill index requires fresh snapshot and attaches refreshed raw identity', a
                 command: 'ExecuteStep',
                 action: { command: 'Fill', index, snapshotId, text: 'new' }
             }),
-            error => ['SNAPSHOT_REQUIRED', 'STALE_SNAPSHOT'].includes(error.code)
+            error => {
+                assert.ok(['SNAPSHOT_REQUIRED', 'STALE_SNAPSHOT'].includes(error.code));
+                const screen = error.details.screen;
+                assert.ok(screen.snapshotId, '凭据错误附屏必须提供新快照');
+                assert.notEqual(screen.snapshotId, refreshedSnapshotId, '旧凭据不再对应最新观察');
+                refreshedSnapshotId = screen.snapshotId;
+                return true;
+            }
         );
     }
     assert.equal(h.calls.some(call => call[0] === 'rpc'), false);
@@ -174,7 +187,7 @@ test('Fill index requires fresh snapshot and attaches refreshed raw identity', a
         action: {
             command: 'Fill',
             index,
-            snapshotId: observed.details.snapshotId,
+            snapshotId: refreshedSnapshotId,
             text: 'new'
         }
     });
@@ -222,7 +235,7 @@ test('Fill readback failure stays unknown and redacts transport text', async () 
 });
 
 test('Scroll converts milliseconds to u2 steps and never shells after RPC success', async () => {
-    const xml = '<hierarchy><node class="android.widget.ScrollView" package="com.example" resource-id="com.example:id/list" scrollable="true" enabled="true" bounds="[0,0][100,180]"/></hierarchy>';
+    const xml = '<hierarchy rotation="0"><node class="android.widget.ScrollView" package="com.example" resource-id="com.example:id/list" scrollable="true" enabled="true" bounds="[0,0][100,180]"/></hierarchy>';
     const h = await harness({ uiServer: { ok: true, xml } });
 
     await h.service.processToolCall({

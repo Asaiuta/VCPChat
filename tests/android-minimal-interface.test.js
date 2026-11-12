@@ -8,8 +8,8 @@ const text = result => result.content.filter(part => part.type === 'text').map(p
 const receipt = result => JSON.parse(result.content.find(part => part.type === 'text' && part.text.startsWith('{"execution":')).text).execution;
 const inputs = calls => calls.filter(([kind, args]) => kind === 'adb' && args[1] === 'input');
 
-test('manifest exposes only four stable entry points', () => {
-    assert.deepEqual(manifest.capabilities.invocationCommands.map(item => item.command), ['Describe', 'Observe', 'ExecuteStep', 'Manage']);
+test('manifest exposes atomic entries plus the explicit experimental host task entry', () => {
+    assert.deepEqual(manifest.capabilities.invocationCommands.map(item => item.command), ['Describe', 'Observe', 'ExecuteStep', 'RunTask', 'Manage']);
 });
 
 test('Describe defaults to a model-visible catalog without contacting a device', async () => {
@@ -83,7 +83,12 @@ test('mismatched verification is visible as unknown with no automatic retry', as
 test('afterObserve reuses the last successful UI verification sample and yields a usable snapshot', async () => {
     const h = await harness();
     const result = await h.service.processToolCall({ command: 'ExecuteStep', serial: 'A', action: { command: 'KeyEvent', key: 'back' }, expect: { type: 'visible', selector: 'text=Go' }, afterObserve: true });
-    assert.equal(h.dumpCount, 1, 'verification and returned observation share one UI sample');
+    // One pre-dispatch safety sample is independent from the one verification/returned observation sample.
+    assert.equal(h.dumpCount, 2, 'mandatory policy evidence plus one reused post-action verification sample');
+    const inputAt = h.calls.findIndex(([kind, args]) => kind === 'adb' && args[1] === 'input');
+    const dumpAt = h.calls.flatMap(([kind, args], index) => kind === 'adb' && args.includes('uiautomator') ? [index] : []);
+    assert.equal(dumpAt.length, 2);
+    assert.ok(dumpAt[0] < inputAt && inputAt < dumpAt[1], 'safety evidence precedes input, verification follows it');
     const observation = result.details.observation;
     assert.equal(observation.status, 'observed');
     assert.equal(observation.controls[0].label, 'Go');
@@ -101,7 +106,8 @@ test('afterObserve does not reuse a failed or stale verification sample', async 
 });
 
 test('afterObserve failure preserves dispatched action and does not leak backend text', async () => {
-    const h = await harness({ dump: () => new Error('private backend payload') });
+    // The required pre-dispatch policy evidence must succeed; only the post-action observation fails.
+    const h = await harness({ dump: index => index === 0 ? xml() : new Error('private backend payload') });
     const result = await h.service.processToolCall({ command: 'ExecuteStep', action: { command: 'KeyEvent', key: 'back' }, afterObserve: true });
     assert.equal(receipt(result).outcome, 'dispatched');
     assert.equal(result.details.observation.status, 'failed');
@@ -110,14 +116,19 @@ test('afterObserve failure preserves dispatched action and does not leak backend
     assert.equal(inputs(h.calls).length, 1);
 });
 
-test('afterObserve options are validated before any input and default remains no extra sampling', async () => {
+test('afterObserve options validate before input and default adds no post-action sample beyond policy evidence', async () => {
     const h = await harness();
     for (const afterObserve of [42, 'garbage', { serial: 'B' }, { limit: 0 }, { stable: true }]) {
         await assert.rejects(h.service.processToolCall({ command: 'ExecuteStep', action: { command: 'KeyEvent', key: 'back' }, afterObserve }), { code: 'INVALID_ARGUMENT' });
     }
     assert.equal(inputs(h.calls).length, 0);
+    assert.equal(h.dumpCount, 0, 'invalid afterObserve never reaches policy evidence acquisition');
     await h.service.processToolCall({ command: 'ExecuteStep', action: { command: 'KeyEvent', key: 'back' } });
-    assert.equal(h.dumpCount, 0);
+    assert.equal(h.dumpCount, 1, 'default still performs its required pre-dispatch safety sample');
+    const inputAt = h.calls.findIndex(([kind, args]) => kind === 'adb' && args[1] === 'input');
+    assert.ok(inputAt >= 0);
+    assert.equal(h.calls.slice(inputAt + 1).some(([kind, args]) => kind === 'adb' && args.includes('uiautomator')), false,
+        'omitted afterObserve must not add a post-input UI request');
 });
 
 test('Observe wake=never never dispatches wakeup', async () => {
@@ -175,10 +186,14 @@ for (const name of ['constructor', 'toString', '__proto__']) {
     });
 }
 
-test('afterObserve image mode returns image credentials without acquiring UI', async () => {
+test('afterObserve image adds no UI beyond required pre-dispatch policy evidence', async () => {
     const h = await harness();
     const result = await h.service.processToolCall({ command: 'ExecuteStep', action: { command: 'KeyEvent', key: 'back' }, afterObserve: '{"mode":"image","maxWidth":300}' });
-    assert.equal(h.dumpCount, 0);
+    assert.equal(h.dumpCount, 1, 'only the keyboard action safety gate acquires UI');
+    const inputAt = h.calls.findIndex(([kind, args]) => kind === 'adb' && args[1] === 'input');
+    assert.ok(inputAt >= 0);
+    assert.equal(h.calls.slice(inputAt + 1).some(([kind, args]) => kind === 'adb' && args.includes('uiautomator')), false,
+        'the image observation itself must not acquire semantic UI');
     assert.ok(result.content.some(part => part.type === 'image_url'));
     assert.equal(typeof result.details.observation.frameId, 'string');
     assert.match(text(result), new RegExp(result.details.observation.frameId));
@@ -207,9 +222,11 @@ test('afterObserve cannot hide a trusted cancellation or release the lease early
     let entered, release;
     const ready = new Promise(resolve => { entered = resolve; });
     const gate = new Promise(resolve => { release = resolve; });
-    const h = await harness({ dump: async () => { entered(); await gate; return xml(); } });
+    const h = await harness({ run: async args => { if (args[1] === 'input') { entered(); await gate; } } });
     const work = h.service.processToolCall({ command: 'ExecuteStep', action: { command: 'KeyEvent', key: 'back' }, afterObserve: true }, { signal: controller.signal });
     await ready;
+    assert.equal(inputs(h.calls).length, 1, 'abort is triggered only after the real input backend is entered');
+    assert.equal(h.dumpCount, 1, 'pre-dispatch policy sample completed before cancellation');
     controller.abort();
     try {
         await assert.rejects(work, error => error.code === 'STEP_ABORTED' && error.execution.outcome === 'unknown');
@@ -218,6 +235,53 @@ test('afterObserve cannot hide a trusted cancellation or release the lease early
     await new Promise(resolve => setTimeout(resolve, 0));
 });
 
+
+test('cancellation during policy evidence is explicitly not dispatched and retains lease until drain', async () => {
+    const controller = new AbortController();
+    let entered, release;
+    const ready = new Promise(resolve => { entered = resolve; });
+    const gate = new Promise(resolve => { release = resolve; });
+    const h = await harness({ dump: async () => { entered(); await gate; return xml(); } });
+    const work = h.service.processToolCall({ command: 'ExecuteStep', action: { command: 'KeyEvent', key: 'back' }, afterObserve: true }, { signal: controller.signal });
+    await ready;
+    assert.equal(inputs(h.calls).length, 0, 'policy sampling has not dispatched input');
+    controller.abort();
+    try {
+        await assert.rejects(work, error => error.code === 'STEP_ABORTED' && error.execution.outcome === 'failed');
+        await assert.rejects(h.service.processToolCall({ command: 'ExecuteStep', action: { command: 'KeyEvent', key: 'back' } }), { code: 'DEVICE_BUSY' });
+    } finally { release(); }
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(inputs(h.calls).length, 0, 'late evidence cannot dispatch after cancellation');
+});
+
+test('post-action observation cancellation cannot erase dispatch evidence or release lease early', async () => {
+    const controller = new AbortController();
+    let entered, release;
+    const ready = new Promise(resolve => { entered = resolve; });
+    const gate = new Promise(resolve => { release = resolve; });
+    const h = await harness({ dump: async index => { if (index === 0) return xml(); entered(); await gate; return xml(); } });
+    const work = h.service.processToolCall({ command: 'ExecuteStep', action: { command: 'KeyEvent', key: 'back' }, afterObserve: true }, { signal: controller.signal });
+    await ready;
+    assert.equal(inputs(h.calls).length, 1, 'post-action observation begins only after input');
+    controller.abort();
+    try {
+        await assert.rejects(work, error => error.code === 'STEP_ABORTED' && error.execution.outcome === 'unknown');
+        await assert.rejects(h.service.processToolCall({ command: 'ExecuteStep', action: { command: 'KeyEvent', key: 'back' } }), { code: 'DEVICE_BUSY' });
+    } finally { release(); }
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(inputs(h.calls).length, 1, 'cancellation never replays input');
+});
+
+test('policy evidence failure is not dispatched and does not leak raw backend text', async () => {
+    const h = await harness({ dump: () => new Error('private backend payload') });
+    await assert.rejects(h.service.processToolCall({ command: 'ExecuteStep', action: { command: 'KeyEvent', key: 'back' }, afterObserve: true }), error => {
+        assert.equal(error.code, 'UI_ACQUISITION_FAILED');
+        assert.equal(error.execution.outcome, 'failed');
+        assert.doesNotMatch(error.message, /private backend payload/);
+        return true;
+    });
+    assert.equal(inputs(h.calls).length, 0);
+});
 
 test('pure observations report observed rather than dispatched', async () => {
     const h = await harness();

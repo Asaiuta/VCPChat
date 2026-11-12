@@ -11,13 +11,14 @@ const { harness } = require('./helpers/android-service-harness.cjs');
 
 const screen = { width: 100, height: 200 };
 const bounds = '[10,20][90,80]';
-const foldedScene = `<hierarchy><node class="android.widget.FrameLayout" package="com.example" resource-id="com.example:id/go" text="Go" clickable="true" enabled="true" bounds="${bounds}"><node class="android.widget.Button" package="com.example" clickable="true" enabled="true" bounds="${bounds}"/></node></hierarchy>`;
+const foldedScene = `<hierarchy rotation="0"><node class="android.widget.FrameLayout" package="com.example" resource-id="com.example:id/go" text="Go" clickable="true" enabled="true" bounds="${bounds}"><node class="android.widget.Button" package="com.example" clickable="true" enabled="true" bounds="${bounds}"/></node></hierarchy>`;
 const graphOf = xml => parseUiGraph(xml, { screen, rpcTarget: true });
 
 async function serviceFor(xml) {
     let captures = 0;
     const h = await harness({ dump: () => xml, vision,
-        client: { async probeScreen() { return { wakefulness: 'Awake', focus: { package: 'com.example', component: 'com.example/.Main' }, size: { ...screen } }; } },
+        client: { async probeScreen() { return { wakefulness: 'Awake', focus: { package: 'com.example', component: 'com.example/.Main', window: 'Main' },
+            size: { ...screen }, displayId: 0, rotation: 0, keyguard: { showing: false, inputRestricted: false } }; } },
         frames: { requireSharp: () => sharp, async captureOneShot() {
             captures++;
             return { raw: { data: Buffer.alloc(screen.width * screen.height * 4, 100), ...screen, channels: 4 } };
@@ -44,7 +45,7 @@ test('production element screenshot accepts inherited wrapper id and label with 
 });
 
 test('folded same-bounds duplicate raw tuples are distinguished by exact raw identity', () => {
-    const xml = `<hierarchy><node class="android.widget.Button" package="com.example" resource-id="com.example:id/go" text="Go" clickable="true" enabled="true" bounds="${bounds}"><node class="android.widget.Button" package="com.example" resource-id="com.example:id/go" text="Go" clickable="true" enabled="true" bounds="${bounds}"/></node></hierarchy>`;
+    const xml = `<hierarchy rotation="0"><node class="android.widget.Button" package="com.example" resource-id="com.example:id/go" text="Go" clickable="true" enabled="true" bounds="${bounds}"><node class="android.widget.Button" package="com.example" resource-id="com.example:id/go" text="Go" clickable="true" enabled="true" bounds="${bounds}"/></node></hierarchy>`;
     const graph = graphOf(xml);
     assert.equal(graph.controls.length, 1);
     assert.equal(graph.controls[0].rawNode, graph.rawRoot.children[0].children[0]);
@@ -52,7 +53,7 @@ test('folded same-bounds duplicate raw tuples are distinguished by exact raw ide
 });
 
 test('element evidence rejects missing and foreign provenance even with identical field tuples', () => {
-    const scene = `<hierarchy><node class="android.widget.Button" package="com.example" resource-id="com.example:id/go" text="Go" clickable="true" enabled="true" bounds="${bounds}"/></hierarchy>`;
+    const scene = `<hierarchy rotation="0"><node class="android.widget.Button" package="com.example" resource-id="com.example:id/go" text="Go" clickable="true" enabled="true" bounds="${bounds}"/></hierarchy>`;
     const graph = graphOf(scene);
     const other = graphOf(scene);
     const node = graph.controls[0];
@@ -72,14 +73,15 @@ test('element evidence still rejects changed bounds, package, class and disabled
 
 for (const state of ['visible-to-user="false"', 'displayed="false"', 'enabled="false"']) {
     test(`raw ${state} still prevents element evidence`, () => {
-        const graph = graphOf(`<hierarchy><node class="android.widget.Button" package="com.example" resource-id="com.example:id/go" text="Go" clickable="true" ${state} bounds="${bounds}"/></hierarchy>`);
+        const graph = graphOf(`<hierarchy rotation="0"><node class="android.widget.Button" package="com.example" resource-id="com.example:id/go" text="Go" clickable="true" ${state} bounds="${bounds}"/></hierarchy>`);
         const rawNode = graph.rawRoot.children[0];
         assert.equal(elementEvidence(graph, { rawNode, bounds: { left: 10, top: 20, right: 90, bottom: 80 }, package: 'com.example', cls: 'Button', id: 'com.example:id/go', enabled: true }, screen), null);
     });
 }
 
-const probe = { wakefulness: 'Awake', focus: { package: 'com.example', component: 'com.example/.Main' }, size: screen };
-const hiddenParentScene = (right, parentBounds = '[0,20][100,200]') => `<hierarchy><node class="android.widget.FrameLayout" package="com.example" bounds="[0,0][100,200]"><node class="android.widget.Button" package="com.example" resource-id="stable" text="Stable" clickable="true" bounds="[0,0][20,20]"/><node class="android.widget.FrameLayout" package="com.example" visible-to-user="false" bounds="${parentBounds}"><node class="android.widget.Button" package="com.example" resource-id="moving" text="Moving" clickable="true" visible-to-user="true" bounds="[0,30][${right},60]"/></node></node></hierarchy>`;
+const probe = { wakefulness: 'Awake', focus: { package: 'com.example', component: 'com.example/.Main', window: 'Main' },
+    size: screen, displayId: 0, rotation: 0, keyguard: { showing: false, inputRestricted: false } };
+const hiddenParentScene = (right, parentBounds = '[0,20][100,200]') => `<hierarchy rotation="0"><node class="android.widget.FrameLayout" package="com.example" bounds="[0,0][100,200]"><node class="android.widget.Button" package="com.example" resource-id="stable" text="Stable" clickable="true" bounds="[0,0][20,20]"/><node class="android.widget.FrameLayout" package="com.example" visible-to-user="false" bounds="${parentBounds}"><node class="android.widget.Button" package="com.example" resource-id="moving" text="Moving" clickable="true" visible-to-user="true" bounds="[0,30][${right},60]"/></node></node></hierarchy>`;
 
 test('visible children of hidden parents remain complete layout and element evidence', () => {
     const graph = graphOf(hiddenParentScene(30));
@@ -113,7 +115,7 @@ test('idle wait cannot declare continuously moving visible descendants of hidden
 });
 
 test('hidden scroll ancestor still clips visible descendants geometrically', () => {
-    const graph = graphOf(`<hierarchy><node class="android.widget.FrameLayout" package="com.example" visible-to-user="false" scrollable="true" bounds="[0,20][80,100]"><node class="android.widget.Button" package="com.example" resource-id="moving" text="Moving" clickable="true" visible-to-user="true" bounds="[10,10][90,70]"/></node></hierarchy>`);
+    const graph = graphOf(`<hierarchy rotation="0"><node class="android.widget.FrameLayout" package="com.example" visible-to-user="false" scrollable="true" bounds="[0,20][80,100]"><node class="android.widget.Button" package="com.example" resource-id="moving" text="Moving" clickable="true" visible-to-user="true" bounds="[10,10][90,70]"/></node></hierarchy>`);
     const node = graph.controls.find(control => control.id === 'moving');
     assert.ok(node);
     assert.deepEqual(elementEvidence(graph, node, screen).visibleBounds, { left: 10, top: 20, right: 80, bottom: 70 });

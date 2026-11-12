@@ -7,8 +7,8 @@ const { UiServer, UiServerError } = require('../VCPDistributedServer/Plugin/Andr
 
 function readyClient() {
     const client = new UiServer();
-    client._ready = true;
-    client._port = 12345;
+    client.transport.ready = true;
+    client.transport.port = 12345;
     return client;
 }
 

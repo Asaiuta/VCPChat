@@ -56,6 +56,16 @@ test('risk disclosure explains remote caller and downstream application trust bo
     assert.match(text, /不保证/);
 });
 
+test('interaction policy is disclosed as plugin config, never a fake global authorization switch', () => {
+    const f = fixture();
+    assert.match(f.doc.body.textContent, /包策略/);
+    assert.match(f.doc.body.textContent, /插件配置/);
+    assert.match(f.doc.body.textContent, /系统授权不替代包策略/);
+    assert.match(f.doc.body.textContent, /模型自批无效/);
+    assert.equal(f.doc.getElementById('INTERACTION_POLICY'), null);
+    assert.deepEqual(Object.keys(collectSettings([androidSystemSection], { form: f.form })), ['androidSystemAuthorizations']);
+});
+
 test('identity selection is transient and does not trigger global autosave', () => {
     const f = fixture(), form = f.doc.querySelector('form'), serial = f.doc.getElementById('androidSystemDevice');
     let changes = 0; form.addEventListener('input', () => changes++); form.addEventListener('change', () => changes++);

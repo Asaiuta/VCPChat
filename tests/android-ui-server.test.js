@@ -22,9 +22,14 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const { EventEmitter } = require('node:events');
+const { ownerWorld } = require('./helpers/android-owner-world.cjs');
+const { createHash } = require('node:crypto');
+const carrierHash = createHash('sha256').update(fs.readFileSync(path.resolve(__dirname,
+    '../VCPDistributedServer/Plugin/AndroidController/vendor/u2-server-0.5.0.apk'))).digest('hex');
 
 const LIB = path.resolve(__dirname, '../VCPDistributedServer/Plugin/AndroidController/lib/ui-server.js');
-const source = fs.readFileSync(LIB, 'utf8');
+const TRANSPORT_LIB = path.resolve(__dirname, '../VCPDistributedServer/Plugin/AndroidController/lib/ui-transport.js');
+const transportSource = fs.readFileSync(TRANSPORT_LIB, 'utf8');
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 
 const XML_OK = '<?xml version=\'1.0\' encoding=\'UTF-8\' standalone=\'yes\' ?>\r\n'
@@ -33,7 +38,7 @@ const XML_OK = '<?xml version=\'1.0\' encoding=\'UTF-8\' standalone=\'yes\' ?>\r
 
 /**
  * 假世界：可控的 adb、HTTP、端口、进程。
- *   remoteJar     —— 设备上 /data/local/tmp/u2.apk 是否已存在
+ *   remoteJar     —— 设备上内容寻址 APK 是否已存在且匹配
  *   readyAfter    —— 第几次 ping 起返回 pong（Infinity 表示永不就绪）
  *   portsInUse    —— 这些端口 listen 失败，用来验证动态挑端口
  */
@@ -43,25 +48,23 @@ function setup(options = {}) {
     const forwards = new Set();
     const timers = [];
     let pingCount = 0;
+    let carrierPresent = options.remoteJar !== false;
+    const owner = ownerWorld();
 
     const childProcess = {
         execFile(file, args, opts, callback) {
             calls.push(['execFile', file, ...args]);
             const joined = args.join(' ');
             queueMicrotask(() => {
-                if (args.includes('shell') && joined.includes('u2-server-')) {
-                    // 复刻真实 adb 语义：`[ -f <remote> ] && echo PRESENT` 在文件不存在时
-                    // 退出码是 **1**，而 execFile 把任何非零退出码当失败。
-                    // 替身若一味返回成功，就测不出「首次接入静默回退 CLI」这个故障。
-                    const hasFallback = joined.includes('||');
-                    if (options.remoteJar === false && !hasFallback) {
-                        callback(Object.assign(new Error('Command failed: adb shell'), { code: 1 }), '', '');
-                        return;
-                    }
-                    callback(null, options.remoteJar === false ? 'ABSENT\n' : 'PRESENT\n', '');
+                const ownerResponse = owner.exec(args.slice(2), args[1]);
+                if (ownerResponse) { callback(null, ownerResponse.stdout, ownerResponse.stderr); return; }
+                if (args.includes('shell') && joined.includes('sha256sum')) {
+                    const file = /'(\/data\/local\/tmp\/vcp-u2-[a-f0-9]{64}\.apk)'/.exec(joined)?.[1];
+                    callback(null, carrierPresent ? `${carrierHash}  ${file}\n` : 'ABSENT\n', '');
                     return;
                 }
                 if (args.includes('push')) {
+                    carrierPresent = true;
                     callback(null, '1 file pushed.\n', '');
                     return;
                 }
@@ -83,7 +86,7 @@ function setup(options = {}) {
                 if (!options.deferExit) queueMicrotask(() => proc.emit('exit', null));
             };
             spawned.push({ file, args, proc });
-            return proc;
+            return owner.spawn(proc, args);
         },
     };
 
@@ -149,18 +152,12 @@ function setup(options = {}) {
 
     const http = { request: httpRequest };
 
-    const module = { exports: {} };
-    vm.runInNewContext(source, {
-        require(name) {
-            if (name === 'child_process') return childProcess;
-            if (name === 'net') return net;
-            if (name === 'http') return http;
-            // 库内相对依赖（如 ./rpc-methods）必须相对被测文件解析，
-            // 不能落到测试文件自己的目录下 —— 那样只会报 MODULE_NOT_FOUND。
-            if (name.startsWith('.')) return require(path.resolve(path.dirname(LIB), name));
-            return require(name);
-        },
-        module, exports: module.exports, __dirname: path.dirname(LIB),
+    // 一个极小的 CommonJS 加载器：ui-server 与 ui-transport 必须在**同一个**沙箱里
+    // 求值。若像以前那样对相对依赖直接走真实 require，ui-transport 会拿到真实
+    // child_process，测试就会去 spawn 真 adb。用函数包装而不是把源码直接丢进
+    // context，是因为两个文件都有顶层 const（UiServerError / rpcOptions /
+    // DEFAULT_RPC_TIMEOUT_MS 等），脚本级词法声明在同一 context 里会互相撞名。
+    const sandbox = {
         Buffer, console, process: { platform: 'win32' },
         setTimeout: (cb, ms) => { const t = setTimeout(cb, Math.min(ms, 15)); timers.push(t); return t; },
         clearTimeout,
@@ -174,9 +171,34 @@ function setup(options = {}) {
         Array,
         Error,
         Math,
-    }, { filename: LIB });
+    };
+    const context = vm.createContext(sandbox);
+    const cache = new Map();
+    function loadModule(file) {
+        const resolved = file.endsWith('.js') ? file : `${file}.js`;
+        if (cache.has(resolved)) return cache.get(resolved).exports;
+        const mod = { exports: {} };
+        cache.set(resolved, mod);
+        const req = (name) => {
+            if (name === 'child_process') return childProcess;
+            if (name === 'net') return net;
+            if (name === 'node:net') return owner.net;
+            if (name === 'http') return http;
+            if (name === 'fs') return fs;
+            if (name === 'path') return path;
+            // 库内相对依赖必须相对**发起 require 的那个文件**解析，
+            // 不能落到测试文件自己的目录下 —— 那样只会报 MODULE_NOT_FOUND。
+            if (name.startsWith('.')) return loadModule(path.resolve(path.dirname(resolved), name));
+            return require(name);
+        };
+        const wrapped = `(function (exports, require, module, __filename, __dirname) {${fs.readFileSync(resolved, 'utf8')}\n})`;
+        const fn = vm.runInContext(wrapped, context, { filename: resolved });
+        fn(mod.exports, req, mod, resolved, path.dirname(resolved));
+        return mod.exports;
+    }
 
-    return { ...module.exports, calls, spawned, forwards, timers };
+    const loaded = loadModule(LIB);
+    return { ...loaded, calls, spawned, forwards, timers };
 }
 
 test('就绪前不会 dump：ping 成功后服务才可用', async () => {
@@ -197,7 +219,7 @@ test('端口动态挑选：内核分配的端口被 forward 与 -p 同时使用'
     const port = server.port;
     assert.equal(port, 41234, '应优先用内核分配的端口');
     const spawnArgs = api.spawned[0].args.join(' ');
-    assert.ok(spawnArgs.includes(`-p ${port}`), `app_process 必须带同一个端口，实际：${spawnArgs}`);
+    assert.ok(spawnArgs.endsWith(`com.vcpchat.uiautomator.Owner ${port}`), `app_process 必须带同一个端口，实际：${spawnArgs}`);
     const fwd = api.calls.filter((c) => c[0] === 'execFile' && c.slice(2).includes('forward'));
     assert.ok(fwd.some((c) => c.join(' ').includes(`tcp:${port}`)), 'adb forward 必须指向同一端口');
     await server.stop();
@@ -210,7 +232,7 @@ test('端口回退：内核分配失败时跳过被占用候选，落到下一�
     const port = server.port;
     assert.equal(port, 9010, `应跳过被占用的 9008/9009，实际 ${port}`);
     const spawnArgs = api.spawned[0].args.join(' ');
-    assert.ok(spawnArgs.includes(`-p ${port}`), `app_process 必须带同一个端口，实际：${spawnArgs}`);
+    assert.ok(spawnArgs.endsWith(`com.vcpchat.uiautomator.Owner ${port}`), `app_process 必须带同一个端口，实际：${spawnArgs}`);
     const fwd = api.calls.filter((c) => c[0] === 'execFile' && c.slice(2).includes('forward'));
     assert.ok(fwd.some((c) => c.join(' ').includes(`tcp:${port}`)), 'adb forward 必须指向同一端口');
     await server.stop();
@@ -225,18 +247,19 @@ test('不 install：只用 CLASSPATH + app_process，绝不调用 pm install', a
     assert.ok(!/\badb\b.*\binstall\b/.test(flat), '不得执行 adb install');
     const spawnLine = api.spawned[0].args.join(' ');
     assert.ok(spawnLine.includes('CLASSPATH='), `必须通过 CLASSPATH 加载，实际：${spawnLine}`);
-    assert.ok(spawnLine.includes('com.github.uiautomator2.Console'), '必须启动 Console 入口');
+    assert.ok(spawnLine.includes('com.vcpchat.uiautomator.Owner'), '必须启动同 JVM owner wrapper，再反射 Console 入口');
+    assert.match(spawnLine, /vcp-owner-[a-f0-9]{64}\.jar:.*vcp-u2-[a-f0-9]{64}\.apk/, 'wrapper 与 RPC 必须在同一 CLASSPATH');
     await server.stop();
 });
 
-test('设备上缺 apk 时先 push，已在则跳过', async () => {
+test('设备上缺内容寻址 apk 时先 push 并复核，hash已匹配则跳过', async () => {
     const pushes = (world) => world.calls.filter((c) => c[0] === 'execFile' && c.slice(2).includes('push'));
 
     const present = setup();
     const s1 = new present.UiServer({ adbPath: 'stub-adb', serial: 'USB123' });
     await s1.start();
     assert.equal(pushes(present).length, 0,
-        'apk 已存在时不得重复 push（3.7MB 每次都推太浪费）');
+        'apk 内容已匹配时不得重复 push');
     await s1.stop();
 
     const missing = setup({ remoteJar: false });
@@ -309,7 +332,7 @@ test('stop 后进程被回收、forward 被移除，且不残留端口', async (
     const port = server.port;
     const proc = api.spawned[0].proc;
     await server.stop();
-    assert.equal(proc.killed, true, '必须杀掉 app_process');
+    assert.equal(proc.killed, true, '远端经 nonce STOP 自退出并独立证明消失后回收本地 adb client');
     assert.equal(server.isReady(), false);
     assert.equal(server.port, null);
     const removals = api.calls.filter((c) => c[0] === 'execFile'
@@ -346,7 +369,7 @@ test('vendor 里存在与实现约定一致的 apk 文件名', () => {
     assert.ok(apk, `vendor 下应有 u2-server-*.apk，实际 ${JSON.stringify(files)}`);
     const size = fs.statSync(path.join(vendor, apk)).size;
     assert.ok(size > 3 * 1024 * 1024, `apk 大小异常：${size}`);
-    assert.match(source, /u2-server/, '实现必须引用该 vendor 资产');
+    assert.match(transportSource, /u2-server/, '实现必须引用该 vendor 资产');
 });
 
 function deferred() {
@@ -361,8 +384,8 @@ for (const phase of ['_ensureApk', '_pickPort', '_forward', '_waitReady']) {
         const server = new api.UiServer({ serial: 'USB123' });
         const entered = deferred();
         const release = deferred();
-        const original = server[phase].bind(server);
-        server[phase] = async (...args) => {
+        const original = server.transport[phase].bind(server.transport);
+        server.transport[phase] = async (...args) => {
             entered.resolve();
             await release.promise;
             return original(...args);
@@ -382,10 +405,12 @@ for (const phase of ['_ensureApk', '_pickPort', '_forward', '_waitReady']) {
         assert.equal(server.port, null);
         assert.ok(api.spawned.every(({ proc }) => proc.killed), 'no live orphan process');
         const forwardCalls = api.calls.filter((c) => c[0] === 'execFile' && c.includes('forward'));
-        const created = forwardCalls.filter((c) => !c.includes('--remove'));
+        const created = forwardCalls.filter((c) => c.includes('--no-rebind'));
         const removed = forwardCalls.filter((c) => c.includes('--remove'));
         for (const call of created) {
-            assert.ok(removed.some((removal) => removal.at(-1) === call.at(-1)), 'no orphan forward');
+            const local = call.at(-2);
+            const acquiredLocal = local === 'tcp:0' ? 'tcp:53001' : local;
+            assert.ok(removed.some((removal) => removal.at(-1) === acquiredLocal), 'no orphan forward');
         }
         if (phase === '_ensureApk' || phase === '_pickPort') {
             assert.equal(created.length, 0, 'cancelled preparation must not forward');
@@ -401,9 +426,9 @@ for (const event of ['exit', 'error']) {
         const old = api.spawned[0].proc;
         await server.stop();
         assert.equal((await server.start()).ok, true);
-        const current = server._proc;
+        const current = server.transport._proc;
         old.emit(event, event === 'error' ? new Error('late error') : 0);
-        assert.equal(server._proc, current);
+        assert.equal(server.transport._proc, current);
         assert.equal(server.isReady(), true);
         await server.stop();
     });
@@ -416,8 +441,8 @@ test('start during stop waits for old forward cleanup before creating new resour
     assert.equal(api.spawned.length, 1, 'concurrent start must share startup');
     const entered = deferred();
     const release = deferred();
-    const remove = server._removeForward.bind(server);
-    server._removeForward = async (port) => {
+    const remove = server.transport._removeForward.bind(server.transport);
+    server.transport._removeForward = async (port) => {
         entered.resolve();
         await release.promise;
         return remove(port);

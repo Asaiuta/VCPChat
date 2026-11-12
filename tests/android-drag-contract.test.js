@@ -33,7 +33,7 @@ function failure(error, status, outcome = 'unknown') {
 test('Drag semantic endpoints share one fresh tree and emit one dragTo touch stream', async () => {
     const h = await harness(backend());
     const result = await run(h, { ...action, steps: 100 });
-    assert.equal(h.uiServer.dumped, 1, '两端不得分别采树');
+    assert.equal(h.uiServer.dumped, 2, '两端共享一次目标采样，另一次为最终policy gate');
     assert.equal(rpc(h).length, 1);
     const [, method, params] = rpc(h)[0];
     assert.equal(method, 'dragTo');
@@ -55,7 +55,7 @@ test('Drag rebinds both semantic endpoints live instead of using previous Observ
     const h = await harness({ uiServer: spec });
     await h.service.processToolCall({ command: 'Observe' });
     const result = await run(h);
-    assert.equal(h.uiServer.dumped, 2);
+    assert.equal(h.uiServer.dumped, 3, 'Observe、共享目标采样与最终policy gate各一次');
     assert.deepEqual(Array.from(rpc(h)[0][2]).slice(1), [85, 180, 60]);
     assert.equal(result.details.x1, 30);
     assert.equal(result.details.y1, 40);
@@ -71,7 +71,7 @@ for (const [name, source, target] of [
     const snapshotId = observed.details.snapshotId;
     await run(h, { command: 'Drag', ...source, ...(source.index !== undefined ? { snapshotId } : {}), target: { ...target, ...(target.index !== undefined ? { snapshotId } : {}) } });
     assert.equal(rpc(h).length, 1);
-    assert.equal(h.uiServer.dumped, 2);
+    assert.equal(h.uiServer.dumped, 3, 'Observe、共享目标采样与最终policy gate各一次');
     await assert.rejects(run(h, { command: 'Drag', index: 0, snapshotId, target: { id: 'com.example:id/end' } }));
     assert.equal(rpc(h).length, 1, '已消耗凭据不得重放');
 });
@@ -154,7 +154,7 @@ for (const [name, override] of [
 });
 
 for (const target of ['source', 'end']) test(`Drag refuses disabled ${target} before dispatch`, async () => {
-    const xml = `<hierarchy>${node('source', '[0,0][40,40]', target === 'source' ? 'enabled="false"' : '')}${node('end', '[60,100][100,200]', target === 'end' ? 'enabled="false"' : '')}</hierarchy>`;
+    const xml = `<hierarchy rotation="0">${node('source', '[0,0][40,40]', target === 'source' ? 'enabled="false"' : '')}${node('end', '[60,100][100,200]', target === 'end' ? 'enabled="false"' : '')}</hierarchy>`;
     const h = await harness(backend(xml));
     await assert.rejects(run(h));
     assert.equal(rpc(h).length, 0);
@@ -203,7 +203,7 @@ for (const boundary of ['cancel', 'timeout']) test(`Drag in-flight ${boundary} r
     await tick();
     assert.equal(rpc(h).length, 1);
     assert.equal(rpc(h)[0][3].timeoutMs, 100);
-    assert.equal(h.uiServer.dumped, 1, 'RPC未确认之前不得验证');
+    assert.equal(h.uiServer.dumped, 2, '目标与policy gate完成，RPC未确认之前不得验证');
     if (boundary === 'cancel') controller.abort(); else advance(100);
     const { error } = await work;
     assert.equal(error.code, boundary === 'cancel' ? 'STEP_ABORTED' : 'STEP_DEADLINE');
@@ -214,7 +214,7 @@ for (const boundary of ['cancel', 'timeout']) test(`Drag in-flight ${boundary} r
     await tick();
     assert.equal(rpc(h).length, 1);
     assert.equal(inputs(h).length, 0);
-    assert.equal(h.uiServer.dumped, 1);
+    assert.equal(h.uiServer.dumped, 2, '取消后没有额外验证采样');
     await h.service.processToolCall({ command: 'Observe' });
 });
 
@@ -224,7 +224,7 @@ test('Drag outer expect verifies only its condition after the one gesture ACK', 
     assert.equal(result.details.execution.outcome, 'verified');
     assert.equal(result.details.execution.verification.condition.selector, 'text=end');
     assert.equal(rpc(h).length, 1);
-    assert.equal(h.uiServer.dumped, 2);
+    assert.equal(h.uiServer.dumped, 3, '共享目标采样、policy gate与ACK后验证各一次');
 });
 
 for (const boundary of ['expired', 'size', 'device']) test(`Drag pixel endpoint rejects ${boundary} frame credentials`, async t => {
@@ -261,7 +261,7 @@ for (const boundary of ['cancel', 'timeout']) test(`Drag ${boundary} during shar
 });
 
 test('Drag destination center stays inside ancestor scroll viewport, not merely inside the screen', async () => {
-    const xml = `<hierarchy>${node('source', '[0,0][40,40]')}<node class="android.widget.ScrollView" package="com.example" resource-id="com.example:id/list" scrollable="true" bounds="[40,150][100,180]">${node('end', '[60,80][100,200]')}</node></hierarchy>`;
+    const xml = `<hierarchy rotation="0">${node('source', '[0,0][40,40]')}<node class="android.widget.ScrollView" package="com.example" resource-id="com.example:id/list" scrollable="true" bounds="[40,150][100,180]">${node('end', '[60,80][100,200]')}</node></hierarchy>`;
     const h = await harness(backend(xml));
     await run(h);
     const [, , params] = rpc(h)[0];

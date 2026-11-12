@@ -70,6 +70,8 @@ test('schema 默认值与代码回退字面量一致', () => {
         ['AUTO_WAKE', true, /config\?\.AUTO_WAKE[^\n]*'true'/],
         ['LOOM_APP_ID', 'android-mirror', /config\.LOOM_APP_ID[^\n]*'android-mirror'/],
         ['STREAM_CAPTURE_MODE', 'auto', /config\.STREAM_CAPTURE_MODE[^\n]*'auto'/],
+        // Plugin schema transports JSON text; the Service's absent-config fallback is the equivalent empty object.
+        ['INTERACTION_POLICY', '{}', /config\.INTERACTION_POLICY\s*\?\?\s*\{\}/],
     ];
     const source = serviceSource();
     for (const [key, expected, pattern] of table) {
@@ -79,6 +81,17 @@ test('schema 默认值与代码回退字面量一致', () => {
             `${key} 的 type 与 default 类型不匹配`);
         assert.match(source, pattern, `${key} 的代码回退字面量与 schema 默认值不符`);
     }
+});
+
+test('INTERACTION_POLICY uses explicit JSON-string config and cannot be a no-op switch', async () => {
+    assert.equal(schema.INTERACTION_POLICY.type, 'string');
+    assert.equal(schema.INTERACTION_POLICY.default, '{}');
+    assert.deepEqual(JSON.parse(schema.INTERACTION_POLICY.default), {});
+    const h = await harness({ config: { INTERACTION_POLICY: '{"denyPackages":["com.example"]}' } });
+    try {
+        await assert.rejects(h.service.processToolCall({ command: 'Observe', serial: 'A' }), { code: 'POLICY_DENIED' });
+        assert.equal(h.dumpCount, 0, 'denied foreground must not acquire user content');
+    } finally { await h.service.cleanup(); }
 });
 
 test('UI_SERVER 默认开启：控件树走常驻 RPC，不跑 CLI dump', async () => {

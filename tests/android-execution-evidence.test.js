@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { harness } = require('./helpers/android-service-harness.cjs');
 
-const field = '<hierarchy><node class="android.widget.EditText" package="com.example" resource-id="com.example:id/editor" text="old" enabled="true" bounds="[0,0][100,40]" /></hierarchy>';
+const field = '<hierarchy rotation="0"><node class="android.widget.EditText" package="com.example" resource-id="com.example:id/editor" text="old" enabled="true" bounds="[0,0][100,40]" /></hierarchy>';
 
 for (const [expected, actual] of [['', null], ['17', 17], ['text', ' text '], [' text ', 'text'], ['', '\t'], ['', '\r\n']]) {
     test(`Fill does not normalize a different or invalid value into verified: ${JSON.stringify([expected, actual])}`, async () => {
@@ -49,7 +49,7 @@ test('reused UI evidence retains acquisition provenance instead of relabeling an
         assert.equal(result.details.execution.outcome, 'verified');
         assert.equal(observation.focus.package, observation.controls[0].package);
         assert.equal(observation.focus.component ?? null, null, 'tree evidence does not establish a component');
-        assert.equal(h.dumpCount, 1, 'reuse must not add another dump');
+        assert.equal(h.dumpCount, 2, '一次policy gate加一次验证；afterObserve复用验证样本，不再采树');
         assert.equal(focusReads, 0, 'do not graft a later foreground onto earlier evidence');
         assert.ok(observation.observedAt <= Date.now());
     } finally { await h.service.cleanup(); }
@@ -59,7 +59,10 @@ test('reused UI evidence retains acquisition provenance instead of relabeling an
 
 test('idle plus foreground expectation keeps the successful idle sample for afterObserve', async () => {
     const h = await harness({ client: { async probeScreen() {
-        return { wakefulness: 'Awake', focus: { package: 'com.example', component: 'com.example/.Main' }, size: { width: 100, height: 200 } };
+        return { wakefulness: 'Awake', rotation: 0, displayId: 0,
+            keyguard: { showing: false, inputRestricted: false },
+            focus: { package: 'com.example', component: 'com.example/.Main', window: 'Window{test u0 com.example/.Main}' },
+            size: { width: 100, height: 200 } };
     } }, uiServer: { ok: true } });
     try {
         const result = await h.service.processToolCall({ command: 'ExecuteStep', serial: 'A',

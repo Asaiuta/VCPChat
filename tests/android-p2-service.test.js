@@ -78,7 +78,7 @@ test('arbitration holds the same device lease and the step deadline cancels its 
 
 test('observed changing stability reaches the rule-only recovery path', async () => {
     let calls = 0;
-    const h = await harness({ dump: n => xml(n ? 'Changed' : 'Go'), services: { jevService: { async decide() { calls++; } } } });
+    const h = await harness({ dump: n => xml('Go', n ? 40 : 0), services: { jevService: { async decide() { calls++; } } } });
     const observed = await h.service.processToolCall({ command: 'Observe', stable: true });
     assert.equal(observed.details.stability, 'changing');
     const result = await h.service.processToolCall({ command: 'Observe', mode: 'arbitrate', arbitration: { mode: 'recovery', snapshotId: observed.details.snapshotId } });

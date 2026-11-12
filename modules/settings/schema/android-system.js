@@ -16,7 +16,7 @@ const CANONICAL_CONTEXT = Object.freeze({ sectionKey: SECTION_KEY });
 
 // key → [控件后缀, 标题, 行内提示, 是否可用]
 const GROUPS = [
-    ['read', 'Read', '系统状态读取', '电量、型号、系统版本与固定设置值。', true],
+    ['read', 'Read', '系统状态读取', '包策略可拒绝读取；系统状态含电量、型号与固定设置值。', true],
     ['navigate', 'Navigate', '系统页面导航', '打开固定设置页或闹钟列表；不自动点击授权、发送或删除。', true],
     ['settings', 'Settings', '可逆系统设置', '改自动亮度、息屏与旋转；先读旧值再写入核验。', true],
     ['personal', 'Personal', '联系人编辑草稿', '仅打开预填姓名电话的编辑页；不读取通讯录。', true],
@@ -85,7 +85,7 @@ function buildDevicePanel(doc, panel) {
 
     const ackRow = renderSchemaField(doc, switchField('androidSystemAcknowledge', {
         label: '我已理解风险，仅授权此设备',
-        hint: '已连接主服务器的 Agent 可调用；不按调用者隔离。',
+        hint: '主服务器 Agent 可调用，不按调用者隔离；模型自批无效。',
         hintInsideWrapper: true,
     }), CANONICAL_CONTEXT);
     const ack = ackRow.querySelector('input');
@@ -178,13 +178,13 @@ export function buildAndroidSystemSettings(doc) {
         renderSchemaField(doc, card('androidDeviceCard', {
             cardKey: 'android-device',
             title: '当前设备',
-            description: '仅管理本机已配对的手机；此页授权不等于 Android 系统权限。',
+            description: '包策略在插件配置中设置；此页不授予 Android 系统权限。',
             fields: [custom('androidDevicePanel', inner => buildDevicePanel(inner, panel))],
         }), CANONICAL_CONTEXT),
         renderSchemaField(doc, card('androidGrantCard', {
             cardKey: 'android-grants',
             title: '能力授权',
-            description: '草稿可能交由第三方应用处理；本插件不保证其不保存或发送。',
+            description: '草稿由第三方处理，不保证不保存或发送；系统授权不替代包策略。',
             fields: [custom('androidGrantPanel', inner => buildGrantPanel(inner, panel))],
         }), CANONICAL_CONTEXT),
     );

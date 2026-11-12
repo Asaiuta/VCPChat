@@ -42,8 +42,8 @@ function transport(t, respond, { createCost = 0, creationError = false, writeErr
         return req;
     });
     const client = new UiServer();
-    client._ready = true;
-    client._port = 12345;
+    client.transport.ready = true;
+    client.transport.port = 12345;
     return { client, writes, advance: ms => { now += ms; } };
 }
 
@@ -63,10 +63,10 @@ test('local invocation and dump rejections have no outstanding protocol request'
     controller.abort();
     await assert.rejects(client.invoke('click', [1, 2], { signal: controller.signal }), evidence('ABORTED', false, true));
     await assert.rejects(client._rpc('click', [], 1000, undefined, 1000), evidence('TIMEOUT', false, true));
-    client._ready = false;
+    client.transport.ready = false;
     await assert.rejects(client.invoke('click', [1, 2]), evidence('NOT_READY', false, true));
     await assert.rejects(client.dump(), evidence('NOT_READY', false, true));
-    client._port = null;
+    client.transport.port = null;
     await assert.rejects(client._rpc('click', []), evidence('NOT_READY', false, true));
     assert.equal(writes.length, 0);
 });

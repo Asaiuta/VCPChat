@@ -42,8 +42,8 @@ test('text tool protocol parses strict integer value and bounded JSON params', a
     } });
     const set = await f.service.processToolCall({ command: 'ExecuteStep', serial: 'A', action: { command: 'System', operation: 'set', capability: 'brightnessMode', value: '0' } });
     assert.equal(set.details.system.outcome, 'verified');
-    const draft = await f.service.processToolCall({ command: 'ExecuteStep', serial: 'A', action: { command: 'System', operation: 'draft', capability: 'dial', params: '{"phone":"1234567"}' } });
-    assert.equal(draft.details.system.outcome, 'dispatched');
+    await assert.rejects(f.service.processToolCall({ command: 'ExecuteStep', serial: 'A', action: { command: 'System', operation: 'draft', capability: 'dial', params: '{"phone":"1234567"}' } }), { code: 'POLICY_CONFIRMATION_REQUIRED', needsConfirmation: true });
+    assert.equal(f.calls.some(c => c[0] === 'adb' && c[1].includes("'start'")), false);
     for (const value of ['0x0', '0garbage', '0.0', ' 0']) await assert.rejects(f.service.processToolCall({ command: 'ExecuteStep', serial: 'A', action: { command: 'System', operation: 'set', capability: 'brightnessMode', value } }), { code: 'INVALID_ARGUMENT' });
     for (const params of ['{invalid', '[]', '"abc"']) await assert.rejects(f.service.processToolCall({ command: 'ExecuteStep', serial: 'A', action: { command: 'System', operation: 'draft', capability: 'dial', params } }), { code: 'INVALID_ARGUMENT' });
 });

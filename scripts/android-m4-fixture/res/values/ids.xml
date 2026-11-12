@@ -1,0 +1,5 @@
+<resources>
+    <item name="status" type="id" />
+    <item name="tap_button" type="id" />
+    <item name="input" type="id" />
+</resources>

@@ -41,7 +41,7 @@ test('long aggregate matching reuses the port label without a second descendant 
     const counted = countedGraphApi();
     const graph = counted.api.parseUiGraph(xml, { screen, limit: 1 });
     assert.equal(graph.controls.length, 1);
-    assert.equal(counted.api.findControls(graph, { class: 'Button', contains: 'LONG_SUFFIX' }).length, depth);
+    assert.equal(counted.api.findControls(graph, { class: 'Button', any: longLabel }).length, depth);
     assert.deepEqual(counted.counts(), { calls: 0, visits: 0 });
 });
 
@@ -70,9 +70,11 @@ test('folding carries the source aggregate long tail instead of rebuilding it fr
     assert.equal(graph.controls.length, 1);
     const host = graph.controls[0];
     assert.equal(host.rawNode.attrs.class, 'android.widget.Button');
-    assert.equal(host.label, `${longLabel.slice(0, 120)}…`);
+    assert.equal(host.label, longLabel);
+    assert.equal(graphApi.projectUiGraph(graph).controls[0].label, `${longLabel.slice(0, 120)}…`);
     assert.equal(host[MATCH_LABEL], longLabel);
-    assert.equal(graphApi.resolveSelector(graph, { contains: 'LONG_SUFFIX' }), host);
+    assert.equal(graphApi.resolveSelector(graph, { contains: 'LONG_SUFFIX' }), null, 'folded inner raw text is empty');
+    assert.equal(graphApi.resolveSelector(graph, { any: longLabel }), host);
     assert.equal(graphApi.resolveSelector(graph, host.selector), host);
 });
 
@@ -83,7 +85,8 @@ test('folding a long own label ending in a literal ellipsis preserves its source
     const host = graph.controls[0];
     assert.equal(host[MATCH_LABEL], ownLabel);
     assert.equal(graphApi.resolveSelector(graph, host.selector), host);
-    assert.equal(graphApi.resolveSelector(graph, { contains: 'LONG_SUFFIX' }), host);
+    assert.equal(graphApi.resolveSelector(graph, { contains: 'LONG_SUFFIX' }), null, 'inherited label is not original inner text');
+    assert.equal(graphApi.resolveSelector(graph, { any: ownLabel }), host);
 });
 
 test('private aggregate metadata preserves hidden, password, duplicate and independent-click-target rules', () => {

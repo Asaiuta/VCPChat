@@ -1,0 +1,12 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.vcpchat.m4fixture">
+    <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="35" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <application android:label="M4 display fixture" android:allowBackup="false" android:hasCode="true" android:theme="@android:style/Theme.Material.Light.NoActionBar" android:usesCleartextTraffic="false">
+        <activity android:name=".MainActivity" android:exported="true" android:launchMode="standard" android:resizeableActivity="true" android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|density" android:windowSoftInputMode="stateAlwaysHidden|adjustResize">
+            <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
+        </activity>
+        <activity android:name=".SingleTaskActivity" android:exported="true" android:launchMode="singleTask" android:taskAffinity="com.vcpchat.m4fixture.single" android:resizeableActivity="true" android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|density" android:windowSoftInputMode="stateAlwaysHidden|adjustResize" />
+        <activity android:name=".PermissionActivity" android:exported="true" android:launchMode="standard" android:taskAffinity="com.vcpchat.m4fixture.permission" android:resizeableActivity="true" android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|density" android:windowSoftInputMode="stateAlwaysHidden|adjustResize" />
+        <provider android:name=".StateProvider" android:authorities="com.vcpchat.m4fixture.state" android:exported="true" android:grantUriPermissions="false" />
+    </application>
+</manifest>

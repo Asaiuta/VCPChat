@@ -30,10 +30,16 @@ for (const changed of [false, true]) {
         try {
             const request = h.service.processToolCall({ command: 'Observe', mode: 'image', target: 'element',
                 serial: 'A', id: 'com.example:id/icon' });
-            if (changed) await assert.rejects(request, { code: 'ELEMENT_CONTEXT_CHANGED' });
+            if (changed) await assert.rejects(request, error => {
+                assert.equal(error.code, 'ELEMENT_CONTEXT_CHANGED');
+                assert.equal(error.details.screenReason, 'OBSERVED');
+                assert.equal(error.details.screen.context.rotation, 2);
+                assert.equal(error.details.screen.image, null, 'stale attachment is a fresh tree, not the rejected crop');
+                return true;
+            });
             else assert.ok((await request).details.frameId);
             assert.equal(captured, true);
-            assert.equal(h.uiServer.dumped, 2);
+            assert.equal(h.uiServer.dumped, 2, 'changed crop stops and only a separate stale tree is sampled');
             assert.equal(builds, 1, 'final evidence validation follows encoding, before credential issuance');
         } finally { await h.service.cleanup(); }
     });

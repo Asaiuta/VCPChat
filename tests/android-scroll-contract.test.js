@@ -2,7 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { harness } = require('./helpers/android-service-harness.cjs');
-const tree = (bounds = '[0,0][100,200]', extra = '') => `<hierarchy><node class="android.widget.ScrollView" package="com.example" resource-id="com.example:id/list" scrollable="true" bounds="${bounds}" ${extra}/></hierarchy>`;
+const tree = (bounds = '[0,0][100,200]', extra = '') => `<hierarchy rotation="0"><node class="android.widget.ScrollView" package="com.example" resource-id="com.example:id/list" scrollable="true" bounds="${bounds}" ${extra}/></hierarchy>`;
 const inputs = h => h.calls.filter(([kind, args]) => kind === 'adb' && args[1] === 'input');
 const run = (h, action, extra = {}) => h.service.processToolCall({ command: 'ExecuteStep', serial: 'A', action: { command: 'Scroll', id: 'com.example:id/list', ...action }, ...extra });
 
@@ -18,7 +18,7 @@ for (const [direction, coordinates] of [
     assert.equal(inputs(h).length, 1);
     assert.equal(result.details.execution.outcome, 'dispatched');
     assert.equal(result.details.direction, direction);
-    assert.equal(h.dumpCount, 1);
+    assert.equal(h.dumpCount, 2, '目标采样与最终policy gate各一次');
 });
 
 test('Scroll clips a partially visible container and respects distance and duration', async () => {

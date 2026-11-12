@@ -54,15 +54,18 @@ test('Fill mismatch cannot be washed green by outer expect', async () => {
     assert.equal(JSON.stringify(result).includes('secret'), false);
 });
 
-test('password does not read back or echo', async () => {
+test('password is blocked without approval and does not read back or echo', async () => {
     const h = await harness({
         uiServer: { ok: true, xml: field('password="true"') }
     });
-    const result = await fill(h, 'secret');
-
-    assert.equal(result.details.execution.outcome, 'dispatched');
-    assert.equal(h.calls.some(call => call[1] === 'getText'), false);
-    assert.equal(JSON.stringify(result).includes('secret'), false);
+    await assert.rejects(fill(h, 'secret'), error => {
+        assert.equal(error.code, 'POLICY_CONFIRMATION_REQUIRED');
+        assert.equal(error.needsConfirmation, true);
+        assert.equal(error.execution.outcome, 'failed');
+        assert.equal(JSON.stringify(error).includes('secret'), false);
+        return true;
+    });
+    assert.equal(h.calls.some(call => call[0] === 'rpc'), false);
 });
 
 test('Fill refuses shell fallback', async () => {

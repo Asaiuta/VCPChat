@@ -13,6 +13,7 @@
 const assert = require('node:assert');
 const test = require('node:test');
 const path = require('node:path');
+const { harness } = require('./helpers/android-service-harness.cjs');
 
 const root = path.resolve(__dirname, '..');
 const service = require(path.join(root, 'VCPDistributedServer/Plugin/AndroidController/AndroidControllerService'));
@@ -127,7 +128,11 @@ test('launchApp：查询包失败时不能谎报 APP_NOT_FOUND', async () => {
         },
         async currentFocus() { return { package: 'com.test.app', component: 'com.test.app/.Main' }; },
     };
-    const result = await launchApp({ package: 'com.test.app' }, { client });
-    assert.equal(result.details.ok, true, '查询失败不该阻止启动');
-    assert.ok(calls.some((c) => c.includes('resolve-activity')), '应该继续尝试启动');
+    const h = await harness({ client: { ...client, serial: 'A' } });
+    try {
+        const result = await h.service.processToolCall({ command: 'ExecuteStep',
+            action: { command: 'LaunchApp', package: 'com.test.app' } });
+        assert.equal(result.details.ok, true, '查询失败不该阻止启动');
+        assert.ok(calls.some((c) => c.includes('resolve-activity')), '应该继续尝试启动');
+    } finally { await h.service.cleanup(); }
 });

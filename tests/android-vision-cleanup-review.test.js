@@ -43,12 +43,13 @@ for (const target of ['id', 'selector', 'index']) {
         let layoutCalls = 0;
         let layout = 'initial';
         const shot = createElementShot({
-            runtime: { failure: (code, message) => Object.assign(new Error(message), { code }), remainingMs: () => 1000, check() {} },
+            runtime: { failure: (code, message) => Object.assign(new Error(message), { code }), remainingMs: () => 1000, executionSignal: () => undefined, check() {} },
             vision, prepareTarget: async () => ({ node }), getRecord: () => ({ graph, limit: 40 }),
             captureGraph: async () => graph, resolveSelector: () => node,
             intOf: Number, validateSelector() {}, graphLayout() { layoutCalls++; return layout; },
         });
-        const client = { async probeScreen() { return { wakefulness: 'Awake', focus: { package: 'com.example', component: 'com.example/.Main' } }; },
+        const client = { async probeScreen() { return { wakefulness: 'Awake', focus: { package: 'com.example', component: 'com.example/.Main', window: 'Main' },
+            size: screen, displayId: 0, rotation: 0, keyguard: { showing: false, inputRestricted: false } }; },
             async screenSize() { return { ...screen }; } };
         const args = { target: 'element', ...(target === 'index' ? { index: 0, snapshotId: 'snapshot' }
             : target === 'id' ? { id: node.id } : { selector: { id: node.id } }) };

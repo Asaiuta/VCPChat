@@ -32,8 +32,8 @@ async function fixture(t, respond) {
     });
 
     const client = new UiServer();
-    client._port = server.address().port;
-    client._ready = true;
+    client.transport.port = server.address().port;
+    client.transport.ready = true;
     return { client, calls };
 }
 
@@ -98,8 +98,8 @@ function deadlineTransport(t, { createCost = 0, parseCost = 0 } = {}) {
     });
 
     const client = new UiServer();
-    client._port = 12345;
-    client._ready = true;
+    client.transport.port = 12345;
+    client.transport.ready = true;
     return {
         client,
         writes,
@@ -287,7 +287,7 @@ test('local rejection never dispatches HTTP', async t => {
         () => client.invoke('click', [1, 2], { signal: controller.signal }),
         fails('UI_SERVER_ABORTED', false),
     );
-    client._ready = false;
+    client.transport.ready = false;
     await assert.rejects(
         () => client.invoke('click', [1, 2]),
         fails('UI_SERVER_NOT_READY', false),
@@ -481,9 +481,9 @@ test('停服会作废能力结论：重装 APK 后不能沿用旧判定', async 
     const { client } = await fixture(t, ok);
     client.noteCapability('pasteClipboard', 'unavailable');
     assert.equal(client.capability('pasteClipboard'), 'unavailable');
-    client._ready = false;
+    client.transport.ready = false;
     // 不要真去跑 adb forward --remove：这里验证的是能力缓存的作废，不是 adb。
-    client._removeForward = async () => undefined;
+    client.transport._removeForward = async () => undefined;
     await client.stop();
     assert.equal(client.capability('pasteClipboard'), 'unknown', '新进程可能来自不同的 APK / ROM');
 });

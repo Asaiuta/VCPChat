@@ -9,7 +9,7 @@ const rpc = h => h.calls.filter(call => call[0] === 'rpc');
 const inputs = h => h.calls.filter(call => call[0] === 'adb' && call[1].includes('input'));
 const modelText = result => result.content.filter(part => part.type === 'text').map(part => part.text).join('\n');
 const node = (id = 'map', bounds = '[0,0][100,200]', extra = '') => `<node class="android.view.View" package="com.example" resource-id="${id ? `com.example:id/${id}` : ''}" text="Map" bounds="${bounds}" ${extra}/>`;
-const tree = (...nodes) => `<hierarchy>${nodes.length ? nodes.join('') : node()}</hierarchy>`;
+const tree = (...nodes) => `<hierarchy rotation="0">${nodes.length ? nodes.join('') : node()}</hierarchy>`;
 const action = { command: 'Pinch', id: 'com.example:id/map', direction: 'in', percent: 50 };
 const run = (h, value = action, args = {}, context) => h.service.processToolCall({ command: 'ExecuteStep', action: value, ...args }, context);
 const backend = (xml = tree(), extra = {}) => ({ uiServer: { ok: true, xml, ...extra } });
@@ -30,7 +30,7 @@ for (const direction of ['in', 'out']) test(`Pinch ${direction} uses a non-click
     assert.equal(params[0].packageName, 'com.example');
     assert.equal(params[0].resourceId, 'com.example:id/map');
     assert.deepEqual(Array.from(params).slice(1), [50, 60]);
-    assert.equal(h.uiServer.dumped, 1);
+    assert.equal(h.uiServer.dumped, 2, '一次目标采样与一次最终policy gate');
     assert.equal(inputs(h).length, 0);
     assert.equal(result.details.execution.outcome, 'dispatched');
     assert.equal(result.details.execution.verification, null);
@@ -186,7 +186,7 @@ for (const boundary of ['cancel', 'timeout']) test(`Pinch ${boundary} keeps one 
     await tick();
     assert.equal(rpc(h).length, 1);
     assert.equal(rpc(h)[0][3].timeoutMs, 100);
-    assert.equal(h.uiServer.dumped, 1);
+    assert.equal(h.uiServer.dumped, 2, '只有目标与policy gate采样，ACK前没有验证');
     if (boundary === 'cancel') controller.abort(); else advance(100);
     const { error } = await work;
     assert.equal(error.code, boundary === 'cancel' ? 'STEP_ABORTED' : 'STEP_DEADLINE');
@@ -198,7 +198,7 @@ for (const boundary of ['cancel', 'timeout']) test(`Pinch ${boundary} keeps one 
     release(true);
     await tick();
     assert.equal(rpc(h).length, 1);
-    assert.equal(h.uiServer.dumped, 1);
+    assert.equal(h.uiServer.dumped, 2, '取消后不增加验证采样');
     assert.equal(inputs(h).length, 0);
     await h.service.processToolCall({ command: 'Observe' });
 });
@@ -207,7 +207,8 @@ test('Pinch shared budget includes preparation time rather than starting a new R
     const advance = clock(t);
     const h = await harness({ uiServer: { ok: true, get xml() { advance(40); return tree(); } } });
     await run(h, action, { timeoutMs: 100 });
-    assert.equal(rpc(h)[0][3].timeoutMs, 60);
+    assert.equal(h.uiServer.dumped, 2, '目标采样与policy gate各消耗40ms');
+    assert.equal(rpc(h)[0][3].timeoutMs, 20);
 });
 
 test('Pinch cancellation before prepare performs no reads or writes', async () => {
@@ -223,7 +224,7 @@ test('Pinch is verified only by an explicit post-ACK expect, not by true RPC res
     const result = await run(h, action, { expect: { type: 'visible', selector: 'text=Map' } });
     assert.equal(result.details.execution.outcome, 'verified');
     assert.equal(result.details.execution.verification.condition.selector, 'text=Map');
-    assert.equal(h.uiServer.dumped, 2);
+    assert.equal(h.uiServer.dumped, 3, '目标、policy gate与ACK后验证各一次');
     assert.equal(rpc(h).length, 1);
 });
 

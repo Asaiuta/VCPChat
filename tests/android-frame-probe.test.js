@@ -55,6 +55,38 @@ function stub(text) {
     client.runText = async (args, options) => { calls.push({ args, options }); return text; };
     return { client, calls };
 }
+
+// Reduced fields captured on PJZ110 / Android 17 during the 2026-11-05 fixture run.
+const PJZ110_POLICY = `WINDOW MANAGER POLICY STATE (dumpsys window policy)
+    KeyguardServiceDelegate
+      showing=false
+      inputRestricted=false
+`;
+test('fresh probe: real PJZ110 delegate and agreeing numeric wake state establish context', async () => {
+    const { client } = stub(response(PORTRAIT, PJZ110_POLICY, '  mWakefulness=Awake\nmWakefulness=1'));
+    const result = await client.probeScreen('A', { fresh: true });
+    assert.equal(result.wakefulness, 'Awake');
+    assert.deepEqual(result.keyguard, { showing: false, inputRestricted: false });
+});
+
+test('fresh probe: vendor wake state must agree with one authoritative named state', async () => {
+    for (const power of ['mWakefulness=1', 'mWakefulness=Awake\nmWakefulness=0',
+        'mWakefulness=Awake\nmWakefulness=4', 'mWakefulness=Awake\nmWakefulness=1\nmWakefulness=1',
+        'mWakefulness=Awake\nmWakefulness=Awake']) {
+        const { client } = stub(response(PORTRAIT, PJZ110_POLICY, power));
+        assert.equal((await client.probeScreen('A', { fresh: true })).wakefulness, null, power);
+    }
+});
+
+test('fresh probe: delegate evidence cannot replace an incomplete monitor or ambiguous delegate', async () => {
+    for (const policy of [PJZ110_POLICY + PJZ110_POLICY,
+        PJZ110_POLICY + '      KeyguardStateMonitor\n        mIsShowing=false\n',
+        PJZ110_POLICY.replace('showing=false', 'showing=false\n      showing=true')]) {
+        const { client } = stub(response(PORTRAIT, policy));
+        const { keyguard } = await client.probeScreen('A', { fresh: true });
+        assert.ok(keyguard.showing !== false || keyguard.inputRestricted !== false);
+    }
+});
 for (const [name, fixture, rotation, size] of [
     ['portrait', PORTRAIT, 0, { width: 1080, height: 2400 }],
     ['landscape with override', LANDSCAPE, 1, { width: 1600, height: 720 }],

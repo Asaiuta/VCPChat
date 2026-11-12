@@ -29,40 +29,36 @@ function sequences(result, status, count) {
 }
 
 for (const packageName of ['com.never', 'com.example']) {
-    test(`password intermediate Fill stops before Enter: ${packageName}`, async () => {
+    test(`password intermediate Fill is blocked before Enter: ${packageName}`, async () => {
         const h = await harness({ uiServer: { ok: true, xml: field(true) } });
-        const result = await h.service.processToolCall({
-            command: 'ExecuteStep',
-            steps: [
-                {
-                    action: fill,
-                    expect: { ...expect, package: packageName },
-                    waitTimeoutMs: 10,
-                },
-                { action: enter },
-            ],
+        await assert.rejects(h.service.processToolCall({ command: 'ExecuteStep', steps: [
+            { action: fill, expect: { ...expect, package: packageName }, waitTimeoutMs: 10 },
+            { action: enter },
+        ] }), error => {
+            assert.equal(error.code, 'POLICY_CONFIRMATION_REQUIRED');
+            assert.equal(error.needsConfirmation, true);
+            assert.equal(error.execution.sequence.status, 'stopped');
+            assert.equal(error.execution.sequence.steps.length, 1);
+            assert.equal(error.execution.sequence.steps[0].outcome, 'failed');
+            assert.equal(JSON.stringify(error).includes('secret'), false);
+            return true;
         });
         assert.equal(enters(h.calls).length, 0);
-        sequences(result, 'stopped', 1);
-        assert.equal(result.details.sequence.steps[0].outcome, 'dispatched');
-        assert.equal(result.details.sequence.steps[0].verification, null);
-        assert.equal(h.calls.some(c => c[1] === 'getText'), false);
-        assert.equal(JSON.stringify(result).includes('secret'), false);
+        assert.equal(h.calls.some(c => c[0] === 'rpc'), false);
     });
 }
 
 for (const expected of [undefined, expect, { ...expect, package: 'com.never' }]) {
-    test(`password single Fill preserves null verification: ${expected?.package}`, async () => {
+    test(`password single Fill cannot be authorized by an outer expectation: ${expected?.package}`, async () => {
         const h = await harness({ uiServer: { ok: true, xml: field(true) } });
-        const result = await h.service.processToolCall({
-            command: 'ExecuteStep',
-            action: fill,
-            expect: expected,
+        await assert.rejects(h.service.processToolCall({ command: 'ExecuteStep', action: fill, expect: expected }), error => {
+            assert.equal(error.code, 'POLICY_CONFIRMATION_REQUIRED');
+            assert.equal(error.execution.outcome, 'failed');
+            assert.equal(error.execution.verification, null);
+            assert.equal(JSON.stringify(error).includes('secret'), false);
+            return true;
         });
-        assert.equal(result.details.execution.outcome, 'dispatched');
-        assert.equal(result.details.execution.verification, null);
-        assert.equal(h.calls.some(c => c[1] === 'getText'), false);
-        assert.equal(JSON.stringify(result).includes('secret'), false);
+        assert.equal(h.calls.some(c => c[0] === 'rpc'), false);
     });
 }
 
@@ -82,29 +78,28 @@ test('verified intermediate Fill advances and final dispatched Enter completes',
     );
 });
 
-test('verified prefix cannot authorize an unverified password intermediate step', async () => {
-    const h = await harness({ uiServer: { ok: true, xml: field(true) } });
-    const result = await h.service.processToolCall({
-        command: 'ExecuteStep',
-        steps: [
-            { action: { command: 'KeyEvent', key: 'tab' }, expect },
-            { action: fill, expect },
-            { action: enter },
-        ],
+test('verified prefix cannot authorize a newly appearing password field', async () => {
+    let protectedField = false;
+    const h = await harness({ uiServer: { ok: true, xml: () => field(protectedField) },
+        run(args) { if (args.includes('KEYCODE_TAB')) protectedField = true; } });
+    await assert.rejects(h.service.processToolCall({ command: 'ExecuteStep', steps: [
+        { action: { command: 'KeyEvent', key: 'tab' }, expect },
+        { action: fill, expect },
+        { action: enter },
+    ] }), error => {
+        assert.equal(error.code, 'POLICY_CONFIRMATION_REQUIRED');
+        assert.equal(error.execution.sequence.status, 'stopped');
+        assert.deepEqual(Array.from(error.execution.sequence.steps, step => step.outcome), ['verified', 'failed']);
+        return true;
     });
     assert.equal(enters(h.calls).length, 0);
-    sequences(result, 'stopped', 2);
+    assert.equal(h.calls.some(c => c[0] === 'rpc'), false);
 });
 
-test('single-item password sequence completes without readback', async () => {
+test('single-item password sequence refuses without readback or input', async () => {
     const h = await harness({ uiServer: { ok: true, xml: field(true) } });
-    const result = await h.service.processToolCall({
-        command: 'ExecuteStep',
-        steps: [{ action: fill }],
-    });
-    sequences(result, 'completed', 1);
-    assert.equal(result.details.execution.outcome, 'dispatched');
-    assert.equal(result.details.execution.verification, null);
+    await assert.rejects(h.service.processToolCall({ command: 'ExecuteStep', steps: [{ action: fill }] }), { code: 'POLICY_CONFIRMATION_REQUIRED' });
+    assert.equal(h.calls.some(c => c[0] === 'rpc'), false);
 });
 
 test('final unknown still stops the sequence', async () => {

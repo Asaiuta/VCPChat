@@ -8,7 +8,8 @@ const { parseUiGraph } = require('../VCPDistributedServer/Plugin/AndroidControll
 const { layoutEvidence } = require('../VCPDistributedServer/Plugin/AndroidController/lib/layout-evidence');
 
 const focus = { package: 'com.example', component: 'com.example/.Main', window: 'Main' };
-const probe = { focus, size: { width: 100, height: 200 }, wakefulness: 'Awake' };
+const probe = { focus, size: { width: 100, height: 200 }, wakefulness: 'Awake', displayId: 0, rotation: 0,
+    keyguard: { showing: false, inputRestricted: false } };
 const scene = (left = 10, label = 'Icon') => `<hierarchy rotation="0"><node class="android.widget.ScrollView" package="com.example" resource-id="com.example:id/list" scrollable="true" bounds="[0,20][100,180]"><node class="android.widget.Button" package="com.example" resource-id="com.example:id/icon" text="${label}" clickable="true" enabled="true" bounds="[${left},10][60,70]"/></node></hierarchy>`;
 async function setup(options = {}) {
     let count = 0;
@@ -88,7 +89,7 @@ test('elementRegion clamps screen and padding never moves original center', () =
 });
 
 test('layout evidence covers >40 raw visible nodes and ignores changing labels, not bounds/state', () => {
-    const xml = (label, tail = 1, checked = false) => `<hierarchy><node class="android.widget.LinearLayout" package="com.example" bounds="[0,0][100,200]">${Array.from({ length: 70 }, (_, i) => `<node class="android.widget.Button" package="com.example" resource-id="com.example:id/n${i}" text="${label}" clickable="true" checked="${checked}" bounds="[0,${i}][${i === 69 ? tail : 10},${i + 1}]"/>`).join('')}</node></hierarchy>`;
+    const xml = (label, tail = 1, checked = false) => `<hierarchy rotation="0"><node class="android.widget.LinearLayout" package="com.example" bounds="[0,0][100,200]">${Array.from({ length: 70 }, (_, i) => `<node class="android.widget.Button" package="com.example" resource-id="com.example:id/n${i}" text="${label}" clickable="true" checked="${checked}" bounds="[0,${i}][${i === 69 ? tail : 10},${i + 1}]"/>`).join('')}</node></hierarchy>`;
     const digest = text => layoutEvidence(parseUiGraph(text, { limit: 1, screen: probe.size, rpcTarget: true }), probe).digest;
     assert.equal(digest(xml('one')), digest(xml('two')));
     assert.notEqual(digest(xml('one')), digest(xml('one', 2)));
@@ -120,6 +121,6 @@ test('element RPC transport unknown never falls back to CLI and quarantines late
 test('raw layout rotation changes invalidate stable layout context', () => {
     const a = layoutEvidence(parseUiGraph(scene(), { screen: probe.size, rpcTarget: true }), probe);
     const b = layoutEvidence(parseUiGraph(scene().replace('rotation="0"', 'rotation="1"'), { screen: probe.size, rpcTarget: true }), probe);
-    assert.equal(a.complete, true); assert.equal(b.complete, true); assert.notEqual(a.context, b.context);
+    assert.equal(a.complete, true); assert.equal(b.complete, false); assert.equal(b.digest, '');
 });
 

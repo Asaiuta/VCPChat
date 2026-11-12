@@ -268,7 +268,7 @@ test('manifest: 声明的命令都能被服务分派', () => {
     for (const command of declared) {
         assert.ok(COMMANDS[command], `清单声明了 ${command} 但服务没有对应处理函数`);
     }
-    assert.deepEqual(declared, ['describe', 'observe', 'executestep', 'manage']);
+    assert.deepEqual(declared, ['describe', 'observe', 'executestep', 'runtask', 'manage']);
 });
 
 test('manifest: pluginType 与 direct 协议符合 PluginManager 装载条件', () => {

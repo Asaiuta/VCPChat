@@ -15,9 +15,18 @@ test('Wait verifies visible condition without input and reuses sample for final 
     assert.equal(inputs(h).length, 0);
 });
 
-test('Wait polls changing semantics until condition matches without waking device', async () => {
+test('Wait cannot verify semantics while asleep and never auto-wakes', async () => {
     const h = await harness({ dump: n => xml(n === 0 ? 'Loading' : 'Go') });
-    h.client.probeScreen = async () => ({ wakefulness: 'Asleep', focus: {}, size: { width: 100, height: 200 } });
+    const probe = h.client.probeScreen.bind(h.client);
+    h.client.probeScreen = async (...args) => ({ ...await probe(...args), wakefulness: 'Asleep' });
+    const result = await wait(h, { waitTimeoutMs: 1000 });
+    assert.equal(result.details.execution.outcome, 'unknown');
+    assert.equal(h.dumpCount, 0, '未证明醒着的上下文不得采树证明visible');
+    assert.equal(inputs(h).length, 0);
+});
+
+test('Wait polls changing semantics in a fresh awake context without input', async () => {
+    const h = await harness({ dump: n => xml(n === 0 ? 'Loading' : 'Go') });
     const result = await wait(h, { waitTimeoutMs: 1000 });
     assert.equal(result.details.execution.outcome, 'verified');
     assert.equal(h.dumpCount, 2);

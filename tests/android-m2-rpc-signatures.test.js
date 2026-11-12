@@ -37,8 +37,8 @@ async function rpcHarness(t, result) {
         await new Promise(resolve => server.close(resolve));
     });
     const client = new UiServer();
-    client._port = server.address().port;
-    client._ready = true;
+    client.transport.port = server.address().port;
+    client.transport.ready = true;
     return { calls, client };
 }
 

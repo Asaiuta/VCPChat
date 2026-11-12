@@ -56,7 +56,7 @@ test('legacy #N is one-based XML order; nth is zero-based screen order, not iden
     assert.deepEqual(graph.controls.map(c => c.index), [0, 1, 2], 'matching must not reorder presentation');
     const boxes = [[1, 2, 8, 9], [1, 2, 7, 10], [1, 2, 7, 9], [1, 2, 7, 9]];
     const controls = boxes.map(([top, left, bottom, right], index) => ({
-        index, label: 'tie', bounds: { top, left, bottom, right },
+        index, text: 'tie', bounds: { top, left, bottom, right },
     }));
     assert.deepEqual([0, 1, 2, 3].map(nth => ui.resolveSelector(controls, { text: 'tie', nth }).index), [2, 3, 1, 0]);
     const reordered = parse(xmlNode('text="Same" bounds="[10,100][40,150]"')
@@ -107,14 +107,16 @@ test('strict validation rejects unknown keys, invalid types, empty conditions an
     assert.equal(ui.validateSelector(Object.assign(Object.create(null), { text: 'a' })), true);
 });
 
-test('legacy escaping round-trips literal ordinals and preserves unlabeled retrieval compatibility', () => {
+test('escaping round-trips literal ordinals; unlabeled controls are snapshot-only, not empty text selectors', () => {
     const graph = parse(xmlNode('text="Item#1"') + xmlNode('text="Item%23#1"') + xmlNode());
-    for (const control of graph.controls) assert.equal(ui.resolveSelector(graph, control.selector), control);
+    for (const control of graph.controls.slice(0, 2)) assert.equal(ui.resolveSelector(graph, control.selector), control);
+    assert.equal(graph.controls[2].selector, null);
+    assert.equal(ui.validateSelector('text=#1'), false);
     assert.equal(ui.resolveSelector(graph, 'text=Item%231'), graph.controls[0]);
     assert.equal(ui.resolveSelector(graph, { text: 'Item#1' }), graph.controls[0]);
     assert.equal(ui.validateSelector({ text: '' }), false);
     assert.equal(ui.resolveSelector(graph, { text: '' }), null);
-    assert.deepEqual(ui.findControls(graph, { text: '' }), [graph.controls[2]]);
+    assert.deepEqual(ui.findControls(graph, { text: '' }), []);
 });
 
 test('within addresses pruned raw parents and uses strict XML descendants, never bounds containment', () => {
@@ -145,7 +147,7 @@ test('within parent must be unique across the original tree; explicit parent ord
     assert.equal(ui.resolveSelector(graph, { text: 'First', within: { id: 'com.demo:id/group', nth: 1 } }), null);
 });
 
-test('aggregated host label is matched instead of its raw text, including within host scopes', () => {
+test('aggregated host label requires explicit any, including within host scopes', () => {
     const graph = parse('<node class="android.widget.LinearLayout" clickable="true" resource-id="com.demo:id/card" bounds="[0,0][500,500]">'
         + '<node class="android.widget.TextView" text="Invoice" bounds="[10,10][200,50]" />'
         + '<node class="android.widget.TextView" text="Paid" bounds="[10,60][200,100]" />'
@@ -153,9 +155,10 @@ test('aggregated host label is matched instead of its raw text, including within
     const host = graph.controls[0];
     assert.equal(host.label, 'Invoice / Paid');
     assert.equal(host.rawNode.attrs.text, undefined);
-    assert.equal(ui.resolveSelector(graph, 'contains=Paid'), host);
+    assert.equal(ui.resolveSelector(graph, 'contains=Paid'), null, 'contains is raw text only');
+    assert.equal(ui.resolveSelector(graph, 'any=Invoice / Paid'), host);
     assert.equal(ui.resolveSelector(graph, 'text=Invoice'), null);
-    assert.equal(ui.resolveSelector(graph, { text: 'Delete', within: 'text=Invoice / Paid' }), graph.controls[1]);
+    assert.equal(ui.resolveSelector(graph, { text: 'Delete', within: 'any=Invoice / Paid' }), graph.controls[1]);
     assert.equal(host.rawNode, graph.rawRoot.children[0]);
 });
 
@@ -227,7 +230,7 @@ test('bounded regex matches a linear grammar with independent native reference r
         assert.equal(ui.validateSelector({ regex: pattern }), true, pattern);
         const native = new RegExp(pattern);
         for (const label of samples) {
-            const actual = ui.findControls([{ label }], { regex: pattern }).length > 0;
+            const actual = ui.findControls([{ text: label }], { regex: pattern }).length > 0;
             // This subset intentionally treats $ as strict end, not pre-final-newline.
             const expected = pattern.endsWith('$') && label.endsWith('\n') ? false : native.test(label);
             assert.equal(actual, expected, `${pattern} on ${JSON.stringify(label)}`);
@@ -242,9 +245,9 @@ test('regex rejects unsupported/catastrophic syntax without an unbounded native 
         for (const pattern of ['(a+)+$', '(a|aa)+$', '(a*)*b', '(?=a)', '(a)\\1', 'a{1,1000000}', 'a|b']) rejects({ regex: pattern });
     }
     const tooLong = 'a'.repeat(selector.MAX_REGEX_TEXT_LENGTH + 1);
-    assert.equal(ui.resolveSelector([{ label: 'a' }, { label: tooLong }], { regex: '^a+$' }), null,
+    assert.equal(ui.resolveSelector([{ text: 'a' }, { text: tooLong }], { regex: '^a+$' }), null,
         'over-budget potential duplicate cannot turn an ambiguous query into a unique target');
-    assert.equal(ui.resolveSelector([{ label: 'a'.repeat(2000) + '!' }], { regex: `${'a*'.repeat(40)}b$` }), null);
+    assert.equal(ui.resolveSelector([{ text: 'a'.repeat(2000) + '!' }], { regex: `${'a*'.repeat(40)}b$` }), null);
 });
 
 
@@ -278,19 +281,19 @@ test('evidence-aware evaluation distinguishes complete duplicates/absence from u
     assert.equal(ui.evaluateSelector(graph, { text: 'Same', within: 'text=Same' }).complete, false);
     assert.equal(ui.evaluateSelector(graph, { text: 'Same', within: 'text=Same' }).ambiguous, true);
     assert.equal(ui.evaluateSelector(graph, { text: 'Same', within: 'text=Missing' }).complete, false);
-    assert.equal(ui.evaluateSelector([{ label: 'parent' }, { label: 'child' }], {
+    assert.equal(ui.evaluateSelector([{ text: 'parent' }, { text: 'child' }], {
         text: 'child', within: 'text=parent',
     }).complete, false, 'missing raw ancestry cannot prove absence');
     const tooLong = 'a'.repeat(selector.MAX_REGEX_TEXT_LENGTH + 1);
-    assert.equal(ui.evaluateSelector([{ label: tooLong }], { regex: '^b$' }).complete, false);
+    assert.equal(ui.evaluateSelector([{ text: tooLong }], { regex: '^b$' }).complete, false);
 });
 
 test('condition and full-query regex budgets fail closed without yielding false absence', () => {
     rejects({ contains: 'x'.repeat(selector.MAX_CONDITION_LENGTH + 1) });
     rejects({ id: 'x'.repeat(selector.MAX_CONDITION_LENGTH + 1) });
     const pattern = `${'a*'.repeat(40)}b$`;
-    const nodes = Array.from({ length: 110 }, () => ({ label: 'a'.repeat(1000) }));
-    assert.ok(nodes.length * pattern.length * nodes[0].label.length > selector.MAX_REGEX_WORK);
+    const nodes = Array.from({ length: 110 }, () => ({ text: 'a'.repeat(1000) }));
+        assert.ok(nodes.length * pattern.length * nodes[0].text.length > selector.MAX_REGEX_WORK);
     const result = ui.evaluateSelector(nodes, { regex: pattern });
     assert.deepEqual(result, { hits: [], complete: false, ambiguous: false });
     assert.equal(ui.resolveSelector(nodes, { regex: pattern }), null);
@@ -307,7 +310,7 @@ test('linear regex subset agrees with independent bounded native reference', () 
         const expected = new RegExp(pattern);
         const parsed = selector.parseSelector({ regex: pattern });
         for (const label of words) {
-            const actual = selector.evaluateSelector([{ label }], parsed);
+            const actual = selector.evaluateSelector([{ text: label }], parsed);
             assert.equal(actual.complete, true);
             assert.equal(actual.hits.length === 1, expected.test(label), JSON.stringify({ pattern, label }));
         }
@@ -347,7 +350,8 @@ test('full matching labels survive display truncation, scoped nth and regex budg
     const graph = parse('<node class="android.widget.LinearLayout" text="Parent" resource-id="parent" bounds="[0,0][800,800]">'
         + xmlNode(`text="${full}" bounds="[10,100][100,140]"`)
         + xmlNode(`text="${full}" bounds="[10,200][100,240]"`) + '</node>', { limit: 1 });
-    assert.ok(graph.controls.every(c => c.label.length <= 121));
+    assert.ok(ui.projectUiGraph(graph).controls.every(c => c.label.length <= 121));
+    assert.ok(graph.evidenceControls.some(c => c.text === full), 'assertions retain the complete raw source');
     for (const query of [{ text: full }, { contains: 'TAIL' }, { regex: 'TAIL$' }]) {
         const result = ui.evaluateSelector(graph, { ...query, within: 'id=parent' });
         assert.equal(result.complete, true);
@@ -369,9 +373,11 @@ test('long aggregated match labels retain full safe descendants and generated se
         + `<node class="android.widget.TextView" text="${full}" bounds="[10,10][400,50]"/>`
         + '<node class="android.widget.EditText" password="true" text="secret-tail" bounds="[10,60][400,90]"/>'
         + '</node>');
-    const host = ui.resolveSelector(graph, { id: 'card', contains: 'TAIL' });
+    const host = ui.resolveSelector(graph, { id: 'card', any: `${full} / [password]` });
     assert.equal(host.id, 'card');
-    assert.equal(host.label.endsWith('…'), true);
+    assert.equal(ui.resolveSelector(graph, { id: 'card', contains: 'TAIL' }), null, 'raw parent text is empty');
+    assert.equal(ui.projectUiGraph(graph).controls[0].label.endsWith('…'), true);
+    assert.equal(host.label.endsWith('[password]'), true);
     assert.equal(ui.evaluateSelector(graph, 'contains=secret-tail', { includeDisabled: true }).hits.length, 0);
     assert.equal(JSON.stringify(graph.evidenceControls).includes('secret-tail'), false);
     for (const key of Reflect.ownKeys(host)) {
@@ -412,7 +418,8 @@ test('hidden descendant labels never enter parent presentation, selectors or sco
             assert.equal(ui.evaluateSelector(graph, { text: 'Independent', within: { contains } }).complete, false);
             for (const key of Reflect.ownKeys(card)) if (typeof card[key] === 'string') assert.equal(card[key].includes(contains), false);
         }
-        assert.equal(ui.resolveSelector(graph, { id: 'card', contains: 'TAIL' }), card);
+        assert.equal(ui.resolveSelector(graph, { id: 'card', contains: 'TAIL' }), null);
+        assert.equal(ui.resolveSelector(graph, { id: 'card', any: `${'V'.repeat(120)}TAIL` }), card);
         assert.equal(graph.rawRoot.children[0].children[0].attrs.text, 'HIDDEN_SECRET_LABEL');
     }
 });
