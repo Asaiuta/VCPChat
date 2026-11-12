@@ -1,0 +1,9 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.vcpchat.fixturepeer">
+    <uses-sdk android:minSdkVersion="23" android:targetSdkVersion="35" />
+    <application android:label="Isolated task peer" android:allowBackup="false" android:hasCode="true" android:theme="@android:style/Theme.Material.Light.NoActionBar" android:usesCleartextTraffic="false">
+        <activity android:name="com.vcpchat.m15fixture.PeerActivity" android:exported="true">
+            <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
+        </activity>
+        <provider android:name="com.vcpchat.m15fixture.StateProvider" android:authorities="com.vcpchat.fixturepeer.state" android:exported="true" android:grantUriPermissions="false"/>
+    </application>
+</manifest>

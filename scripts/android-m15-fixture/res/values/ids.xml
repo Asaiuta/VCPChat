@@ -1,0 +1,12 @@
+<resources>
+    <item name="status" type="id"/><item name="nav_gestures" type="id"/><item name="nav_keyboard" type="id"/><item name="nav_scroll" type="id"/><item name="nav_rotate" type="id"/>
+    <item name="gesture_pad" type="id"/><item name="drag_source" type="id"/><item name="drag_target" type="id"/><item name="pinch_pad" type="id"/>
+    <item name="input" type="id"/><item name="scroll_container" type="id"/><item name="scroll_target" type="id"/>
+    <item name="nav_m2" type="id"/><item name="m2_scope_a" type="id"/><item name="m2_scope_b" type="id"/>
+    <item name="m2_same_a" type="id"/><item name="m2_same_b" type="id"/><item name="m2_dynamic" type="id"/>
+    <item name="m2_color" type="id"/><item name="m2_start_text" type="id"/><item name="m2_start_motion" type="id"/><item name="m2_stop" type="id"/>
+    <item name="m5_entry" type="id"/><item name="m5_query" type="id"/><item name="m5_search_go" type="id"/><item name="m5_results" type="id"/>
+    <item name="jd_first" type="id"/><item name="jd_second" type="id"/><item name="jd_next" type="id"/><item name="jd_review" type="id"/>
+    <item name="jd_done" type="id"/><item name="jd_select" type="id"/><item name="jd_toggle" type="id"/>
+    <item name="jd_start" type="id"/><item name="jd_loading" type="id"/><item name="jd_scroll" type="id"/><item name="jd_target" type="id"/><item name="jd_touch" type="id"/>
+</resources>
