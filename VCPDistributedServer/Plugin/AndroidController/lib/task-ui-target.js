@@ -41,13 +41,20 @@ function prepareTarget(value, task) {
     return Object.freeze({ selector, package: packageName });
 }
 
-function safeEntry(entry) {
+// A disabled control is unactionable, so it never proves an actionable predicate.
+// enabled:false is the one predicate whose evidence *is* the disabled state, so
+// shownEntry keeps every check safeEntry makes except that one.
+function shownEntry(entry, requireEnabled = true) {
     if (!entry?.visible) return false;
     for (let raw = entry.raw; raw; raw = raw.parent) {
         const a = raw.attrs || {};
-        if (a.password === 'true' || a.enabled === 'false' || a['visible-to-user'] === 'false' || a.displayed === 'false') return false;
+        if (a.password === 'true' || a['visible-to-user'] === 'false' || a.displayed === 'false') return false;
+        if (requireEnabled && a.enabled === 'false') return false;
     }
     return true;
+}
+function safeEntry(entry) {
+    return shownEntry(entry, true);
 }
 
 function createTargetMatcher(task, entries, activePackage = task.package) {
@@ -75,4 +82,4 @@ function createTargetMatcher(task, entries, activePackage = task.package) {
     };
 }
 
-module.exports = { prepareTarget, createTargetMatcher, safeEntry };
+module.exports = { prepareTarget, createTargetMatcher, safeEntry, shownEntry };

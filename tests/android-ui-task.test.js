@@ -348,3 +348,38 @@ test('duplicate resource IDs bind the selected current row rather than the first
     const r = (await w.run()).details.task;
     assert.equal(r.status, 'completed', JSON.stringify(r)); assert.equal(w.writes.length, 1);
 });
+
+test('enabled:false is a completion signal and never widens other predicates', () => {
+    const entry = (name, extra = {}) => {
+        const attrs = { package: 'com.example', 'resource-id': `com.example:id/${name}`, class: 'android.widget.TextView',
+            text: '', 'content-desc': 'Save', 'visible-to-user': 'true', password: 'false', enabled: 'true', ...extra };
+        return { attrs, visible: true, bounds: { left: 0, top: 0, right: 90, bottom: 90 }, path: name, raw: { tag: 'node', attrs, parent: null } };
+    };
+    const task = all => ({ package: 'com.example', inputs: { noteText: 'saved body' }, completion: { all } });
+    const text = { type: 'text', text: { id: 'com.example:id/editor', inputRef: 'noteText' } };
+    const saved = { type: 'enabled', id: 'com.example:id/save', enabled: false };
+    const both = [entry('editor', { text: 'saved body' }), entry('save', { enabled: 'false' })];
+    assert.equal(completionEvidence(task([text, saved]), both).matched, true);
+    const unsaved = [entry('editor', { text: 'saved body' }), entry('save', { enabled: 'true' })];
+    assert.equal(completionEvidence(task([text, saved]), unsaved).matched, false);
+    assert.deepEqual(completionEvidence(task([text, saved]), unsaved).checks, [true, false]);
+    assert.equal(completionEvidence(task([saved]), [entry('save', { enabled: 'false', 'visible-to-user': 'false' })]).matched, false);
+    assert.equal(completionEvidence(task([saved]), [entry('other', { enabled: 'false' })]).matched, false);
+    assert.equal(completionEvidence(task([{ type: 'visible', id: 'com.example:id/save' }]), [entry('save', { enabled: 'false' })]).matched, false);
+});
+
+test('host requirements reach the model as readable sentences, including enabled:false', () => {
+    const { requirementText } = require('../modules/services/androidUiTaskLoop');
+    assert.equal(requirementText({ type: 'visible', id: 'com.example:id/results' }),
+        'the control matching {"id":"com.example:id/results"} must be visible');
+    assert.equal(requirementText({ type: 'absent', id: 'com.example:id/loading' }),
+        'the control matching {"id":"com.example:id/loading"} must not be present');
+    assert.equal(requirementText({ type: 'checked', id: 'com.example:id/toggle', checked: true }),
+        'the control matching {"id":"com.example:id/toggle"} must be checked=true');
+    const saved = requirementText({ type: 'enabled', id: 'com.example:id/save', enabled: false });
+    assert.match(saved, /must have enabled=false/);
+    assert.match(saved, /already been carried out/);
+    assert.doesNotMatch(requirementText({ type: 'enabled', id: 'com.example:id/save', enabled: true }), /already been carried out/);
+    assert.match(requirementText({ type: 'text', text: { id: 'com.example:id/editor', inputRef: 'noteText' } }),
+        /must contain the supplied input noteText/);
+});

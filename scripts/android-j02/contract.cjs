@@ -13,6 +13,7 @@ target.minProperties=1;
 const textCheck = obj({target,equals:{type:'string',maxLength:2000},normalize:choice(['NFC_trim']),stripPrefix:str},['target','equals']);
 const condition = {oneOf:[
     obj({type:choice(['visible','absent']),target}), obj({type:{const:'checked'},target,checked:{type:'boolean'}}),
+    obj({type:{const:'enabled'},target,enabled:{type:'boolean'}}),
     obj({type:{const:'text'},...textCheck.properties},['type','target','equals']),
     obj({type:{const:'row'},target,fields:list(textCheck,1,8)})]};
 const checker = obj({version:{const:'raw-ui-v1'},package:str,all:list(condition,1,16)});

@@ -17,6 +17,18 @@ const node=(id,text='',inside='',extra='')=>`<node package="com.example" resourc
 const xml=body=>'<?xml version="1.0"?><hierarchy>'+body+'</hierarchy>';
 const spec={version:'raw-ui-v1',package:'com.example',all:[{type:'row',target:{id:'com.example:id/list'},fields:[
     {target:{id:'com.example:id/title'},equals:'Book'},{target:{id:'com.example:id/author'},equals:'Author'}]}]};
+test('independent checker reads enabled as evidence only for enabled predicates',()=>{
+    const viewport={width:100,height:200};
+    const button=(enabled,visibleToUser='true')=>`<node package="com.example" resource-id="com.example:id/save" text="" enabled="${enabled}" visible-to-user="${visibleToUser}" bounds="[0,0][90,90]" />`;
+    const disabled=enabled=>({version:'raw-ui-v1',package:'com.example',all:[{type:'enabled',target:{id:'com.example:id/save'},enabled}]});
+    assert.equal(check(xml(button('false')),disabled(false),viewport).verdict,'pass');
+    assert.equal(check(xml(button('true')),disabled(false),viewport).verdict,'fail');
+    assert.equal(check(xml(button('false')),disabled(true),viewport).verdict,'fail');
+    assert.equal(check(xml(button('false')),{version:'raw-ui-v1',package:'com.example',
+        all:[{type:'visible',target:{id:'com.example:id/save'}}]},viewport).verdict,'fail');
+    assert.equal(check(xml(button('false','false')),disabled(false),viewport).verdict,'fail');
+    assert.equal(check(xml(node('other')),disabled(false),viewport).verdict,'fail');
+});
 test('independent checker rejects cross-row, hidden ancestor, duplicate and aliased fields',()=>{
     const row=(a,b)=>node('row','',node('title',a)+node('author',b));const viewport={width:100,height:200};
     assert.equal(check(xml(node('list','',row('Book','Author'))),spec,viewport).verdict,'pass');

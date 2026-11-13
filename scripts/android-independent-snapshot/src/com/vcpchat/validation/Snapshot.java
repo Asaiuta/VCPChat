@@ -32,6 +32,7 @@ public final class Snapshot {
         xml.attribute(null, "text", node.isPassword() ? "" : safe(node.getText()));
         xml.attribute(null, "password", Boolean.toString(node.isPassword()));
         xml.attribute(null, "visible-to-user", Boolean.toString(node.isVisibleToUser()));
+        xml.attribute(null, "enabled", Boolean.toString(node.isEnabled()));
         xml.attribute(null, "bounds", "[" + bounds.left + "," + bounds.top + "][" + bounds.right + "," + bounds.bottom + "]");
         int count = node.getChildCount();
         for (int i = 0; i < count; i++) {

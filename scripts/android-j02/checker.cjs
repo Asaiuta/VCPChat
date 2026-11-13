@@ -10,14 +10,19 @@ function check(xml,spec,viewport){
     if(doc.documentElement.tagName!=='hierarchy')throw fail('J02_CHECKER_XML');
     const all=Array.from(doc.getElementsByTagName('node'));
     if(!all.some(n=>n.getAttribute('package')===spec.package))return{verdict:'unknown',checks:[]};
-    const safe=n=>{
+    // A disabled control is deliberately unactionable, so it never satisfies an
+    // actionable predicate. enabled:false is the exception: that disabled state
+    // is the evidence, so shown() checks everything safe() does apart from it.
+    const shown=(n,requireEnabled=true)=>{
         if(!n||n.getAttribute('package')!==spec.package)return false;
         for(let a=n;a?.tagName==='node';a=a.parentNode){
-            if(a.getAttribute('visible-to-user')!=='true'||a.getAttribute('password')==='true'||a.getAttribute('enabled')==='false')return false;
+            if(a.getAttribute('visible-to-user')!=='true'||a.getAttribute('password')==='true')return false;
+            if(requireEnabled&&a.getAttribute('enabled')==='false')return false;
         }
         const b=/^\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]$/.exec(n.getAttribute('bounds'))?.slice(1).map(Number);
         return !!b&&b[0]>=0&&b[1]>=0&&b[2]>b[0]&&b[3]>b[1]&&b[2]<=viewport.width&&b[3]<=viewport.height;
     };
+    const safe=n=>shown(n,true);
     const find=(target,nodes=all)=>nodes.filter(n=>n.getAttribute('package')===spec.package&&Object.entries(target).every(([k,v])=>
         n.getAttribute(({id:'resource-id',desc:'content-desc'})[k]||k)===v));
     const normalized=(v,c)=>{let s=v;if(c.normalize)s=s.normalize('NFC').trim();if(c.stripPrefix&&s.startsWith(c.stripPrefix))s=s.slice(c.stripPrefix.length).trimStart();return s;};
@@ -25,6 +30,7 @@ function check(xml,spec,viewport){
     const checks=spec.all.map(c=>{
         if(c.type==='text')return !!text(c,all);
         const hits=find(c.target);if(c.type==='absent')return hits.length===0;
+        if(c.type==='enabled')return hits.length===1&&shown(hits[0],false)&&hits[0].getAttribute('enabled')===String(c.enabled);
         if(hits.length!==1||!safe(hits[0]))return false;
         if(c.type==='visible')return true;
         if(c.type==='checked')return hits[0].getAttribute('checkable')==='true'&&hits[0].getAttribute('checked')===String(c.checked);

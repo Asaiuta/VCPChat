@@ -1,7 +1,7 @@
 'use strict';
 
 const { deriveUiAutomatorRole } = require('./argent-uiautomator');
-const { createTargetMatcher, safeEntry: safe } = require('./task-ui-target');
+const { createTargetMatcher, safeEntry: safe, shownEntry: shown } = require('./task-ui-target');
 const fail = code => { throw Object.assign(new Error(code), { code }); };
 const editable = a => a.editable === 'true' || deriveUiAutomatorRole(a.class) === 'TextField';
 const normalize = (v, p) => {
@@ -22,6 +22,9 @@ function completionEvidence(task, entries, match = createTargetMatcher(task, ent
         const result = match(p), found = result.hits;
         if (!result.complete) return false;
         if (p.type === 'absent') return found.length === 0;
+        // Only enabled:false may cite a disabled control as its evidence; every
+        // other predicate still requires an actionable, enabled target.
+        if (p.type === 'enabled') return found.length === 1 && shown(found[0], false) && found[0].attrs.enabled === String(p.enabled);
         if (found.length !== 1 || !safe(found[0])) return false;
         if (p.type === 'visible') return true;
         if (p.type === 'checked') return found[0].attrs.checkable === 'true' && found[0].attrs.checked === String(p.checked);

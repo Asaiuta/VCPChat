@@ -47,7 +47,7 @@ function prepare(task) {
     if (task.completion !== undefined && task.completion !== null) {
         const c = object(task.completion, ['all']);
         const all = array(c.all, 16, value => {
-            const p = object(value, ['type', 'id', 'selector', 'package', 'text', 'checked', 'fields']);
+            const p = object(value, ['type', 'id', 'selector', 'package', 'text', 'checked', 'enabled', 'fields']);
             if (p.type === 'text' && Object.keys(p).every(k => ['type', 'text'].includes(k))) return Object.freeze({ type: p.type, text: matchText(p.text) });
             if (p.type === 'row' && Object.keys(p).every(k => ['type', 'id', 'selector', 'package', 'fields'].includes(k))) {
                 const fields = array(p.fields, 8, matchText);
@@ -55,9 +55,13 @@ function prepare(task) {
                 if (!fields.length || new Set(ids).size !== ids.length) fail();
                 return Object.freeze({ type: p.type, ...target(p), fields });
             }
-            if (['visible', 'absent', 'checked'].includes(p.type) && Object.keys(p).every(k => ['type', 'id', 'selector', 'package', 'checked'].includes(k))
-                && (p.type === 'checked' ? typeof p.checked === 'boolean' : p.checked === undefined)) {
-                return Object.freeze({ type: p.type, ...target(p), ...(p.type === 'checked' ? { checked: p.checked } : {}) });
+            // `enabled` is the only way to prove a stateful control finished acting:
+            // Markor's save button reports enabled=true until the write lands.
+            const flag = { checked: 'checked', enabled: 'enabled' }[p.type];
+            if (['visible', 'absent', 'checked', 'enabled'].includes(p.type)
+                && Object.keys(p).every(k => ['type', 'id', 'selector', 'package', 'checked', 'enabled'].includes(k))
+                && (flag ? typeof p[flag] === 'boolean' : p.checked === undefined && p.enabled === undefined)) {
+                return Object.freeze({ type: p.type, ...target(p), ...(flag ? { [flag]: p[flag] } : {}) });
             }
             fail();
         });

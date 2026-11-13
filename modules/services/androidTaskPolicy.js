@@ -15,8 +15,8 @@ const TOGGLE_POLICY = Object.freeze({ version: 'toggle-v1', completionVersion: '
 const ROUTE_POLICY = Object.freeze({ version: 'route-v1', completionVersion: 'route-completion-v1',
     feedbackVersion: 'route-feedback-v1', minProbability: 0.9, minMargin: 0.2, calibrated: false,
     maxCandidates: 2, maxRounds: 6, maxWaits: 0, maxConsecutiveStale: 3 });
-const UI_TASK_POLICY = Object.freeze({ version: 'ui-task-v20', semanticsVersion: 'ui-elements-v11',
-    completionVersion: 'ui-predicates-v2', minProbability: 0.9, minMargin: 0.2, calibrated: false,
+const UI_TASK_POLICY = Object.freeze({ version: 'ui-task-v20', semanticsVersion: 'ui-elements-v12',
+    completionVersion: 'ui-predicates-v3', minProbability: 0.9, minMargin: 0.2, calibrated: false,
     maxCandidates: 128, maxElements: 96, maxRecent: 8, maxConsecutiveStale: 3,
     waitTimeoutMs: 5000, completionTimeoutMs: 5000, sampleMs: 200, minSampleBudgetMs: 1500 });
 const policies = Object.freeze({ search: SEARCH_POLICY, set_toggle: TOGGLE_POLICY, route_search: ROUTE_POLICY, ui_task: UI_TASK_POLICY });

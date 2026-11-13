@@ -11,6 +11,26 @@ const hash = v => createHash('sha256').update(JSON.stringify(v)).digest('hex');
 const same = (a, b) => a.observation.digest === b.observation.digest && a.observation.contextDigest === b.observation.contextDigest;
 const signature = (sample, action) => JSON.stringify([sample.ui.pageDigest, action]);
 
+// Host predicates are machine-shaped; a model cannot reliably decode
+// "enabled:false" as "the edit has been written". Describe each requirement in
+// words using only identity/labels already exposed on the same node.
+function requirementText(p) {
+    // `where` is handed the whole predicate; only its target fields identify a control.
+    const where = p => {
+        if (!p) return 'the target control';
+        const { type, checked, enabled, fields, ...target } = p;
+        return `the control matching ${JSON.stringify(target)}`;
+    };
+    if (p.type === 'text') return `${where(p.text)} must contain ${p.text.inputRef ? `the supplied input ${p.text.inputRef}` : JSON.stringify(p.text.equals)}`;
+    if (p.type === 'visible') return `${where(p)} must be visible`;
+    if (p.type === 'absent') return `${where(p)} must not be present`;
+    if (p.type === 'checked') return `${where(p)} must be checked=${p.checked}`;
+    if (p.type === 'enabled') return `${where(p)} must have enabled=${p.enabled}`
+        + (p.enabled === false ? '; a disabled action means it has already been carried out (for a Save action: the edit is written)' : '');
+    if (p.type === 'row') return `${where(p)} must contain one row satisfying all of: ${p.fields.map(f => requirementText({ type: 'text', text: f })).join('; ')}`;
+    return `${where(p)} must satisfy ${p.type}`;
+}
+
 function candidatesFor(task, sample, excluded = new Set()) {
     const candidates = [];
     const add = (action, description) => {
@@ -199,7 +219,8 @@ async function run(task, device, { jev, traceStore, services = {} }) {
                 candidates: candidates.map(({ candidateId, action }) => ({ candidateId, action })),
                 recentActions: history, pageSettled, loading: { declared: Boolean(task.loading), active: sample.ui.loading === true },
                 hostCompletionMatched: sample.ui.completion?.matched ?? null,
-                requirements: task.completion?.all.map((condition, i) => ({ condition, satisfied: sample.ui.completion?.checks[i] === true })) ?? null,
+                requirements: task.completion?.all.map((condition, i) => ({ condition, description: requirementText(condition),
+                    satisfied: sample.ui.completion?.checks[i] === true })) ?? null,
                 remaining: { actions: task.budget.maxActions - counts.actions, modelCalls: task.budget.maxModelCalls - counts.modelCalls,
                     timeoutMs: Math.max(0, Math.floor(device.remainingMs())) } };
             if (Buffer.byteLength(JSON.stringify({ state, questions })) > 150000) throw fail('TASK_CANDIDATE_OVERFLOW');
@@ -306,4 +327,4 @@ async function run(task, device, { jev, traceStore, services = {} }) {
     }
     return result;
 }
-module.exports = { run, candidatesFor, POLICY };
+module.exports = { run, candidatesFor, requirementText, POLICY };

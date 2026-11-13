@@ -84,6 +84,9 @@ goal: Create a new note in Markor named 2023_05_03_ready_elephant.md
 | r5 | `J02_WRONG_FOREGROUND` | 评分前前台变成 `Application Error: com.google.androidenv.accessibilityforwarder` | 见下「无障碍转发器崩溃」 |
 | r6 | `J02_WRONG_FOREGROUND`（0 动作） | `env.reset(go_home=True)` 后前台是 Launcher，而 start 谓词要求 Markor 前台 | `benchmark_native` 在 setup 后启动任务自身 App |
 | r7 | `TASK_JEV_UNCERTAIN`，**`score=0` fail** | 完成谓词只查编辑器正文，`Fill` 后即成立，于是「已做完/没做完」两解并存，`operation` 头只给到 0.81；正文从未落盘 | 见 §8.3、§8.4 |
+| r8 | `TASK_JEV_UNCERTAIN`，`independent=fail [true,false]` | 加 `enabled:false` 终态后独立判据不再自相矛盾，但模型读不懂该谓词，`operation:Tap p=0.42` | 加 `requirementText` 把谓词翻成句子 |
+| r9 | `J02_BENCHMARK_GOAL_CHANGED` | 试图把「必须保存」写进 goal，与 catalog 指令不符 | 放弃改题面，恢复逐字 goal |
+| r10 | `TASK_JEV_UNAVAILABLE`（HTTP 401） | 第 5 动作后 `completion` 稳定 True、`independent=pass [true,true]`，但设备无文件、`score=0` | `enabled:false` 被证伪为假终态，见 §8.5 |
 
 ### 8.1 冷启动会回收快照目录
 
@@ -153,4 +156,50 @@ r7 的 `result.json` 同时写着：
 所以「编辑器里有正文」是**保存前的中间态**，不能当终态。后果：即使模型选对 Done，本仓也会给 pass 而基准给 fail。
 
 → 要修的是**终态谓词**，不是控件标签。可用的终态证据只剩「回到文件列表看到该文件名」，但新建即落 0 字节文件、行存在也不证明内容已保存 —— **UI 层无法证明持久化**。因此 `benchmark.score` 必须是唯一权威，`independent.verdict` 只能当必要条件读。
+
+### 8.5 扩展 enabled 谓词（r8–r10）：实现完成，但被实测证伪
+
+改了三处实现，全部通过离线测试：
+
+| 层 | 改动 |
+| --- | --- |
+| 判据 jar | `Snapshot.java` 增发 `enabled` 属性（原先只输出 7 个属性，判据侧根本看不到） |
+| 独立判据 | `checker.cjs` 新增 `enabled` 谓词；`safe()` 拆成 `shown(requireEnabled)`，只有 `enabled` 谓词可引用禁用节点 |
+| Agent 证据 | `task-ui-evidence.js` 同款语义；`androidUiTaskContract` 接受 `enabled`；`task-ui-target` 增 `shownEntry` |
+| 版本 | `ui-predicates-v2 → v3`、`ui-elements-v11 → v12` |
+| 测试 | 判据侧 6 断言、证据侧 1 用例，全绿 |
+
+r8 用 `completion = [编辑器含正文, action_save.enabled=false]`：
+
+```
+seq=34 completion=False   ← Fill 前
+seq=37 completion=True    ← Fill 后瞬间即成立
+seq=38 completion=False
+seq=39 completion=False
+```
+
+`action_save` 的 enabled 在 `setText` 处理期间会 enabled→disabled→enabled 抖动，产生**脉冲式完成**。更根本的是模型看不懂 `enabled:false` 的含义，第 5 轮给不出选择（`operation:Tap p=0.42`）。
+
+r9 试图把「必须保存」写进 goal，被 `J02_BENCHMARK_GOAL_CHANGED` 拒绝 —— adapter 要求 goal 与 catalog 指令逐字一致。这个限制是对的：不能靠改题面帮模型。
+
+r10 改为把宿主谓词翻译成可读句子交给模型（`requirementText`），模型确实开始行动，第 5 个动作 Tap 之后 `completion` 稳定为 True，独立判据 `verdict=pass, checks=[true,true]`。**但磁盘上没有任何文件**：
+
+```
+final.xml: action_save enabled="false"  action_undo enabled="true"  编辑器含正文
+设备:      /storage/emulated/0/Documents/Markor/ 为空
+benchmark: verdict=fail, score=0
+```
+
+手动复现确认了假终态的来源：
+
+```
+新建空笔记 → action_save enabled=false（缓冲区干净）
+输入正文   → action_save enabled=true （有未保存修改）
+点预览     → action_save enabled=false，文件仍 0 字节
+点保存     → action_save enabled=false，文件写入 18 字节
+```
+
+**「preview 模式」与「保存完成」在 `enabled` 上完全同构。** r10 的第 5 个动作落在工具栏某个非保存按钮上，进入预览态，于是 `enabled:false` 成立而 `enabled` 从未发生写盘。这不是模型失误可以盖过的 —— 是我给的谓词本身无法区分这两个世界。
+
+因此结论更新为：**`enabled` 谓词保留为通用能力（对开关类控件合法），但 `enabled:false` 不能作为 Markor 的终态证明**。UI 层不存在能证明持久化的谓词。r10 还暴露另一条：第 6 次模型调用返回 `HTTP 401`，trial 以 `TASK_JEV_UNAVAILABLE` 停止 —— 通道侧失败，与本结论无关，但需单独跟踪。
 
