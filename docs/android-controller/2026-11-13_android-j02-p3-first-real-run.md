@@ -2,7 +2,9 @@
 
 2026-11-13。范围：J0.2 正式批次工具在**真实 API 33 模拟器 + 真实 Jev 网关**上的首次执行。档位与数字以 [README 状态表](README.md) 为准；本文只记录本批实际跑过的路径。
 
-**结论先写：trial 真实执行了，但没有被评分。** 批处理器在写 `result.json` 之前被杀，所以该 trial 永远停在「在途未知」，按 J02 契约禁止重放，batch r3 永久 halted。可用的证据是 trace、`initial.xml`、`final.xml` 和 registry；**不可用的是 score**——AndroidWorld 原生检查器从未运行。
+**结论先写：已取得第一个经独立检查评分的 trial（r7，`score=0`、`verdict=fail`）。** 前六轮（r3–r6）分别暴露了快照、前台与启动三类前置缺陷；r7 走完正确路径但停在最后一步，原因见 §8。
+
+本轮不改任何生产策略：`calibrated:false`、`acceptanceSamples:0`。这次是**一个任务的一次执行**，不是准入结论。
 
 ## 1. 环境（本批实际建立）
 
@@ -71,8 +73,46 @@ goal: Create a new note in Markor named 2023_05_03_ready_elephant.md
 - 单条 trial、单任务、单 ROM/模拟器镜像，`calibrated:false`，`acceptanceSamples:0`。不是准入结论。
 - 三个离线测试仍全绿（`android-j02-*` 61/61，benchmark 相关 33 通过 1 跳过），但那证明的是控制逻辑，不是本批的真机行为。
 
-## 7. 后续
+## 8. r3–r7 迭代：每轮的停止点与修复
 
-1. 机器重启后模拟器已消失（`adb devices` 为空）。重建要按 §1 的参数，`-gpu angle_indirect` 与 `-port 5558`（**偶数** console 端口；`benchmark-adapter` 的 `consolePort%2!==0` 会拒绝奇数）都是必需的。
-2. `final.xml` 已经说明失败点在「正文未填」，值得直接看第 3 轮候选集为什么没有可区分的正文输入候选——这是语义/候选问题，不是模型问题。
-3. 重跑必须用新 batchId 与新 datasetId，不能复用 r3。
+一轮一缺陷，全部先复现再改；每轮都用新 batchId 与新 datasetId 重新冻结。
+
+| 批次 | 停止点 | 真实原因 | 处理 |
+| --- | --- | --- | --- |
+| r3 | 进程被中断 | 批处理器在写 `result.json` 前被杀（跨夜） | 在途未知，禁止重放，永久 halted |
+| r4 | `J02_START_STATE_UNPROVEN` | 快照拍在 Markor 欢迎引导页，恢复后是引导页不是文件浏览器 | 走完 Intro（滑动 6 次 → `DONE`），重拍快照 |
+| r5 | `J02_WRONG_FOREGROUND` | 评分前前台变成 `Application Error: com.google.androidenv.accessibilityforwarder` | 见下「无障碍转发器崩溃」 |
+| r6 | `J02_WRONG_FOREGROUND`（0 动作） | `env.reset(go_home=True)` 后前台是 Launcher，而 start 谓词要求 Markor 前台 | `benchmark_native` 在 setup 后启动任务自身 App |
+| r7 | `TASK_JEV_UNCERTAIN`，**`score=0` fail** | 路径正确，停在「保存」；工具栏按钮无标签 | 见下「保存控件不可见」 |
+
+### 8.1 冷启动会回收快照目录
+
+`SNAPSHOT_DATA = /data/data/android_world/snapshots` **不是任何已安装包的数据目录**（`androidworld.apk` 的包名是 `com.example.androidworld`，转发器是 `com.google.androidenv.accessibilityforwarder`）。系统把 `/data/data` 下的孤儿目录当作残留清理，因此**每次模拟器冷启动，快照都会消失**，而 Markor 自身的用户数据（已安装包）保留。实测两次冷启动均复现。→ 每个新批次在冷启动后必须先 `setup_app` 重拍快照。
+
+### 8.2 无障碍转发器崩溃（r5）
+
+`logcat -b crash` 给出 `NullPointerException` in `ContextWrapper.getSystemServiceName` ← `AccessibilityInteractionClient.getInstance` ← `AccessibilityService.getWindows`，发生在转发器初始化线程。设备时钟被 AndroidWorld 冻结在 2023-10-15（`auto_time=0`），这是 `freeze_datetime` 的正常结果，不是本仓改动。重启模拟器后未再复现，但**未做稳定性验证**，属已知残留风险。
+
+### 8.3 保存控件在语义树里不可见（r7 的真正发现）
+
+r7 的意图轨迹完全正确，两次写入均 `verified`：
+
+```
+Tap n15 (FAB)            dispatched
+Fill n3  fileName        verified
+Tap n16 (OK)             dispatched
+Fill n6  noteText        verified   ← 已在编辑器正文，p=0.96
+```
+
+然后第 5 轮 `p=0.81`、`margin=0.70`，低于 0.9 阈值 → `TASK_JEV_UNCERTAIN` 安全停止。原因在编辑器工具栏：
+
+```
+resource-id=".../action_save" class="android.widget.TextView" text="" bounds="[765,138][870,264]"
+```
+
+`action_undo` / `action_redo` / `action_preview` / `action_save` / `action_search` 五个按钮**都没有 text、没有 content-desc、也没有 clickable 属性**。它们是 ActionMenuView 里渲染成 TextView 的图标按钮，语义树里完全无法区分。模型面对五个同构无标签目标，给不出 ≥0.9 的选择——**这个停止是正确的，不是能力不足**。
+
+文件未落盘（`/storage/emulated/0/Documents/Markor` 为空），因为 Markor 需要显式保存；AndroidWorld 判据 `CreateFile.is_successful` 检查文件存在与内容，所以 `score=0`。
+
+→ 这不是模型问题，也不是候选生成 bug，而是**目标 App 的语义可辨识度不足**。可行的下一步：为 icon-only 工具栏引入受控标签来源（APK 资源里的 `contentDescription` 若为空则无解），或把「保存」降级为显式的类型化动作而非自由候选。两者都需独立契约，不在本批擅自扩大。
+

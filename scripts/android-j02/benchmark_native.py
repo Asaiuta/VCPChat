@@ -166,6 +166,14 @@ class WorldSession:
         self.task.initialize_task(self.env)
         if self.snapshot_errors:
             raise AdapterError('NATIVE_SETUP_UNPROVEN')
+        # Snapshot restore closes the app and reset(go_home=True) leaves the launcher
+        # in front, so the frozen start predicate could never match. Bringing the
+        # task's own apps to the foreground is the agent's first move, not an
+        # evaluation step; whether it worked is proven by the start predicate.
+        from android_world.env import adb_utils
+        for app_name in getattr(self.task, 'app_names', ()):
+            if app_name:
+                adb_utils.launch_app(app_name, self.env.controller)
         return {'goal': self.task.goal}
 
     def score(self, _evidence):
