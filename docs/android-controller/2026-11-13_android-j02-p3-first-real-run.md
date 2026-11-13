@@ -2,7 +2,7 @@
 
 2026-11-13。范围：J0.2 正式批次工具在**真实 API 33 模拟器 + 真实 Jev 网关**上的首次执行。档位与数字以 [README 状态表](README.md) 为准；本文只记录本批实际跑过的路径。
 
-**结论先写：已取得第一个经独立检查评分的 trial（r7，`score=0`、`verdict=fail`）。** 前六轮（r3–r6）分别暴露了快照、前台与启动三类前置缺陷；r7 走完正确路径但停在最后一步，原因见 §8。
+**结论先写：已取得第一个经独立检查评分的 trial（r7，`score=0`、`verdict=fail`）。** 前六轮（r3–r6）分别暴露了快照、前台与启动三类前置缺陷；r7 走完正确路径但正文从未落盘。原稿把原因写成「保存按钮无标签」，那是错的（§8.3 已修正）；真因是本批完成谓词在保存前就成立，并顺带暴露出一处**独立检查判 pass、基准判 fail** 的矛盾（§8.4）。
 
 本轮不改任何生产策略：`calibrated:false`、`acceptanceSamples:0`。这次是**一个任务的一次执行**，不是准入结论。
 
@@ -83,7 +83,7 @@ goal: Create a new note in Markor named 2023_05_03_ready_elephant.md
 | r4 | `J02_START_STATE_UNPROVEN` | 快照拍在 Markor 欢迎引导页，恢复后是引导页不是文件浏览器 | 走完 Intro（滑动 6 次 → `DONE`），重拍快照 |
 | r5 | `J02_WRONG_FOREGROUND` | 评分前前台变成 `Application Error: com.google.androidenv.accessibilityforwarder` | 见下「无障碍转发器崩溃」 |
 | r6 | `J02_WRONG_FOREGROUND`（0 动作） | `env.reset(go_home=True)` 后前台是 Launcher，而 start 谓词要求 Markor 前台 | `benchmark_native` 在 setup 后启动任务自身 App |
-| r7 | `TASK_JEV_UNCERTAIN`，**`score=0` fail** | 路径正确，停在「保存」；工具栏按钮无标签 | 见下「保存控件不可见」 |
+| r7 | `TASK_JEV_UNCERTAIN`，**`score=0` fail** | 完成谓词只查编辑器正文，`Fill` 后即成立，于是「已做完/没做完」两解并存，`operation` 头只给到 0.81；正文从未落盘 | 见 §8.3、§8.4 |
 
 ### 8.1 冷启动会回收快照目录
 
@@ -93,7 +93,16 @@ goal: Create a new note in Markor named 2023_05_03_ready_elephant.md
 
 `logcat -b crash` 给出 `NullPointerException` in `ContextWrapper.getSystemServiceName` ← `AccessibilityInteractionClient.getInstance` ← `AccessibilityService.getWindows`，发生在转发器初始化线程。设备时钟被 AndroidWorld 冻结在 2023-10-15（`auto_time=0`），这是 `freeze_datetime` 的正常结果，不是本仓改动。重启模拟器后未再复现，但**未做稳定性验证**，属已知残留风险。
 
-### 8.3 保存控件在语义树里不可见（r7 的真正发现）
+### 8.3 保存控件可辨识；真正的缺陷是完成谓词在保存前就成立（修正版）
+
+> **修正**：本节此前写作「五个按钮都没有 text、没有 content-desc、也没有 clickable 属性」。该结论是错的 —— 依据只是判据 XML（`final.xml`），而 `independent-snapshot.jar` **不输出 `content-desc`/`clickable`/`enabled`**。用 `uiautomator dump` 取真实语义树实测：
+>
+> ```
+> resource-id=".../action_save" class="android.widget.TextView" text=""
+> content-desc="Save" clickable="true" enabled="true" bounds="[765,138][870,264]"
+> ```
+>
+> 五个按钮的 `content-desc` 分别是 Undo / Redo / View mode / Save / Search。**控件是可辨识的**，模型看到的是 "Save"。
 
 r7 的意图轨迹完全正确，两次写入均 `verified`：
 
@@ -104,15 +113,44 @@ Tap n16 (OK)             dispatched
 Fill n6  noteText        verified   ← 已在编辑器正文，p=0.96
 ```
 
-然后第 5 轮 `p=0.81`、`margin=0.70`，低于 0.9 阈值 → `TASK_JEV_UNCERTAIN` 安全停止。原因在编辑器工具栏：
+然后第 5 轮 `p=0.81`、`margin=0.64`，低于 0.9 阈值 → `TASK_JEV_UNCERTAIN` 安全停止。`heads` 里只有一条 `operation:Tap` 就抛出了，说明歧义在**操作选择**这一层，不是挑哪个按钮。
+
+真正的原因是**我自己写的完成谓词**。本批 manifest 的 `completion` 与 `finish` 用的是同一条：
+
+```json
+{"type":"text","target":{"id":"net.gsantner.markor:id/document__fragment__edit__highlighting_editor"},
+ "equals":"Don't cry over spilled milk."}
+```
+
+它只要求「编辑器里有这段正文」，因此 **`Fill noteText` 一 verified，完成条件立刻成立**。trace 里直接可见：
 
 ```
-resource-id=".../action_save" class="android.widget.TextView" text="" bounds="[765,138][870,264]"
+seq=34  completionMatched=False   ← Fill 前
+seq=37  completionMatched=True    ← Fill 后，尚未保存
+seq=38  completionMatched=True
+seq=39  completionMatched=True
 ```
 
-`action_undo` / `action_redo` / `action_preview` / `action_save` / `action_search` 五个按钮**都没有 text、没有 content-desc、也没有 clickable 属性**。它们是 ActionMenuView 里渲染成 TextView 的图标按钮，语义树里完全无法区分。模型面对五个同构无标签目标，给不出 ≥0.9 的选择——**这个停止是正确的，不是能力不足**。
+于是第 5 轮同时存在「已完成（Done）」与「还没做完（Tap）」两种解释，`operation` 头只能给到 0.81。**歧义是谓词制造的，不是模型能力问题，也不是控件标签问题。**
 
 文件未落盘（`/storage/emulated/0/Documents/Markor` 为空），因为 Markor 需要显式保存；AndroidWorld 判据 `CreateFile.is_successful` 检查文件存在与内容，所以 `score=0`。
 
-→ 这不是模型问题，也不是候选生成 bug，而是**目标 App 的语义可辨识度不足**。可行的下一步：为 icon-only 工具栏引入受控标签来源（APK 资源里的 `contentDescription` 若为空则无解），或把「保存」降级为显式的类型化动作而非自由候选。两者都需独立契约，不在本批擅自扩大。
+### 8.4 独立检查与基准判定矛盾（比 8.3 更严重）
+
+r7 的 `result.json` 同时写着：
+
+```json
+"independent": { "verdict": "pass", "checks": [true] },
+"benchmark":   { "suite": "androidworld", "taskId": "MarkorCreateNote", "verdict": "fail", "score": 0 }
+```
+
+同一个 trial，**本仓的独立快照检查判 pass，AndroidWorld 判 fail**。因为 `finish` 的编辑器正文谓词不看落盘，而 AndroidWorld 判据是「文件存在且内容匹配」。实测三条：
+
+- 新建对话框点 OK 立刻创建 **0 字节**文件（`unsaved_probe.md`，size=0）；
+- 在编辑器输入正文后文件仍是 **0 字节**，Markor 不自动落盘；
+- 点 `action_save` 后才写入 18 字节，`action_save` 由 `enabled="true"` 变 `false`。
+
+所以「编辑器里有正文」是**保存前的中间态**，不能当终态。后果：即使模型选对 Done，本仓也会给 pass 而基准给 fail。
+
+→ 要修的是**终态谓词**，不是控件标签。可用的终态证据只剩「回到文件列表看到该文件名」，但新建即落 0 字节文件、行存在也不证明内容已保存 —— **UI 层无法证明持久化**。因此 `benchmark.score` 必须是唯一权威，`independent.verdict` 只能当必要条件读。
 
