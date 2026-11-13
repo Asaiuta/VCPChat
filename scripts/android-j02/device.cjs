@@ -25,7 +25,10 @@ function device(adbPath,serial,{spawnSync=cp.spawnSync}={}){
         if(pkg&&(focus.length!==1||!focus[0].includes(` u0 ${pkg}/`)))throw fail('J02_WRONG_FOREGROUND');
     };
     const fileSha=file=>{
-        if(!/^\/(?:data|sdcard|storage)\/[A-Za-z0-9_./=+~-]+$/.test(file)||file.split('/').includes('..'))throw fail('J02_DEVICE_PATH');
+        // Preinstalled apps live on read-only partitions (/system_ext, /product, ...).
+        // Hashing them is stricter than trusting romFingerprint alone, so the path
+        // whitelist covers every Android partition root rather than /data only.
+        if(!/^\/(?:data|sdcard|storage|system|system_ext|system_dlkm|product|vendor|odm|oem|apex|mi_ext|cust)\/[A-Za-z0-9_./=+~-]+$/.test(file)||file.split('/').includes('..'))throw fail('J02_DEVICE_PATH');
         const hash=read(['shell','sha256sum',file]).trim().split(/\s+/)[0];if(!/^[a-f0-9]{64}$/.test(hash))throw fail('J02_DEVICE_HASH');return hash;
     };
     const inspect=(packages,stateFiles=[])=>{

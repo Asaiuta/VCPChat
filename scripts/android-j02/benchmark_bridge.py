@@ -42,10 +42,22 @@ def runtime_identity(suite):
         files.update(p.resolve() for p in dlls.rglob('*') if p.is_file() and p.suffix != '.pyc')
     modules = ['android_env', 'absl', 'numpy', 'grpc'] if suite == 'androidworld' else ['lxml', 'xmltodict']
     missing = [m for m in modules if importlib.util.find_spec(m) is None]
+    # importlib.metadata scans sys.path, and dispatch() prepends the benchmark checkout
+    # before verifying; the checkout's generated *.egg-info would then add a distribution
+    # and make verification mismatch its own lock. Only metadata inside the runtime roots
+    # counts, so the identity does not depend on sys.path. The file list pins every byte.
+    def own(distribution):
+        location = getattr(distribution, '_path', None)
+        if location is None:
+            return False
+        resolved = Path(location).resolve()
+        return any(resolved.is_relative_to(root) for root in roots)
+
+    distributions = sorted([d.metadata['Name'], d.version]
+                           for d in importlib.metadata.distributions() if own(d))
     return {'format': 'j02-python-runtime-v1', 'suite': suite, 'pythonPath': str(Path(sys.executable).resolve()),
             'version': sys.version, 'platform': platform.system(), 'isolated': sys.prefix != sys.base_prefix,
-            'missing': missing,
-            'distributions': sorted([d.metadata['Name'], d.version] for d in importlib.metadata.distributions()),
+            'missing': missing, 'distributions': distributions,
             'files': [{'file': str(p), 'sha256': hashlib.sha256(p.read_bytes()).hexdigest()} for p in sorted(files)]}
 
 

@@ -94,7 +94,10 @@ function files(m){
     const b=m.benchmark,{catalog}=preparation(b.preparedDir);
     return[b.runtimeIdentityFile,b.pythonPath,...b.assets,...S.read(b.runtimeIdentityFile).files.map(f=>f.file),
         ...['catalog.json','selection.json','preflight.json','identity.json'].map(f=>path.join(b.preparedDir,f)),
-        ...catalog.source.availableFiles.map(f=>path.join(b.checkout,f.file)),...m.tasks.map(t=>t.benchmark.caseFile)];
+        ...catalog.source.availableFiles.map(f=>path.join(b.checkout,f.file)),
+        // Generated bindings are untracked but imported from the checkout: pin them too.
+        ...P.GENERATED_PROTO.map(f=>path.join(b.checkout,f)).filter(f=>fs.existsSync(f)),
+        ...m.tasks.map(t=>t.benchmark.caseFile)];
 }
 function bind(manifestFile,output){
     manifestFile=path.resolve(manifestFile);output=path.resolve(output);
