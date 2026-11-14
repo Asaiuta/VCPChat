@@ -410,92 +410,96 @@ window.GroupRenderer = (() => {
 
 
     // Called by renderer.js when a group item is selected
-    async function handleSelectGroup(groupId, groupName, groupAvatarUrl, groupConfig) {
-        const currentSelectedItem = currentSelectedItemRef.get();
-        if (currentSelectedItem.id === groupId && currentSelectedItem.type === 'group' && currentTopicIdRef.get()) {
-            return; // Already selected this group and a topic is loaded
-        }
-
-        currentSelectedItemRef.set({ id: groupId, type: 'group', name: groupName, avatarUrl: groupAvatarUrl, config: groupConfig });
-        currentTopicIdRef.set(null); // Reset topic
-        messageRenderer.setCurrentSelectedItem(currentSelectedItemRef.get());
-        messageRenderer.setCurrentTopicId(null);
-        messageRenderer.setCurrentItemAvatar(groupAvatarUrl); // Use group avatar - CORRECTED FUNCTION NAME
-        messageRenderer.setCurrentItemAvatarColor(groupConfig?.avatarCalculatedColor || null); // CORRECTED FUNCTION NAME
-
-
-        if (mainRendererElements.currentChatNameH3) {
-            if (window.vcpChatHeader) window.vcpChatHeader.setTitle({ classic: `与群组 ${groupName} 聊天中`, capsule: `${groupName} (群组)` });
-            else mainRendererElements.currentChatNameH3.textContent = `与群组 ${groupName} 聊天中`;
-        }
-        const chatAgentAvatar = document.getElementById('chatAgentAvatar');
-        if (chatAgentAvatar) {
-            chatAgentAvatar.src = groupAvatarUrl || 'assets/icon.png';
-            chatAgentAvatar.alt = groupName || '';
-        }
-        if (mainRendererElements.currentItemActionBtn) {
-            setCurrentItemActionButtonText(mainRendererElements.currentItemActionBtn, '新建群聊话题');
-            mainRendererElements.currentItemActionBtn.title = `为群组 ${groupName} 新建群聊话题`;
-            mainRendererElements.currentItemActionBtn.style.display = 'inline-flex';
-        }
-        // mainRendererElements.clearCurrentChatBtn.style.display = 'inline-block'; // This button is removed
-
-        mainRendererFunctions.highlightActiveItem(groupId, 'group');
-
-        try {
-            const topics = await electronAPI.getGroupTopics(groupId);
-            if (topics && !topics.error && topics.length > 0) {
-                let topicToLoadId = topics[0].id;
-                const rememberedTopicId = localStorage.getItem(`lastActiveTopic_${groupId}_group`);
-                if (rememberedTopicId && topics.some(t => t.id === rememberedTopicId)) {
-                    topicToLoadId = rememberedTopicId;
-                }
-                currentTopicIdRef.set(topicToLoadId);
-                messageRenderer.setCurrentTopicId(topicToLoadId);
-                await loadGroupChatHistory(groupId, topicToLoadId);
-            } else if (topics.error) {
-                console.error(`加载群组 ${groupId} 的话题列表失败:`, topics.error);
-                messageRenderer.renderMessage({ role: 'system', content: `加载话题列表失败: ${topics.error}`, timestamp: Date.now() });
-            } else {
-                // No topics, create a default one or prompt
-                const defaultTopicResult = await electronAPI.createNewTopicForGroup(groupId, "主要群聊");
-                if (defaultTopicResult.success) {
-                    currentTopicIdRef.set(defaultTopicResult.topicId);
-                    messageRenderer.setCurrentTopicId(defaultTopicResult.topicId);
-                    await loadGroupChatHistory(groupId, defaultTopicResult.topicId);
-                } else {
-                    messageRenderer.renderMessage({ role: 'system', content: `创建默认话题失败: ${defaultTopicResult.error}`, timestamp: Date.now() });
-                    await loadGroupChatHistory(groupId, null); // Show "no topic"
-                }
-            }
-        } catch (e) {
-            console.error(`选择群组 ${groupId} 时发生错误: `, e);
-            messageRenderer.renderMessage({ role: 'system', content: `选择群组时出错: ${e.message}`, timestamp: Date.now() });
-        }
-
-        mainRendererElements.messageInput.disabled = false;
-        mainRendererElements.sendMessageBtn.disabled = false;
-        mainRendererElements.attachFileBtn.disabled = false;
-        // mainRendererElements.messageInput.focus();
-
-        // After selecting group and loading history, update invite buttons
-        console.log(`[GroupRenderer handleSelectGroup] Checking mode for group ${groupId}. Mode: ${groupConfig?.mode}`);
+    async function refreshGroupInviteButtonsForSelection(groupId, topicId, groupConfig) {
         if (groupConfig && ['invite_only', 'jev'].includes(groupConfig.mode)) {
-            console.log(`[GroupRenderer handleSelectGroup] Group ${groupId} is in invite_only mode. Members:`, groupConfig.members);
             const membersDetails = await Promise.all(
                 (groupConfig.members || []).map(async (id) => {
                     const config = await electronAPI.getAgentConfig(id);
-                    console.log(`[GroupRenderer handleSelectGroup] Fetched config for member ${id}:`, config ? 'Exists' : 'Error/Null', config?.error);
                     return config;
                 })
             );
+            const selectedNow = currentSelectedItemRef?.get?.();
+            if (selectedNow?.type !== 'group' || selectedNow.id !== groupId) return;
+            const effectiveTopicId = topicId || currentTopicIdRef?.get?.();
             const validMembers = membersDetails.filter(m => m && !m.error);
-            console.log(`[GroupRenderer handleSelectGroup] membersDetails count: ${membersDetails.length}, validMembers count: ${validMembers.length}`);
-            displayInviteAgentButtons(groupId, currentTopicIdRef.get(), validMembers, groupConfig);
+            await displayInviteAgentButtons(groupId, effectiveTopicId, validMembers, groupConfig);
         } else {
-            console.log(`[GroupRenderer handleSelectGroup] Group ${groupId} is NOT in invite_only mode or groupConfig is missing. Clearing buttons.`);
             clearInviteAgentButtons();
         }
+    }
+
+    async function handleSelectGroup(groupId, groupName, groupAvatarUrl, groupConfig, options = {}) {
+        const currentSelectedItem = currentSelectedItemRef.get();
+        const managedByChatManager = options?.managedByChatManager === true;
+        if (!managedByChatManager
+            && currentSelectedItem.id === groupId
+            && currentSelectedItem.type === 'group'
+            && currentTopicIdRef.get()) {
+            return; // Already selected this group and a topic is loaded
+        }
+
+        if (!managedByChatManager) {
+            currentSelectedItemRef.set({ id: groupId, type: 'group', name: groupName, avatarUrl: groupAvatarUrl, config: groupConfig });
+            currentTopicIdRef.set(null); // Reset topic
+            messageRenderer.setCurrentSelectedItem(currentSelectedItemRef.get());
+            messageRenderer.setCurrentTopicId(null);
+            messageRenderer.setCurrentItemAvatar(groupAvatarUrl);
+            messageRenderer.setCurrentItemAvatarColor(groupConfig?.avatarCalculatedColor || null);
+
+            if (mainRendererElements.currentChatNameH3) {
+                if (window.vcpChatHeader) window.vcpChatHeader.setTitle({ classic: `与群组 ${groupName} 聊天中`, capsule: `${groupName} (群组)` });
+                else mainRendererElements.currentChatNameH3.textContent = `与群组 ${groupName} 聊天中`;
+            }
+            const chatAgentAvatar = document.getElementById('chatAgentAvatar');
+            if (chatAgentAvatar) {
+                chatAgentAvatar.src = groupAvatarUrl || 'assets/icon.png';
+                chatAgentAvatar.alt = groupName || '';
+            }
+            if (mainRendererElements.currentItemActionBtn) {
+                setCurrentItemActionButtonText(mainRendererElements.currentItemActionBtn, '新建群聊话题');
+                mainRendererElements.currentItemActionBtn.title = `为群组 ${groupName} 新建群聊话题`;
+                mainRendererElements.currentItemActionBtn.style.display = 'inline-flex';
+            }
+
+            mainRendererFunctions.highlightActiveItem(groupId, 'group');
+
+            try {
+                const topics = await electronAPI.getGroupTopics(groupId);
+                if (topics && !topics.error && topics.length > 0) {
+                    let topicToLoadId = topics[0].id;
+                    const rememberedTopicId = localStorage.getItem(`lastActiveTopic_${groupId}_group`);
+                    if (rememberedTopicId && topics.some(t => t.id === rememberedTopicId)) {
+                        topicToLoadId = rememberedTopicId;
+                    }
+                    currentTopicIdRef.set(topicToLoadId);
+                    messageRenderer.setCurrentTopicId(topicToLoadId);
+                    await loadGroupChatHistory(groupId, topicToLoadId);
+                } else if (topics.error) {
+                    console.error(`加载群组 ${groupId} 的话题列表失败:`, topics.error);
+                    messageRenderer.renderMessage({ role: 'system', content: `加载话题列表失败: ${topics.error}`, timestamp: Date.now() });
+                } else {
+                    const defaultTopicResult = await electronAPI.createNewTopicForGroup(groupId, "主要群聊");
+                    if (defaultTopicResult.success) {
+                        currentTopicIdRef.set(defaultTopicResult.topicId);
+                        messageRenderer.setCurrentTopicId(defaultTopicResult.topicId);
+                        await loadGroupChatHistory(groupId, defaultTopicResult.topicId);
+                    } else {
+                        messageRenderer.renderMessage({ role: 'system', content: `创建默认话题失败: ${defaultTopicResult.error}`, timestamp: Date.now() });
+                        await loadGroupChatHistory(groupId, null);
+                    }
+                }
+            } catch (e) {
+                console.error(`选择群组 ${groupId} 时发生错误: `, e);
+                messageRenderer.renderMessage({ role: 'system', content: `选择群组时出错: ${e.message}`, timestamp: Date.now() });
+            }
+
+            mainRendererElements.messageInput.disabled = false;
+            mainRendererElements.sendMessageBtn.disabled = false;
+            mainRendererElements.attachFileBtn.disabled = false;
+        }
+
+        // 统一刷新群聊邀请/JEV控制栏（managedByChatManager 模式下话题与历史由 chatManager 原子接管，不重复加载）
+        await refreshGroupInviteButtonsForSelection(groupId, currentTopicIdRef.get(), groupConfig);
     }
 
 
@@ -576,6 +580,8 @@ window.GroupRenderer = (() => {
         groupAvatarInput.value = ''; // Clear file input
         mainRendererFunctions.setCroppedFile?.('group', null);
         sequentialSpeakerOrderList?.replaceChildren();
+        memberTagsInputsDiv?.replaceChildren();
+        jevMemberStylesInputs?.replaceChildren();
 
         groupChatModeSelect.value = groupConfig.mode || 'sequential';
         const persistedNaturalSettings = groupConfig.modeSettings?.naturerandom || {};
@@ -596,7 +602,8 @@ window.GroupRenderer = (() => {
 
         const isCurrentLoad = () => generation === groupSettingsGeneration &&
             (!settingsSurface || settingsSurface.isCurrent(viewToken));
-        const membersLoaded = await populateGroupMembersSettings(groupConfig, isCurrentLoad);
+        const settingsScopeKey = `${groupId}:${generation}`;
+        const membersLoaded = await populateGroupMembersSettings(groupConfig, isCurrentLoad, settingsScopeKey);
         if (!isCurrentLoad() || !membersLoaded) return;
         toggleModeSettingsVisibility(groupConfig.mode);
 
@@ -686,13 +693,14 @@ window.GroupRenderer = (() => {
     }
 
 
-    async function populateGroupMembersSettings(groupConfig, isCurrentLoad = () => true) {
+    async function populateGroupMembersSettings(groupConfig, isCurrentLoad = () => true, scopeKey = '') {
         if (!groupMembersListDiv) {
             console.error("groupMembersListDiv not found for populating members.");
             return;
         }
         window.VCPGroupSettingsSlots.message(groupMembersListDiv, '加载Agent列表中...');
         window.VCPGroupSettingsSlots.message(memberTagsInputsDiv, '');
+        window.VCPGroupSettingsSlots.message(jevMemberStylesInputs, '');
 
         try {
             const agents = await electronAPI.getAgents();
@@ -705,19 +713,21 @@ window.GroupRenderer = (() => {
             window.VCPGroupSettingsSlots.renderMemberList({
                 container: groupMembersListDiv,
                 tagsContainer: memberTagsInputsDiv,
+                jevStylesContainer: jevMemberStylesInputs,
+                sequentialList: sequentialSpeakerOrderList,
                 agents,
                 groupConfig,
                 onChange: () => {
-                    updateMemberTagsInputs(groupConfig);
-                    updateSequentialSpeakerOrder(groupConfig);
-                    updateJevMemberStyles(groupConfig);
+                    updateMemberTagsInputs(groupConfig, scopeKey);
+                    updateSequentialSpeakerOrder(groupConfig, scopeKey);
+                    updateJevMemberStyles(groupConfig, scopeKey);
                     updateGroupSectionSummary('identity');
                     updateGroupSectionSummary('mode');
                 }
             });
-            updateMemberTagsInputs(groupConfig); // Initial population of tag inputs
-            updateSequentialSpeakerOrder(groupConfig);
-            updateJevMemberStyles(groupConfig);
+            updateMemberTagsInputs(groupConfig, scopeKey); // Initial population of tag inputs
+            updateSequentialSpeakerOrder(groupConfig, scopeKey);
+            updateJevMemberStyles(groupConfig, scopeKey);
             updateGroupSectionSummary('identity');
             updateGroupSectionSummary('mode');
             return true;
@@ -736,11 +746,13 @@ window.GroupRenderer = (() => {
         return window.VCPGroupSettingsSlots.readSequentialSpeakerOrder(sequentialSpeakerOrderList);
     }
 
-    function updateSequentialSpeakerOrder(groupConfig = {}) {
+    function updateSequentialSpeakerOrder(groupConfig = {}, scopeKey = '') {
         window.VCPGroupSettingsSlots.renderSequentialSpeakerOrder({
             list: sequentialSpeakerOrderList,
+            membersContainer: groupMembersListDiv,
             agents: availableAgentsForGroup,
             groupConfig,
+            scopeKey,
             onChanged: () => {
                 updateGroupSectionSummary('mode');
                 markGroupSettingsDirty();
@@ -748,12 +760,13 @@ window.GroupRenderer = (() => {
         });
     }
 
-    function updateMemberTagsInputs(groupConfig) {
+    function updateMemberTagsInputs(groupConfig, scopeKey = '') {
         window.VCPGroupSettingsSlots.renderMemberTags({
             container: memberTagsInputsDiv,
             membersContainer: groupMembersListDiv,
             agents: availableAgentsForGroup,
             groupConfig,
+            scopeKey,
             onChanged: () => {
                 updateGroupSectionSummary('mode');
                 markGroupSettingsDirty();
@@ -762,12 +775,13 @@ window.GroupRenderer = (() => {
     }
 
 
-    function updateJevMemberStyles(groupConfig = {}) {
+    function updateJevMemberStyles(groupConfig = {}, scopeKey = '') {
         window.VCPGroupSettingsSlots.renderJevMemberStyles({
             container: jevMemberStylesInputs,
             membersContainer: groupMembersListDiv,
             agents: availableAgentsForGroup,
             groupConfig,
+            scopeKey,
             onChanged: () => {
                 updateGroupSectionSummary('mode');
                 markGroupSettingsDirty();
@@ -946,10 +960,14 @@ window.GroupRenderer = (() => {
                 jev: {
                     ...(existingModeSettings.jev || {}),
                     ...formDraft.jev,
-                    memberStyles: {
-                        ...(existingModeSettings.jev?.memberStyles || {}),
-                        ...formDraft.jev.memberStyles
-                    }
+                    memberStyles: Object.fromEntries(
+                        selectedMemberIds.map(agentId => [
+                            agentId,
+                            Object.prototype.hasOwnProperty.call(formDraft.jev.memberStyles, agentId)
+                                ? formDraft.jev.memberStyles[agentId]
+                                : (existingModeSettings.jev?.memberStyles?.[agentId] || '')
+                        ])
+                    )
                 }
             },
             // 保留旧字段供旧版本读取；权威数据位于 modeSettings。
@@ -1217,30 +1235,20 @@ window.GroupRenderer = (() => {
     }
 
     async function handleGroupTopicSelection(groupId, topicId) {
-        currentTopicIdRef.set(topicId);
-        messageRenderer.setCurrentTopicId(topicId);
-        await loadGroupChatHistory(groupId, topicId);
-        localStorage.setItem(`lastActiveTopic_${groupId}_group`, topicId);
+        if (typeof mainRendererFunctions?.selectTopic === 'function'
+            && currentSelectedItemRef?.get?.()?.type === 'group'
+            && currentSelectedItemRef?.get?.()?.id === groupId) {
+            await mainRendererFunctions.selectTopic(topicId);
+        } else {
+            currentTopicIdRef.set(topicId);
+            messageRenderer.setCurrentTopicId(topicId);
+            await loadGroupChatHistory(groupId, topicId);
+            localStorage.setItem(`lastActiveTopic_${groupId}_group`, topicId);
+        }
 
-        // Bug 1 Fix: Refresh invite buttons if in invite_only mode
         const currentSelected = currentSelectedItemRef.get();
-        if (currentSelected && currentSelected.type === 'group' && currentSelected.config) {
-            const groupConfig = currentSelected.config;
-            if (['invite_only', 'jev'].includes(groupConfig.mode)) {
-                console.log(`[GroupRenderer handleGroupTopicSelection] InviteOnly mode detected for group ${groupId}, topic ${topicId}. Refreshing invite buttons.`);
-                const membersDetails = await Promise.all(
-                    (groupConfig.members || []).map(async (id) => {
-                        const config = await electronAPI.getAgentConfig(id);
-                        if (!config || config.error) {
-                            console.warn(`[GroupRenderer handleGroupTopicSelection] Failed to fetch config for member ${id}: ${config?.error}`);
-                            return null;
-                        }
-                        return config;
-                    })
-                );
-                const validMembers = membersDetails.filter(m => m);
-                displayInviteAgentButtons(groupId, topicId, validMembers, groupConfig);
-            }
+        if (currentSelected && currentSelected.type === 'group' && currentSelected.id === groupId && currentSelected.config) {
+            await refreshGroupInviteButtonsForSelection(groupId, topicId, currentSelected.config);
         }
     }
 
@@ -1649,6 +1657,7 @@ window.GroupRenderer = (() => {
         isPendingUserMessage: messageId => pendingGroupUserMessageIds.has(messageId),
         acknowledgePendingUserMessage: messageId => pendingGroupUserMessageIds.delete(messageId),
         handleSelectGroup,
+        refreshGroupInviteButtonsForSelection,
         displayGroupSettingsPage,
         loadTopicsForGroup, // Called when topics tab is selected for a group
         handleSendGroupMessage, // Called by renderer's send button if current chat is group

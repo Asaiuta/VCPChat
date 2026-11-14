@@ -214,6 +214,8 @@ let mainChatSurface = null;
 let mainChatAdapter = null;
 let nonStreamingEventConsumer = null;
 let mainChatEventBridge = null;
+const activeGroupQueueScopes = new Set();
+const toGroupQueueScopeKey = (groupId, topicId) => (groupId && topicId ? `${groupId}::${topicId}` : '');
 const ownedRendererSubscriptions = new Set();
 const mainChatDomListenerOwner = createDomListenerOwner();
 const topicListDomListenerOwner = createDomListenerOwner();
@@ -237,6 +239,8 @@ const mainChatSendOwner = createMainChatSendOwner({
     getChatManager: () => chatManager,
     messageRenderer,
     notify: (message, type) => uiHelperFunctions?.showToastNotification?.(message, type),
+    isGroupQueueActive: (groupId, topicId) => activeGroupQueueScopes.has(toGroupQueueScopeKey(groupId, topicId)),
+    clearGroupQueueActive: (groupId, topicId) => activeGroupQueueScopes.delete(toGroupQueueScopeKey(groupId, topicId)),
 });
 const mainChatSettingsPresentationOwner = createMainChatSettingsPresentationOwner({
     documentRef: document,
@@ -605,6 +609,7 @@ mainChatSettingsPresentationOwner.configureStartup({
             settings: mainChatSettingsOwner,
             createInternalRenderer: createOwnedInternalChatRenderer,
             disposeCapabilities: async () => {
+                activeGroupQueueScopes.clear();
                 await mainChatEventBridge?.dispose?.();
                 mainChatEventBridge = null;
                 await nonStreamingEventConsumer?.dispose?.();
@@ -629,6 +634,15 @@ mainChatSettingsPresentationOwner.configureStartup({
             renderTarget: mainChatDomRenderer,
             messageRenderer,
             viewAuthority: { isCurrent: isContextForCurrentChat },
+            disposeStream: (messageId, reason) => mainChatAdapter?.disposeStream?.(messageId, reason),
+            streamProjection: streamManager,
+            onGroupQueueStateChange: ({ groupId, topicId, active }) => {
+                const key = toGroupQueueScopeKey(groupId, topicId);
+                if (!key) return;
+                if (active) activeGroupQueueScopes.add(key);
+                else activeGroupQueueScopes.delete(key);
+            },
+            notifySendStateChanged: mainChatSendOwner.update,
         });
         releaseNextUiChatCapabilities = mainComposition.releaseCapabilities;
 
@@ -772,9 +786,25 @@ mainChatSettingsPresentationOwner.configureStartup({
                     ? { ...selectedItem, config: nextConfig }
                     : { ...selectedItem, ...nextConfig });
             }
-            if (document.getElementById('tabContentTopics').classList.contains('active')) {
-                await window.topicListManager.loadTopicList();
-                if (!lifecycle.isActive()) return;
+            const topicsTabEl = document.getElementById('tabContentTopics');
+            const existingRow = topicsTabEl?.querySelector?.(`.topic-item[data-item-type="group"][data-item-id="${groupId}"][data-topic-id="${topicId}"]`);
+            if (existingRow) {
+                if (existingRow.__topicData && typeof existingRow.__topicData === 'object') {
+                    existingRow.__topicData.name = newTitle;
+                }
+                const isInlineEditing = Boolean(existingRow.querySelector('.topic-title-edit-input'));
+                if (!isInlineEditing) {
+                    const titleEl = existingRow.querySelector('.topic-title-display, .topic-name');
+                    if (titleEl) titleEl.textContent = newTitle;
+                    const avatarEl = existingRow.querySelector('img.avatar');
+                    if (avatarEl && selectedItem.name) avatarEl.alt = `${selectedItem.name} - ${newTitle}`;
+                }
+            } else if (topicsTabEl && (topicsTabEl.classList.contains('active') || topicsTabEl.classList.contains('compact-drawer-open'))) {
+                const isDragging = Boolean(topicsTabEl.querySelector('.sortable-drag-topic, .sortable-chosen-topic'));
+                if (!isDragging) {
+                    await window.topicListManager?.loadTopicList?.();
+                    if (!lifecycle.isActive()) return;
+                }
             }
         },
     });
@@ -1274,7 +1304,7 @@ mainChatSettingsPresentationOwner.configureStartup({
             };
             const removeThinking = async () => {
                 if (placeholder && isVisible()
-                    && currentChatHistoryRef.get().some(message => message.id === placeholder.id && message.isThinking)) {
+                    && mainHistoryRef.get().some(message => message.id === placeholder.id && message.isThinking)) {
                     await messageRenderer.removeMessageById(placeholder.id, false);
                 }
             };
@@ -1294,7 +1324,7 @@ mainChatSettingsPresentationOwner.configureStartup({
                         if (streaming) {
                             await mainChatAdapter.startStream({ ...placeholder, streamOperationId: placeholder.id });
                         } else if (isVisible()) {
-                            currentChatHistoryRef.set([...currentChatHistoryRef.get(), placeholder]);
+                            mainHistoryRef.set([...mainHistoryRef.get(), placeholder]);
                             const item = await messageRenderer.renderMessage(placeholder);
                             if (!isVisible()) item?.remove?.();
                         }
@@ -1304,9 +1334,7 @@ mainChatSettingsPresentationOwner.configureStartup({
                         if (!streaming) await removeThinking();
                         await syncAdmissionHistory(scope);
                     },
-                    onFinalized: event => request.relayFrom
-                        ? window.flowlockManager?.handleFinalizedMessage?.(event)
-                        : undefined,
+                    onFinalized: event => window.flowlockManager?.handleFinalizedMessage?.(event),
                 });
                 const receipt = await chatAPI.topicAdmissionAck(request.token);
                 if (!receipt?.success) return;

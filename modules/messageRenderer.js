@@ -450,7 +450,7 @@ const MERMAID_CODE_REGEX = /<code.*?>\s*(flowchart|graph|mermaid)\s+([\s\S]*?)<\
 const MERMAID_FENCE_REGEX = /```(mermaid|flowchart|graph)[^\S\n]*\n([\s\S]*?)```/g;
 const CODE_FENCE_REGEX = /```[^\n]*([\s\S]*?)```/g;
 const THOUGHT_CHAIN_REGEX = /^[ \t]*\[--- VCP元思考链(?::\s*"([^"]*)")?\s*---\][ \t]*\r?\n([\s\S]*?)^[ \t]*\[--- 元思考链结束 ---\][ \t]*(?:\r?\n|$)/gm;
-const CONVENTIONAL_THOUGHT_REGEX = /^[ \t]*<(think(?:ing)?)>[ \t]*(?:\r?\n)?([\s\S]*?)<\/\1>[ \t]*(?:\r?\n|$)/gim;
+const CONVENTIONAL_THOUGHT_REGEX = /^[ \t]*<(think(?:ing)?|thought(?:s)?)>[ \t]*(?:\r?\n)?([\s\S]*?)<\/(?:think(?:ing)?|thought(?:s)?)>[ \t]*(?:\r?\n|$)/gim;
 const ROLE_DIVIDER_REGEX = /<<<\[(END_)?ROLE_DIVIDE_(SYSTEM|ASSISTANT|USER)\]>>>/g;
 const DESKTOP_PUSH_REGEX = /(?<!`)<<<\[DESKTOP_PUSH\]>>>([\s\S]*?)<<<\[DESKTOP_PUSH_END\]>>>(?!`)/gs;
 const DESKTOP_PUSH_PARTIAL_REGEX = /(?<!`)<<<\[DESKTOP_PUSH\]>>>([\s\S]*)$/s; // 流式传输中未闭合的情况
@@ -2145,7 +2145,7 @@ function findUnclosedStreamCodeFence(text) {
 function findUnclosedStreamThoughtChain(text) {
     if (
         typeof text !== 'string' ||
-        (!text.includes('[--- VCP元思考链') && !/<think(?:ing)?>/i.test(text))
+        (!text.includes('[--- VCP元思考链') && !/<(?:think(?:ing)?|thought(?:s)?)>/i.test(text))
     ) {
         return null;
     }
@@ -2179,7 +2179,7 @@ function findUnclosedStreamThoughtChain(text) {
                     /^[ \t]*\[--- VCP元思考链(?::\s*"[^"]*")?\s*---\][ \t]*$/
                 );
                 const conventionalStart = line.match(
-                    /^[ \t]*<(think(?:ing)?)>[ \t]*(.*)$/i
+                    /^[ \t]*<(think(?:ing)?|thought(?:s)?)>[ \t]*(.*)$/i
                 );
 
                 if (customStart) {
@@ -2187,7 +2187,7 @@ function findUnclosedStreamThoughtChain(text) {
                 } else if (conventionalStart) {
                     const type = conventionalStart[1].toLowerCase();
                     const trailingContent = conventionalStart[2] || '';
-                    const sameLineEndRegex = new RegExp(`<\\/${type}>[ \\t]*$`, 'i');
+                    const sameLineEndRegex = /<\/(?:think(?:ing)?|thought(?:s)?)>[ \t]*$/i;
                     if (!sameLineEndRegex.test(trailingContent)) {
                         activeThought = { startIndex: offset, type };
                     }
@@ -2195,7 +2195,7 @@ function findUnclosedStreamThoughtChain(text) {
             } else {
                 const isEnd = activeThought.type === 'custom'
                     ? /^[ \t]*\[--- 元思考链结束 ---\][ \t]*$/.test(line)
-                    : new RegExp(`<\\/${activeThought.type}>[ \\t]*$`, 'i').test(line);
+                    : /<\/(?:think(?:ing)?|thought(?:s)?)>[ \t]*$/i.test(line);
 
                 if (isEnd) {
                     activeThought = null;
@@ -3184,6 +3184,8 @@ function initializeMessageRenderer(refs) {
         renderMessage: renderMessage,
         startStreamingMessage: mainRendererReferences.streamStartCapability || streamManager.startStreamingMessage,
         startStream: mainRendererReferences.streamStartCapability,
+        cancelStream: mainRendererReferences.cancelStreamCapability,
+        cancelStreamAdmissionRelay: mainRendererReferences.cancelStreamAdmissionRelay,
         discardStreamingMessage: streamManager.discardStreamingMessage,
         setContentAndProcessImages: imageHandler.setContentAndProcessImages,
         processRenderedContent: wrappedProcessRenderedContent,
@@ -3971,17 +3973,48 @@ async function renderMessage(message, isInitialLoad = false, appendToDom = true,
         shouldApplyColorToName = true;
     } else if (message.role === 'assistant') {
         if (message.isGroupMessage) {
-            avatarColorToUse = message.avatarColor;
-            avatarUrlToUse = message.avatarUrl;
-            // 群组消息中的Agent，获取其自定义颜色
-            if (message.agentId) {
-                const agentConfig = currentSelectedItem?.config?.agents?.find(a => a.id === message.agentId);
-                if (agentConfig) {
-                    useThemeColors = agentConfig.useThemeColorsInChat || false;
-                    if (!useThemeColors) {
-                        customBorderColor = agentConfig.avatarBorderColor;
-                        customNameColor = agentConfig.nameTextColor;
-                    }
+            avatarColorToUse = message.avatarColor || null;
+            avatarUrlToUse = message.avatarUrl || null;
+
+            // 群组消息中的 Agent：从全局已加载列表或兼容配置中动态解析真实头像、计算主色与自定义边框/名称色
+            const ownerWindow = mainRendererReferences.window || mainRendererReferences.document?.defaultView;
+            const loadedItems = typeof ownerWindow?.itemListManager?.getLoadedItems === 'function'
+                ? ownerWindow.itemListManager.getLoadedItems()
+                : (typeof window !== 'undefined' && typeof window.itemListManager?.getLoadedItems === 'function'
+                    ? window.itemListManager.getLoadedItems()
+                    : []);
+            const senderLower = message.name ? String(message.name).toLowerCase() : '';
+            const matchedItem = loadedItems.find(it => {
+                if (!it || it.type !== 'agent') return false;
+                if (message.agentId && it.id === message.agentId) return true;
+                return !message.agentId && senderLower && String(it.name || '').toLowerCase() === senderLower;
+            });
+            const agentConfig = matchedItem?.config
+                || matchedItem
+                || currentSelectedItem?.config?.agents?.find(a => a.id === message.agentId)
+                || null;
+
+            const isMissingOrGroupAvatar = !avatarUrlToUse
+                || avatarUrlToUse === 'assets/default_avatar.png'
+                || (currentSelectedItem?.avatarUrl && avatarUrlToUse === currentSelectedItem.avatarUrl);
+            if (isMissingOrGroupAvatar && matchedItem?.avatarUrl) {
+                avatarUrlToUse = matchedItem.avatarUrl;
+                if (avatarImg) {
+                    avatarImg.src = avatarUrlToUse;
+                }
+            }
+            if (!avatarColorToUse && matchedItem) {
+                avatarColorToUse = matchedItem.avatarColor
+                    || matchedItem.avatarCalculatedColor
+                    || matchedItem.config?.avatarCalculatedColor
+                    || matchedItem.config?.avatarColor
+                    || null;
+            }
+            if (agentConfig) {
+                useThemeColors = agentConfig.useThemeColorsInChat || false;
+                if (!useThemeColors) {
+                    customBorderColor = agentConfig.avatarBorderColor || null;
+                    customNameColor = agentConfig.nameTextColor || null;
                 }
             }
         } else if (currentSelectedItem) {
@@ -4214,9 +4247,17 @@ async function renderMessage(message, isInitialLoad = false, appendToDom = true,
             avatarImg.style.borderColor = customBorderColor;
             avatarImg.style.borderWidth = '2px';
             avatarImg.style.borderStyle = 'solid';
+            if (customNameColor && senderNameDiv) {
+                senderNameDiv.style.color = customNameColor;
+            }
         } else if (avatarColorToUse) {
             // 没有自定义颜色或禁用时，使用计算的颜色
             applyColorToElements(avatarColorToUse);
+            if (customNameColor && senderNameDiv) {
+                senderNameDiv.style.color = customNameColor;
+            }
+        } else if (customNameColor && senderNameDiv) {
+            senderNameDiv.style.color = customNameColor;
         } else if (avatarUrlToUse && !avatarUrlToUse.includes('default_')) { // No persisted color, try to extract
             // 🟢 Non-blocking color calculation
             // Immediately apply a default border, which will be overridden if color extraction succeeds.

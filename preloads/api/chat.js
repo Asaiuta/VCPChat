@@ -37,6 +37,7 @@ module.exports = {
         topicAdmissionList: invoke('topic-admission:list', 'scope'),
         topicAdmissionSubmit: invoke('topic-admission:submit', 'request'),
         topicAdmissionPersistAssistant: invoke('topic-admission:persist-assistant', 'scope', 'message'),
+        topicAdmissionCancelPending: invoke('topic-admission:cancel-pending', 'scope'),
         topicAdmissionWithdraw: invoke('topic-admission:withdraw', 'scope', 'entryId'),
         topicAdmissionResume: invoke('topic-admission:resume', 'scope'),
         topicAdmissionReconcile: invoke('topic-admission:reconcile', 'scope', 'entryId'),
@@ -56,6 +57,7 @@ module.exports = {
         onVCPStreamEvent: on('vcp-stream-event'),
         onVCPStreamChunk: on('vcp-stream-chunk'),
         interruptVcpRequest: invoke('interrupt-vcp-request', 'data'),
+        setToolLoopCompressionReady: invoke('tool-loop:compression-ready', 'messageId', 'needed'),
 
         // 附件
         handleFilePaste: invoke('handle-file-paste', 'agentId', 'topicId', 'fileData'),

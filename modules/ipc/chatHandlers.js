@@ -5,6 +5,7 @@ const path = require('path');
 const crypto = require('crypto');
 const contextSanitizer = require('../contextSanitizer');
 const { SenderTaskRegistry } = require('../services/senderTaskRegistry');
+const { createToolLoopHandoff } = require('../services/toolLoopHandoff');
 const {
     resolveRememberedAttachmentDirectory,
     rememberAttachmentDirectory
@@ -220,6 +221,23 @@ function initialize(mainWindow, context) {
         historyMutationQueue = new HistoryMutationQueue({ userDataDir: USER_DATA_DIR, fileWatcher })
     } = context;
 
+    const activeHandoffs = new Map();
+    const handoffs = createToolLoopHandoff({
+        async sendControl(payload, transport) {
+            const url = new URL('/v1/interrupt', transport.url);
+            const response = await fetch(url.toString(), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${transport.apiKey}` },
+                body: JSON.stringify(payload),
+                signal: AbortSignal.timeout(5000),
+            });
+            const receipt = await response.json();
+            return response.ok && receipt.success === true
+                ? receipt : { success: false, error: receipt.error || receipt.message || `HTTP ${response.status}` };
+        },
+    });
+    context.topicAdmission?.subscribe?.(entries => handoffs.updateEntries(entries));
+
     // Ensure the watcher is in a clean state on initialization
     if (fileWatcher) {
         fileWatcher.stopWatching();
@@ -240,9 +258,33 @@ function initialize(mainWindow, context) {
                     return { success: false, code: 'MANAGER_UNAVAILABLE', error: 'AgentConfigManager 未初始化。' };
                 }
 
+                const completingMessageId = typeof constraints.completingMessageId === 'string' && constraints.completingMessageId.trim()
+                    ? constraints.completingMessageId.trim()
+                    : null;
+                const activeSnapshot = vcpStreamTasks.snapshot();
+                const hasOtherActiveStreamForAgent = Array.isArray(activeSnapshot?.tasks)
+                    && activeSnapshot.tasks.some(task =>
+                        task?.agentId === agentId
+                        && !task?.isGroupMessage
+                        && (!completingMessageId || task.messageId !== completingMessageId)
+                    );
+                if (hasOtherActiveStreamForAgent) {
+                    return {
+                        success: false,
+                        code: 'AGENT_STREAM_ACTIVE',
+                        error: '目标 Agent 当前仍有正在执行的单聊流或工具循环，延后认领。'
+                    };
+                }
+
                 const config = await agentConfigManager.readAgentConfig(agentId);
                 const topics = Array.isArray(config.topics) ? config.topics : [];
-                const requestId = typeof constraints.requestId === 'string' ? constraints.requestId : null;
+                const requestId = typeof constraints.requestId === 'string' && constraints.requestId.trim()
+                    ? constraints.requestId.trim()
+                    : null;
+                const topicId = typeof constraints.topicId === 'string' && constraints.topicId.trim()
+                    ? constraints.topicId.trim()
+                    : null;
+                const strictConflict = constraints.strictConflict === true;
                 const createdAfter = Number.isFinite(constraints.createdAfter) ? constraints.createdAfter : null;
                 const candidates = [];
 
@@ -251,6 +293,7 @@ function initialize(mainWindow, context) {
                     if (!request || request.status !== 'pending') continue;
                     if (request.requestedByAgentId !== agentId) continue;
                     if (requestId && request.requestId !== requestId) continue;
+                    if (topicId && topic.id !== topicId) continue;
                     if (createdAfter !== null && request.createdAt < createdAfter) continue;
 
                     const historyPath = path.join(USER_DATA_DIR, agentId, 'topics', topic.id, 'history.json');
@@ -277,7 +320,7 @@ function initialize(mainWindow, context) {
                 if (candidates.length === 0) {
                     return { success: false, code: 'NOT_FOUND', error: '没有符合约束的 pending Flowlock 请求。' };
                 }
-                if (candidates.length > 1) {
+                if (candidates.length > 1 && strictConflict && !requestId && !topicId) {
                     return {
                         success: false,
                         code: 'CONFLICT',
@@ -290,25 +333,48 @@ function initialize(mainWindow, context) {
                     };
                 }
 
-                const [{ topic, request }] = candidates;
+                candidates.sort((left, right) => {
+                    const leftTime = Number(left.request.createdAt || left.topic.createdAt || 0);
+                    const rightTime = Number(right.request.createdAt || right.topic.createdAt || 0);
+                    return rightTime - leftTime;
+                });
+
+                const [{ topic, request }, ...staleCandidates] = candidates;
+                const staleRequestIds = new Set(staleCandidates.map(entry => entry.request.requestId));
+                const now = Date.now();
                 let claimed = false;
                 await agentConfigManager.updateAgentConfig(agentId, existing => ({
                     ...existing,
                     topics: (existing.topics || []).map(item => {
-                        if (item.id !== topic.id) return item;
-                        const current = item.flowlockRequest;
-                        if (!current || current.requestId !== request.requestId || current.status !== 'pending') {
-                            return item;
-                        }
-                        claimed = true;
-                        return {
-                            ...item,
-                            flowlockRequest: {
-                                ...current,
-                                status: 'consumed',
-                                consumedAt: Date.now()
+                        if (item.id === topic.id) {
+                            const current = item.flowlockRequest;
+                            if (!current || current.requestId !== request.requestId || current.status !== 'pending') {
+                                return item;
                             }
-                        };
+                            claimed = true;
+                            return {
+                                ...item,
+                                flowlockRequest: {
+                                    ...current,
+                                    status: 'consumed',
+                                    consumedAt: now
+                                }
+                            };
+                        }
+                        if (!requestId && !topicId
+                            && item.flowlockRequest?.status === 'pending'
+                            && staleRequestIds.has(item.flowlockRequest.requestId)) {
+                            return {
+                                ...item,
+                                flowlockRequest: {
+                                    ...item.flowlockRequest,
+                                    status: 'superseded',
+                                    supersededByRequestId: request.requestId,
+                                    supersededAt: now
+                                }
+                            };
+                        }
+                        return item;
                     })
                 }));
 
@@ -371,8 +437,10 @@ function initialize(mainWindow, context) {
     ipcMain.handle('list-pending-flowlock-topics', async () => {
         const result = [];
         try {
-            const agentIds = await fs.readdir(AGENT_DIR);
-            for (const agentId of agentIds) {
+            const entries = await fs.readdir(AGENT_DIR, { withFileTypes: true });
+            for (const entry of entries) {
+                if (!entry.isDirectory()) continue;
+                const agentId = entry.name;
                 try {
                     const config = agentConfigManager
                         ? await agentConfigManager.readAgentConfig(agentId)
@@ -1065,10 +1133,13 @@ function initialize(mainWindow, context) {
         const streamChannel = 'vcp-stream-event'; // Use a single, unified channel for all stream events.
         const streamOperationId = `${messageId}:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 10)}`;
 
+        let handoff = null;
         let streamTask = null;
         let streamTaskDetached = false;
         let trajectoryCall = null; // 侧栏「调用轨迹」的记录句柄；记录器自己吞掉一切异常
         const finishStreamTask = () => {
+            handoff?.finish();
+            if (activeHandoffs.get(messageId)?.handle === handoff) activeHandoffs.delete(messageId);
             if (!streamTask) return;
             vcpStreamTasks.finish(event.sender, messageId);
             streamTask = null;
@@ -1366,6 +1437,16 @@ function initialize(mainWindow, context) {
                 return { error: `请求体序列化失败: ${serializeError.message}` };
             }
 
+            if (modelConfig.stream === true && !isGroupCall && context?.admissionToken
+                && context.agentId && context.topicId
+                && !/^sidechat_[0-9]+_[0-9a-f]+$/.test(context.topicId)) {
+                handoff = handoffs.register({
+                    requestId: messageId,
+                    scope: { itemType: 'agent', itemId: context.agentId, topicId: context.topicId },
+                    transport: { url: finalVcpUrl, apiKey: vcpApiKey },
+                });
+                activeHandoffs.set(messageId, { handle: handoff, sender: event.sender });
+            }
             const response = await fetch(finalVcpUrl, {
                 method: 'POST',
                 headers: {
@@ -1436,6 +1517,7 @@ function initialize(mainWindow, context) {
             }
 
             if (modelConfig.stream === true) {
+                handoff?.setSupported(response.headers?.get?.('x-vcp-tool-loop-handoff') === '1');
                 console.log(`VCP响应: 开始流式处理 for ${messageId} on channel ${streamChannel}`);
                 const reader = response.body.getReader();
                 const decoder = new TextDecoder();
@@ -1565,7 +1647,19 @@ function initialize(mainWindow, context) {
     });
 
 
+    ipcMain.handle('tool-loop:compression-ready', (event, messageId, needed) => {
+        const reservation = activeHandoffs.get(messageId);
+        if (!reservation || reservation.sender !== event.sender) {
+            return { success: false, code: 'STALE_REQUEST' };
+        }
+        if (typeof needed !== 'boolean') return { success: false, code: 'INVALID_DEMAND' };
+        void reservation.handle.setCompression(needed);
+        return { success: true };
+    });
+
     ipcMain.handle('interrupt-vcp-request', async (event, { messageId }) => {
+        const reservation = activeHandoffs.get(messageId);
+        if (reservation?.sender === event.sender) reservation.handle.seal();
         let upstreamAccepted = false;
         try {
             const settingsPath = path.join(APP_DATA_ROOT_IN_PROJECT, 'settings.json');

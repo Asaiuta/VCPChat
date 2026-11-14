@@ -31,8 +31,11 @@ class TopicMessageAdmission {
         this.standaloneLeases = [];
         this.leases = new Map();
         this.waiters = new Set();
+        this.listeners = new Set();
         this.rounds = new Map();
         this.relayAttempts = new Map();
+        // Stop is signalled outside the serial disk queue; IDs define its boundary.
+        this.cancelledEntryIds = new Set();
         this.tail = Promise.resolve();
         this.ready = false;
         this.closed = false;
@@ -63,43 +66,22 @@ class TopicMessageAdmission {
                 }
                 leaseKeys.add(key);
             }
+            const interrupted = new Set(state.standaloneLeases.map(lease => conversationKey(lease.scope)));
             const seen = new Set();
-            this.entries = saved.map(entry => {
-                conversationKey(entry.scope);
+            for (const entry of saved) {
+                const key = conversationKey(entry.scope);
                 if (!entry.entryId || !entry.message?.id || seen.has(entry.entryId)) {
                     throw new TypeError('Invalid admission entry');
                 }
                 seen.add(entry.entryId);
-                // Crash during append is safe only because commit is idempotent.
-                // A crash after dispatch may leave a saved terminal or executed tools.
-                // Neither a lost in-memory lease nor missing ACK proves safe regeneration.
-                const unconfirmed = ['advancing', 'uncertain'].includes(entry.state);
-                return {
-                    ...copy(entry),
-                    state: unconfirmed ? 'uncertain' : 'recovered',
-                    error: unconfirmed
-                        ? entry.error || '上次推进期间进程退出，终稿与工具执行结果待核实'
-                        : null,
-                };
-            });
-            // Residual ownership is evidence of an interrupted run, not execution permission.
-            // Move it into journal-only diagnostics before any subsequent state publication.
-            for (const lease of state.standaloneLeases) {
-                const key = conversationKey(lease.scope);
-                if (this.entries.some(entry => conversationKey(entry.scope) === key
-                    && entry.leaseToken === lease.token && entry.state === 'uncertain')) continue;
-                this.entries.push({
-                    entryId: randomUUID(), kind: 'lease-diagnostic', scope: copy(lease.scope),
-                    message: { id: randomUUID(), role: 'assistant', name: '生成状态',
-                        content: '上次独立生成期间进程退出，终稿状态待核实' },
-                    triggerPolicy: 'none', enqueuedAt: lease.acquiredAt || Date.now(),
-                    state: 'uncertain', error: '独立租约未确认收尾，禁止直接重新生成',
-                    leaseToken: lease.token, committed: true, commitStarted: true,
-                });
+                if (['advancing', 'uncertain', 'failed'].includes(entry.state)
+                    || entry.kind === 'lease-diagnostic') interrupted.add(key);
             }
-            if (state.standaloneLeases.length) {
-                await this.store.save(copy(this.entries), []);
-            }
+            // Frontend recovery never replays interrupted work or waits for a terminal.
+            // Drop the entire interrupted topic's staging, not durable chat history.
+            this.entries = saved.filter(entry => !interrupted.has(conversationKey(entry.scope)))
+                .map(entry => ({ ...copy(entry), state: 'recovered', error: null }));
+            if (interrupted.size) await this.store.save(copy(this.entries), []);
             this.ready = true;
             this.notify();
         });
@@ -109,7 +91,17 @@ class TopicMessageAdmission {
         if (!this.ready) throw new Error('Admission not initialized');
     }
 
+    subscribe(listener) {
+        this.listeners.add(listener);
+        listener(this.snapshot());
+        return () => this.listeners.delete(listener);
+    }
+
     notify() {
+        for (const listener of [...this.listeners]) {
+            try { listener(this.snapshot()); }
+            catch (error) { this.logger.warn?.('[Admission] subscriber failed', error); }
+        }
         for (const wake of [...this.waiters]) wake();
         try { this.publish(this.snapshot()); }
         catch (error) { this.logger.warn?.('[Admission] publish failed', error); }
@@ -121,9 +113,15 @@ class TopicMessageAdmission {
     }
 
     async save(next, standaloneLeases = this.standaloneLeases) {
-        await this.store.save(copy(next), copy(standaloneLeases));
+        this.savingEntries = next;
+        try { await this.store.save(copy(next), copy(standaloneLeases)); }
+        finally { this.savingEntries = null; }
         this.entries = next;
         this.standaloneLeases = standaloneLeases;
+        const retainedIds = new Set(next.map(entry => entry.entryId));
+        for (const id of this.cancelledEntryIds) {
+            if (!retainedIds.has(id)) this.cancelledEntryIds.delete(id);
+        }
         this.notify();
     }
 
@@ -299,6 +297,30 @@ class TopicMessageAdmission {
         });
     }
 
+    cancelPending(scope) {
+        this.assertReady();
+        const key = conversationKey(scope);
+        const ids = new Set([...this.entries, ...(this.savingEntries || [])]
+            .filter(entry => conversationKey(entry.scope) === key)
+            .map(entry => entry.entryId));
+        for (const id of ids) this.cancelledEntryIds.add(id);
+        const attempt = this.relayAttempts.get(key);
+        if (attempt && !attempt.dispatched) {
+            attempt.cancelled = true;
+            attempt.stopIds = new Set([...(attempt.stopIds || []), ...ids]);
+        }
+        // Capture before queuing: later submissions are not part of this Stop.
+        return this.run(async () => {
+            const token = this.leases.get(key);
+            const next = this.entries.filter(entry =>
+                !ids.has(entry.entryId) || (token && entry.leaseToken === token))
+                .map(entry => ids.has(entry.entryId)
+                    ? { ...entry, cancellationRequested: true } : entry);
+            await this.save(next);
+            return { success: true, cancelled: ids.size, activeRetained: Boolean(token) };
+        });
+    }
+
     resume(scope) {
         return this.run(async () => {
             this.assertReady();
@@ -345,47 +367,44 @@ class TopicMessageAdmission {
         });
     }
 
+    // Compatibility entrypoint: all existing failure reporters now terminate locally.
     reportUncertain(scope, token, error) {
-        return this.run(async () => {
-            this.assertReady();
-            const key = conversationKey(scope);
-            if (this.leases.get(key) !== token) return { success: false, code: 'STALE_LEASE' };
-            const detail = String(error?.message || error || '终稿保存状态未确认');
-            let matched = false;
-            const next = this.entries.map(entry => {
-                if (conversationKey(entry.scope) !== key || entry.leaseToken !== token) return entry;
-                matched = true;
-                return { ...entry, state: 'uncertain', error: detail };
-            });
-            if (!matched) {
-                // Journal-only diagnostic: never enqueue or append this as a chat message.
-                next.push({
-                    entryId: randomUUID(), kind: 'lease-diagnostic', scope: copy(scope),
-                    message: { id: randomUUID(), role: 'assistant', name: '生成状态', content: '独立生成的终稿保存状态待核实' },
-                    triggerPolicy: 'none', enqueuedAt: Date.now(),
-                    state: 'uncertain', error: detail, leaseToken: token,
-                    committed: true, commitStarted: true,
-                });
-            }
-            await this.save(next);
-            // Diagnostics are not proof that execution stopped or saving failed.
-            // Keep ownership; explicit resume remains blocked while this lease exists.
-            return { success: true, retained: true };
-        });
+        return this.fail(scope, token, error);
     }
-    fail(scope, token, error) {
-        return this.run(async () => {
-            const key = conversationKey(scope);
-            if (this.leases.get(key) !== token) return { success: false, code: 'STALE_LEASE' };
-            await this.save(this.entries.map(entry =>
-                conversationKey(entry.scope) === key && entry.leaseToken === token
-                    ? { ...entry, state: 'failed', error: String(error || '推进失败') } : entry),
-                this.standaloneLeases.filter(lease =>
-                    !(conversationKey(lease.scope) === key && lease.token === token)));
+
+    async failNow(scope, token, error) {
+        this.assertReady();
+        const key = conversationKey(scope);
+        if (this.leases.get(key) !== token) return { success: false, code: 'STALE_LEASE' };
+        const attempt = this.relayAttempts.get(key);
+        if (attempt) attempt.cancelled = true;
+        const next = this.entries.filter(entry => conversationKey(entry.scope) !== key);
+        const leases = this.standaloneLeases.filter(lease => conversationKey(lease.scope) !== key);
+        for (const wake of [...this.waiters]) {
+            if (wake.admissionWait?.key === key) wake(Object.assign(
+                new Error('Topic generation failed'), { code: 'ADMISSION_FAILED' }));
+        }
+        // Clear runtime ownership even if the journal is unavailable. The startup
+        // recovery above removes any interrupted records that remain on disk.
+        try {
+            await this.save(next, leases);
+        } finally {
+            this.entries = next;
+            this.standaloneLeases = leases;
             this.leases.delete(key);
+            this.rounds.delete(key);
+            for (const wake of [...this.waiters]) {
+                if (wake.admissionWait?.key === key) wake(Object.assign(
+                    new Error('Topic generation failed'), { code: 'ADMISSION_FAILED' }));
+            }
             this.notify();
-            return { success: true };
-        });
+        }
+        this.logger.warn?.('[Admission] failed topic cleared', { scope, error: String(error?.message || error || '') });
+        return { success: true, cleared: true };
+    }
+
+    fail(scope, token, error) {
+        return this.run(() => this.failNow(scope, token, error));
     }
     transferToWaiting(scope, token, handoffOwner) {
         return this.run(async () => {
@@ -447,10 +466,12 @@ class TopicMessageAdmission {
         return { success: true, accepted: true };
     }
 
-    async pauseCancelledRelay(scope) {
+    async pauseCancelledRelay(scope, attempt = null) {
         const key = conversationKey(scope);
-        const paused = this.entries.map(entry => conversationKey(entry.scope) === key
-            ? { ...entry, state: 'recovered', error: '用户取消中继，等待明确继续' } : entry);
+        const paused = attempt?.stopIds
+            ? this.entries.filter(entry => !attempt.stopIds.has(entry.entryId))
+            : this.entries.map(entry => conversationKey(entry.scope) === key
+                ? { ...entry, state: 'recovered', error: '用户取消中继，等待明确继续' } : entry);
         try { await this.save(paused); }
         catch (error) {
             // A rejected write may have reached disk. Never let a later submit
@@ -493,8 +514,10 @@ class TopicMessageAdmission {
                 && (this.rounds.get(key) || 0) >= this.maxAutoRounds;
             if (attempt.cancelled || budgetBlocked) {
                 const reason = attempt.cancelled ? '用户取消中继，等待明确继续' : '自动推进预算已耗尽，等待人类确认继续';
-                await this.save(remaining.map(entry => conversationKey(entry.scope) === key
-                    ? { ...entry, state: 'recovered', error: reason } : entry),
+                await this.save(attempt.stopIds
+                    ? remaining.filter(entry => !attempt.stopIds.has(entry.entryId))
+                    : remaining.map(entry => conversationKey(entry.scope) === key
+                        ? { ...entry, state: 'recovered', error: reason } : entry),
                     this.standaloneLeases.filter(lease =>
                         !(conversationKey(lease.scope) === key && lease.token === token)));
                 this.leases.delete(key);
@@ -557,8 +580,16 @@ class TopicMessageAdmission {
     async drain(scope, { relayFrom = null, relayAttempt = null } = {}) {
             const key = conversationKey(scope);
             const stopIfCancelled = async () => {
+                const cancelled = this.entries.filter(entry =>
+                    conversationKey(entry.scope) === key && this.cancelledEntryIds.has(entry.entryId));
+                if (cancelled.length) {
+                    const ids = new Set(cancelled.map(entry => entry.entryId));
+                    await this.save(this.entries.filter(entry => !ids.has(entry.entryId)));
+                    for (const id of ids) this.cancelledEntryIds.delete(id);
+                    return true;
+                }
                 if (!relayAttempt?.cancelled) return false;
-                await this.pauseCancelledRelay(scope);
+                await this.pauseCancelledRelay(scope, relayAttempt);
                 return true;
             };
             if (this.leases.has(key)) return;
@@ -622,8 +653,12 @@ class TopicMessageAdmission {
             const ids = new Set(batch.map(entry => entry.entryId));
             await this.save(this.entries.map(entry => ids.has(entry.entryId)
                 ? { ...entry, state: 'advancing', leaseToken: token } : entry));
+            if (batch.some(entry => this.cancelledEntryIds.has(entry.entryId))) {
+                await stopIfCancelled();
+                return;
+            }
             if (relayAttempt?.cancelled) {
-                await this.pauseCancelledRelay(scope);
+                await this.pauseCancelledRelay(scope, relayAttempt);
                 return;
             }
             // No await between this final decision and dispatch reservation.
@@ -641,11 +676,7 @@ class TopicMessageAdmission {
                 })).catch(error => {
                     this.run(async () => {
                         if (this.leases.get(key) !== token) return;
-                        await this.save(this.entries.map(entry => entry.leaseToken === token
-                            ? { ...entry, state: 'failed', error: error.message || String(error) } : entry));
-                        // Explicit resume is allowed after rejection, but never auto-retry.
-                        if (this.leases.get(key) === token) this.leases.delete(key);
-                        this.notify();
+                        await this.failNow(scope, token, error);
                     }).catch(storeError => this.logger.error?.('[Admission] advance failure journal', storeError));
                 });
             });
@@ -653,6 +684,7 @@ class TopicMessageAdmission {
 
         async dispose() {
         this.closed = true;
+        this.listeners.clear();
         for (const wake of [...this.waiters]) wake(new Error('Admission disposed'));
         await this.tail.catch(() => {});
     }
