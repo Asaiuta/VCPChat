@@ -1,13 +1,16 @@
+import { createOffscreenDomWindow } from './renderer/offscreenDomWindow.js';
+import { createRenderWorkerClient } from './renderer/renderWorkerClient.js';
+import { createRenderTemplateCompiler } from './renderer/renderTemplateCompiler.js';
+import { tokenizeVcpDocument } from './renderer/vcpDocumentScanner.js';
 import { sanitizeToolDataHtml } from './renderer/toolDataHtml.js';
 import { stripToolBatches, collectToolBatchRanges } from './renderer/toolBatchRegions.js';
 import { splitToolBatchDomains, transformToolBatchText, composeToolBatchHtml } from './renderer/toolBatchDomains.js';
-import { collectToolDataRanges } from './renderer/toolResultRegions.js';
 import { isContextCheckpoint } from './chat/contextCompactionState.js';
 import { createProjectForgeTopicSurface } from './renderer/projectForgeTopicSurface.js';
 import { avatarColorCache, getDominantAvatarColor } from './renderer/colorUtils.js';
 import { createImageHandler } from './renderer/imageHandler.js';
 import { prepareChatMediaHtml, cleanupChatMedia } from './renderer/mediaLifecycle.js';
-import { processAnimationsInContent, cleanupAnimationsInContent } from './renderer/animation.js';
+import { processAnimationsInContent as processOwnedAnimations, cleanupAnimationsInContent as cleanupOwnedAnimations } from './renderer/animation.js';
 import { createVisibilityOptimizer } from './renderer/visibilityOptimizer.js';
 
 import { createMessageSkeleton, formatMessageTimestamp } from './renderer/domBuilder.js';
@@ -68,6 +71,32 @@ const middleClickHandler = options.middleClickHandler || createMiddleClickHandle
 const imageHandler = options.imageHandler || createImageHandler({ fixUrl: emoticonUrlFixer.fixEmoticonUrl });
 const colorExtractionPromises = new Map();
 const ownedStyleElements = new Set();
+const persistedAvatarColorKeys = new Set();
+const scopedCssCache = new Map();
+const ownedAnimationContents = new Set();
+function processAnimationsInContent(content, optimizer) {
+    if (rendererDisposed) return;
+    const controller = processOwnedAnimations(content, optimizer);
+    if (controller && !ownedAnimationContents.has(content)) {
+        ownedAnimationContents.add(content);
+        controller.own(() => ownedAnimationContents.delete(content));
+    }
+    return controller;
+}
+function cleanupAnimationsInContent(content) {
+    ownedAnimationContents.delete(content);
+    cleanupOwnedAnimations(content);
+}
+
+function scopeCssCached(source, scopeId) {
+    let cache = scopedCssCache.get(scopeId);
+    if (!cache) scopedCssCache.set(scopeId, cache = new Map());
+    if (cache.has(source)) return cache.get(source);
+    const css = contentProcessor.scopeCss(source, scopeId);
+    if (cache.size >= 64) cache.delete(cache.keys().next().value);
+    cache.set(source, css);
+    return css;
+}
 const projectForgeTopicSurface = createProjectForgeTopicSurface();
 
 async function getDominantAvatarColorCached(url) {
@@ -89,38 +118,46 @@ const toolResultFullContentMap = new Map(); // placeholderId -> { raw: string, f
 let toolResultContentIdCounter = 0;
 const lazyToolContents = new Map();
 let lazyToolSequence = 0;
+// Only the synchronous template build owns this collector. Cached descriptors never
+// contain DOM, owner callbacks or runtime IDs; each projection gets fresh bindings.
+let lazyToolTemplate = null;
 
 function registerLazyTool(entry) {
+    if (lazyToolTemplate) {
+        const id = `template-${lazyToolTemplate.length}-${hashStringFNV1a(entry.raw)}`;
+        lazyToolTemplate.push({ id, ...entry });
+        return id;
+    }
     const id = `${surfaceId}-${++lazyToolSequence}`;
     lazyToolContents.set(id, entry);
     return id;
 }
 
-function deferToolRequest(_block, source) {
-    const field = key => readToolRequestField(source, key);
-    const name = field('tool_name') || source.match(/<tool_name>([\s\S]*?)<\/tool_name>/i)?.[1]?.trim() || '';
-    if (name.toLowerCase() === 'dailynote') return null;
-    const jev = parseJevToolUse(field('JEV'));
-    const problem = describeToolRequestMarkerProblem({
-        toolName: name,
-        malformedFields: findMalformedToolFields(source),
-        isJev: Boolean(jev),
-        content: source
-    });
-    const displayName = jev?.displayName || problem.displayName;
-    const summarySource = ['command', 'command1', 'path', 'filePath', 'powershell', 'text', 'keys', 'paths', 'file', 'glob', 'query', 'url', 'prompt']
-        .map(key => {
-            const value = field(key);
-            return value ? `${key}:「始」${value.slice(0, 240)}「末」` : '';
-        }).filter(Boolean).join('\n');
-    const id = registerLazyTool({ type: 'request', raw: source, meta: { summarySource, fingerprint: hashStringFNV1a(source) } });
-    const kind = jev ? 'jev-tool-use' : 'tool-use';
-    const hint = problem.hint ? ` <span class="vcp-tool-malformed-hint">${escapeHtml(problem.hint)}</span>` : '';
-    const label = jev ? (displayName ? 'JEVToolUse:' : 'JEVToolUse') : 'VCP-ToolUse:';
-    const nameHtml = displayName ? ` <span class="vcp-tool-name-highlight">${escapeHtml(displayName)}</span>` : '';
-    const bubbleClass = `vcp-tool-use-bubble${jev ? ' vcp-jev-tool-use-bubble' : ''}${problem.isMalformed ? ' is-malformed' : ''}`;
-    return `<div class="${bubbleClass}" data-vcp-block-type="${kind}" data-vcp-preserve-children="true" data-vcp-lazy-tool-id="${id}"><div class="vcp-tool-summary"><span class="vcp-tool-label">${label}</span>${nameHtml}${hint}</div><div class="vcp-tool-details"></div></div>`;
+function buildRenderTemplate(text, options) {
+    const previous = lazyToolTemplate;
+    const tools = [];
+    lazyToolTemplate = tools;
+    try {
+        return { html: renderMarkdownToHtmlUncached(text, options), tools };
+    } finally {
+        lazyToolTemplate = previous;
+    }
 }
+
+function hydrateRenderTemplate(template) {
+    // Allocate only IDs present in the final HTML (a malformed Markdown domain may
+    // have swallowed a placeholder). Never register data for an unmounted token.
+    const tools = new Map(template.tools.map(entry => [entry.id, entry]));
+    const ids = new Map();
+    return template.html.replace(/data-vcp-lazy-tool-id="([^"]+)"/g, (attribute, id) => {
+        const entry = tools.get(id);
+        if (!entry) return attribute;
+        if (!ids.has(id)) ids.set(id, registerLazyTool(entry));
+        return `data-vcp-lazy-tool-id="${ids.get(id)}"`;
+    });
+}
+
+const deferToolRequest = (...args) => templateCompiler.deferToolRequest(...args);
 
 function bindLazyTools(root) {
     root?.querySelectorAll?.('[data-vcp-lazy-tool-id]').forEach(block => {
@@ -168,12 +205,12 @@ function releaseLazyTools(root, incomingHtml = '') {
     });
 }
 
-// 🟢 完整 Markdown → HTML 渲染缓存：只缓存 raw HTML 字符串，不缓存 DOM / 后处理结果 / message 对象。
-const RENDER_PIPELINE_VERSION = '2026-07-26-dollar-guard-v3';
+// Cache inert HTML templates + lazy tool descriptors, never DOM / postprocessing /
+// message objects. Runtime registrations are regenerated on every cache hit.
+const RENDER_PIPELINE_VERSION = '2026-11-15-parse-registration-v3';
 const RENDER_HTML_CACHE_MAX_BYTES = 20 * 1024 * 1024;
 const RENDER_HTML_CACHE_MAX_ENTRIES = 500;
 const RENDER_HTML_CACHE_MAX_SINGLE_BYTES = 1024 * 1024;
-const RENDER_HTML_CACHE_MIN_TEXT_LENGTH = 512;
 const RENDER_HTML_CACHE_MAX_TEXT_LENGTH = 512 * 1024;
 const renderHtmlCache = new Map();
 let renderHtmlCacheBytes = 0;
@@ -195,232 +232,7 @@ const renderHtmlCacheStats = {
  * @param {string} text 预处理后的文本
  * @returns {{text: string, map: Map<string, string>}} 替换后的文本和映射表
  */
-function protectLatexBlocks(text) {
-    const map = new Map();
-    let id = 0;
-
-    const createLatexPlaceholder = (latexSource) => {
-        const placeholder = `%%LATEX_BLOCK_${id}%%`;
-        map.set(placeholder, latexSource);
-        id++;
-        return placeholder;
-    };
-
-    const looksLikeSafeSingleDollarMath = (content) => {
-        const trimmedContent = (content || '').trim();
-        if (!trimmedContent) return false;
-
-        const hasExplicitMathSignal = /\\|[\^_=+\-*/<>]|[A-Za-z]\s*\(|\b(?:lim|sum|int|frac|sqrt|alpha|beta|gamma|theta|lambda|mu|sigma|pi|infty)\b/i.test(trimmedContent);
-        const isSimpleNumericMath = /^[+-]?(?:\d+(?:[.,]\d+)*|\.\d+)(?:\s*(?:%|\\%|‰|°))?$/.test(trimmedContent);
-        const isSimpleIdentifierMath = /^[A-Za-z_][A-Za-z0-9_]*$/.test(trimmedContent);
-
-        // 数字开头的候选仍需严格检查，避免把价格与价格单位误当作公式。
-        // `$1$`、`$20\%$`、`$2^n$`、`$1/2$` 等明确闭合数学保持放行；
-        // 真正的价格通常是 `$123` 后接普通文本而没有闭合 `$`。
-        if (/^\d/.test(trimmedContent) && !hasExplicitMathSignal && !isSimpleNumericMath) return false;
-
-        // 路径、模板表达式与 Markdown 表格跨列候选继续排除。
-        // 闭合的 `$x$`、`$n$`、`$abc$` 视为标准行内数学；
-        // 不闭合的 `$PATH` 不会被扫描器选为候选，因此无需按标识符统一拒绝。
-        if (trimmedContent.startsWith('/')) return false;
-        if (trimmedContent.startsWith('{') && trimmedContent.endsWith('}')) return false;
-        if (trimmedContent.includes('|')) return false;
-
-        return hasExplicitMathSignal || isSimpleNumericMath || isSimpleIdentifierMath;
-    };
-
-    const protectInlineDollarMathInText = (source) => {
-        let result = '';
-        let index = 0;
-
-        while (index < source.length) {
-            const openIndex = source.indexOf('$', index);
-            if (openIndex === -1) {
-                result += source.slice(index);
-                break;
-            }
-
-            result += source.slice(index, openIndex);
-
-            const previousChar = source[openIndex - 1] || '';
-            const nextOpenChar = source[openIndex + 1] || '';
-
-            // 开始符不能是转义美元、双美元、单词内部美元。
-            if (previousChar === '\\' || previousChar === '$' || nextOpenChar === '$' || /\w/.test(previousChar)) {
-                result += '$';
-                index = openIndex + 1;
-                continue;
-            }
-
-            let closeIndex = -1;
-            let cursor = openIndex + 1;
-            while (cursor < source.length) {
-                const dollarIndex = source.indexOf('$', cursor);
-                if (dollarIndex === -1) break;
-
-                if (source[dollarIndex - 1] === '\\') {
-                    cursor = dollarIndex + 1;
-                    continue;
-                }
-
-                const nextCloseChar = source[dollarIndex + 1] || '';
-                if (!/\w/.test(nextCloseChar)) {
-                    closeIndex = dollarIndex;
-                    break;
-                }
-
-                cursor = dollarIndex + 1;
-            }
-
-            if (closeIndex === -1) {
-                result += '$';
-                index = openIndex + 1;
-                continue;
-            }
-
-            const content = source.slice(openIndex + 1, closeIndex);
-            if (content.length > 1200 || content.includes('\n') || !looksLikeSafeSingleDollarMath(content)) {
-                // 不安全候选只释放开头 $，不吞掉到下一个 $ 的整段文本；
-                // 这样 "$12.5 ... $2.49 ... $\Delta...$" 不会因价格误配而跳过后续真公式。
-                result += '$';
-                index = openIndex + 1;
-                continue;
-            }
-
-            result += createLatexPlaceholder(`\\(${content.trim()}\\)`);
-            index = closeIndex + 1;
-        }
-
-        return result;
-    };
-
-    const protectInlineDollarMath = (source) => {
-        // HTML 标签是硬边界：美元定界符只能在同一个纯文本片段内闭合。
-        // 这既避免读取 style/data 属性中的 `$`，也避免把
-        // `<strong>$35.50</strong> ... <span>$12.25</span>` 跨元素配成公式。
-        // 仅识别形似真实标签的片段，数学表达式中的比较运算符 `<`、`>` 仍留在文本中。
-        const htmlTagRegex = /<!--[\s\S]*?-->|<\/?[A-Za-z][A-Za-z0-9:-]*(?:\s+(?:"[^"]*"|'[^']*'|[^'"<>])*)?\s*\/?>/g;
-        let result = '';
-        let cursor = 0;
-        let tagMatch;
-
-        while ((tagMatch = htmlTagRegex.exec(source)) !== null) {
-            result += protectInlineDollarMathInText(source.slice(cursor, tagMatch.index));
-            result += tagMatch[0];
-            cursor = tagMatch.index + tagMatch[0].length;
-        }
-
-        result += protectInlineDollarMathInText(source.slice(cursor));
-        return result;
-    };
-
-    // 🟢 关键修复：先保护代码围栏，防止代码块内的 $ / $$ 被误匹配为 LaTeX
-    // 例如 Python 代码 `b'$$' in data` 中的 $$ 会与文档后面的 $$ 数学公式匹配，
-    // 导致 LaTeX 占位符跨越并吞噬中间的代码围栏标记
-    const codeFenceMap = new Map();
-    let codeFenceId = 0;
-
-    // 使用逐行状态机识别代码围栏（比正则更可靠）
-    const lines = text.split('\n');
-    const resultLines = [];
-    let fenceStartLine = -1;
-    let fenceBacktickCount = 0;
-
-    for (let i = 0; i < lines.length; i++) {
-        const trimmed = lines[i].trimStart();
-
-        if (fenceStartLine === -1) {
-            // 不在代码块内：检测开始围栏
-            const openMatch = trimmed.match(/^(`{3,})/);
-            if (openMatch) {
-                fenceStartLine = resultLines.length;
-                fenceBacktickCount = openMatch[1].length;
-                resultLines.push(lines[i]);
-            } else {
-                resultLines.push(lines[i]);
-            }
-        } else {
-            // 在代码块内：检测关闭围栏
-            const closeMatch = trimmed.match(/^(`{3,})\s*$/);
-            if (closeMatch && closeMatch[1].length >= fenceBacktickCount) {
-                // 找到关闭围栏，将整个代码块替换为占位符
-                resultLines.push(lines[i]);
-                const blockLines = resultLines.splice(fenceStartLine);
-                const blockContent = blockLines.join('\n');
-                const placeholder = `%%CODEFENCE_FOR_LATEX_${codeFenceId}%%`;
-                codeFenceMap.set(placeholder, blockContent);
-                codeFenceId++;
-                resultLines.push(placeholder);
-                fenceStartLine = -1;
-                fenceBacktickCount = 0;
-            } else {
-                resultLines.push(lines[i]);
-            }
-        }
-    }
-
-    // 如果有未关闭的代码围栏（流式传输场景），也保护起来
-    if (fenceStartLine !== -1) {
-        const blockLines = resultLines.splice(fenceStartLine);
-        const blockContent = blockLines.join('\n');
-        const placeholder = `%%CODEFENCE_FOR_LATEX_${codeFenceId}%%`;
-        codeFenceMap.set(placeholder, blockContent);
-        codeFenceId++;
-        resultLines.push(placeholder);
-    }
-
-    let processed = resultLines.join('\n');
-
-    // 保护顺序很重要：先保护 display math ($$...$$)，再保护 inline math。
-    // 块级 $$ 只接受“独占一行”的定界符，避免把 `$10`、`$$` 字符串或表格内容误贪成跨段公式。
-    // 同时保护 \[...\] 和 \(...\)。
-
-    // 1. 保护 $$...$$ (display math)。
-    // 支持两种常见模型输出：
-    //   A) 定界符独占行：
-    //      $$
-    //      ...
-    //      $$
-    //   B) 整个块压在同一独立行：
-    //      $$...$$
-    // 同时保持“定界符所在行必须独立”，避免把 `$10`、代码字符串或表格内容误吞成跨段公式。
-    processed = processed.replace(/(^|\n)([ \t]*)\$\$[ \t]*\n([\s\S]*?)\n[ \t]*\$\$[ \t]*(?=\n|$)/g, (match, linePrefix) => {
-        return `${linePrefix}${createLatexPlaceholder(match.slice(linePrefix.length))}`;
-    });
-    processed = processed.replace(/(^|\n)([ \t]*)\$\$([^\n]*?\S[^\n]*?)\$\$[ \t]*(?=\n|$)/g, (match, linePrefix) => {
-        return `${linePrefix}${createLatexPlaceholder(match.slice(linePrefix.length))}`;
-    });
-
-    // 2. 保护 \[...\] (display math) - 支持多行
-    processed = processed.replace(/(^|\n)([ \t]*)\\\[[ \t]*\n?([\s\S]*?)\n?[ \t]*\\\][ \t]*(?=\n|$)/g, (match, linePrefix) => {
-        return `${linePrefix}${createLatexPlaceholder(match.slice(linePrefix.length))}`;
-    });
-
-    // 3. 保护 \(...\) (inline math)
-    processed = processed.replace(/\\\(([\s\S]*?)\\\)/g, (match) => {
-        return createLatexPlaceholder(match);
-    });
-
-    // 4. 保护安全的 $...$ (inline math)。
-    // 为避免 KaTeX auto-render 的单美元误触发，这里把安全单美元公式转换为 \( ... \) 形式交给后处理渲染。
-    // 闭合的 $x$、$n$、$abc$ 与 $O(L^2) \to O(1)$ 会渲染；
-    // 不闭合的 $10、$PATH、模板 ${value}、表格跨列 $...|...$ 不会触发。
-    // 行内公式内部允许出现转义美元 \$，并且不安全价格候选不会吞掉后续真实公式。
-    processed = protectInlineDollarMath(processed);
-
-    // 如果安全单美元公式原本是缩进独立行，Markdown 会把它当作缩进代码块。
-    // 这里仅对“整行只有 LaTeX 占位符”的行去缩进，不影响列表项、引用块或普通缩进文本。
-    processed = processed.replace(/(^|\n)[ \t]{4,}(%%LATEX_BLOCK_\d+%%)(?=[ \t]*(?:\n|$))/g, (match, linePrefix, placeholder) => {
-        return `${linePrefix}${placeholder}`;
-    });
-
-    // 🟢 恢复代码围栏（占位符 → 原始代码块）
-    for (const [placeholder, original] of codeFenceMap.entries()) {
-        processed = processed.split(placeholder).join(original);
-    }
-
-    return { text: processed, map };
-}
+const protectLatexBlocks = (...args) => templateCompiler.protectLatexBlocks(...args);
 
 /**
  * 在 marked 解析后恢复被保护的 LaTeX 块。
@@ -428,14 +240,7 @@ function protectLatexBlocks(text) {
  * @param {Map<string, string>} map 占位符到原始 LaTeX 的映射
  * @returns {string} 恢复后的 HTML
  */
-function restoreLatexBlocks(html, map) {
-    if (!map || map.size === 0 || typeof html !== 'string') return html;
-
-    // P1-5：单遍恢复 LaTeX 占位符，避免公式数量较多时按占位符多次全 HTML 扫描。
-    return html.replace(/%%LATEX_BLOCK_(\d+)%%/g, (placeholder) => {
-        return map.get(placeholder) ?? placeholder;
-    });
-}
+const restoreLatexBlocks = (...args) => templateCompiler.restoreLatexBlocks(...args);
 
 // --- Pre-compiled Regular Expressions for Performance ---
 const TOOL_REGEX = /(?<!`)<<<\[TOOL_REQUEST\]>>>(.*?)<<<\[END_TOOL_REQUEST\]>>>(?!`)/gs;
@@ -504,113 +309,13 @@ function containsStyleTag(text) {
     return typeof text === 'string' && HTML_STYLE_TAG_REGEX.test(text);
 }
 
-function escapeRawHtmlOutsideCodeFences(markdownText) {
-    if (typeof markdownText !== 'string' || !TOOL_RESULT_RAW_HTML_LINE_REGEX.test(markdownText)) {
-        return markdownText;
-    }
+const escapeRawHtmlOutsideCodeFences = (...args) => templateCompiler.escapeRawHtmlOutsideCodeFences(...args);
 
-    const lines = markdownText.split('\n');
-    let inFence = false;
-    let fenceMarker = '';
+const fenceCompleteHtmlToolResult = (...args) => templateCompiler.fenceCompleteHtmlToolResult(...args);
 
-    return lines.map((line) => {
-        const fenceMatch = line.match(FENCE_LINE_REGEX);
-        if (fenceMatch) {
-            const marker = fenceMatch[1];
-            if (!inFence) {
-                inFence = true;
-                fenceMarker = marker[0];
-            } else if (marker[0] === fenceMarker) {
-                inFence = false;
-                fenceMarker = '';
-            }
-            return line;
-        }
+const sealToolResultMarkdownSource = (...args) => templateCompiler.sealToolResultMarkdownSource(...args);
 
-        if (inFence) {
-            return line;
-        }
-
-        if (!TOOL_RESULT_RAW_HTML_LINE_REGEX.test(line)) {
-            return line;
-        }
-
-        return line.replace(/&/g, '\x26amp;').replace(/</g, '\x26lt;').replace(/>/g, '\x26gt;');
-    }).join('\n');
-}
-
-function fenceCompleteHtmlToolResult(markdownText) {
-    if (typeof markdownText !== 'string' || !TOOL_RESULT_COMPLETE_HTML_REGEX.test(markdownText)) {
-        return markdownText;
-    }
-
-    const lines = markdownText.split('\n');
-    const result = [];
-    let inFence = false;
-    let fenceMarker = '';
-
-    for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-        const fenceMatch = line.match(FENCE_LANG_LINE_REGEX);
-        if (fenceMatch) {
-            const marker = fenceMatch[1];
-            if (!inFence) {
-                inFence = true;
-                fenceMarker = marker[0];
-            } else if (marker[0] === fenceMarker) {
-                inFence = false;
-                fenceMarker = '';
-            }
-            result.push(line);
-            continue;
-        }
-
-        if (inFence || !TOOL_RESULT_COMPLETE_HTML_REGEX.test(line)) {
-            result.push(line);
-            continue;
-        }
-
-        const blockLines = [line];
-        let cursor = i + 1;
-        while (cursor < lines.length) {
-            blockLines.push(lines[cursor]);
-            if (/<\s*\/\s*html\s*>/i.test(lines[cursor])) {
-                break;
-            }
-            cursor++;
-        }
-
-        result.push('```html');
-        result.push(blockLines.join('\n'));
-        result.push('```');
-        i = cursor;
-    }
-
-    return result.join('\n');
-}
-
-function sealToolResultMarkdownSource(markdownText) {
-    if (typeof markdownText !== 'string') return '';
-    const fencedHtml = fenceCompleteHtmlToolResult(markdownText);
-    return escapeRawHtmlOutsideCodeFences(fencedHtml);
-}
-
-function renderSafeToolResultMarkdown(markdownText) {
-    const sealedMarkdown = sealToolResultMarkdownSource(markdownText);
-
-    if (!mainRendererReferences.markedInstance) {
-        return `<pre class="vcp-tool-result-raw-content">${escapeHtml(sealedMarkdown)}</pre>`;
-    }
-
-    try {
-        return sanitizeToolDataHtml(
-            mainRendererReferences.markedInstance.parse(sealedMarkdown, TOOL_RESULT_SAFE_MARKDOWN_OPTIONS),
-            mainRendererReferences.document || mainRendererReferences.chatMessagesDiv?.ownerDocument
-        );
-    } catch (e) {
-        return `<pre class="vcp-tool-result-raw-content">${escapeHtml(sealedMarkdown)}</pre>`;
-    }
-}
+const renderSafeToolResultMarkdown = (...args) => templateCompiler.renderSafeToolResultMarkdown(...args);
 
 /**
  * Generates a unique ID for scoping CSS.
@@ -965,451 +670,7 @@ function applyFrontendRegexRules(text, rules, role, depth) {
  * @param {Map} [codeBlockMap] Map of code block placeholders to their original content.
  * @returns {string} The processed text with special blocks as HTML.
  */
-function transformSpecialBlocks(text, codeBlockMap, thoughtChainMap = null, toolRequestSourceMap = null) {
-    let processed = text;
-
-    const restoreBlocks = (textStr) => {
-        if (!textStr || !codeBlockMap) return textStr;
-        let res = textStr;
-        for (const [placeholder, block] of codeBlockMap.entries()) {
-            if (res.includes(placeholder)) {
-                res = res.replace(placeholder, () => block);
-            }
-        }
-        return res;
-    };
-
-    // 🟢 架构级修复：VCP Tool Results 不再在此处理
-    // 工具结果块在 contentPipeline 中被提取为占位符，贯穿 Markdown 解析后
-    // 由 restoreRenderedToolResults() 独立渲染并恢复，彻底避免内部语法干扰
-
-    const createVcpEndMarkerRegex = (isEscape) => {
-        return isEscape
-            ? /[「{]末[Ee][Ss][Cc][Aa][Pp][Ee][」}]/gi
-            : /[「{]末[」}]/g;
-    };
-
-    const extractMarkedField = (source, labelRegex) => {
-        if (!source || typeof source !== 'string') return null;
-
-        const labelMatch = labelRegex.exec(source);
-        if (!labelMatch) return null;
-
-        const startRegex = /[「{]始(?:[Ee][Ss][Cc][Aa][Pp][Ee])?[」}]/gi;
-        startRegex.lastIndex = labelMatch.index + labelMatch[0].length;
-        const startMatch = startRegex.exec(source);
-        if (!startMatch) return null;
-
-        // 字段名和起始标记之间只允许空白，避免误吞到后续字段
-        if (source.slice(labelMatch.index + labelMatch[0].length, startMatch.index).trim() !== '') {
-            return null;
-        }
-
-        const startMarker = startMatch[0];
-        const isEscape = /escape/i.test(startMarker);
-        const contentStart = startMatch.index + startMarker.length;
-        const endRegex = createVcpEndMarkerRegex(isEscape);
-        endRegex.lastIndex = contentStart;
-        const endMatch = endRegex.exec(source);
-
-        if (!endMatch) {
-            return source.slice(contentStart).trim();
-        }
-
-        return source.slice(contentStart, endMatch.index).trim();
-    };
-
-    const renderMarkdownField = (rawText) => {
-        const restoredText = restoreBlocks(rawText || '');
-        if (mainRendererReferences.markedInstance) {
-            try {
-                return mainRendererReferences.markedInstance.parse(restoredText);
-            } catch (e) {
-                return escapeHtml(restoredText);
-            }
-        }
-        return escapeHtml(restoredText);
-    };
-
-    const getDailyNoteAgentInfo = (source) => {
-        const maid = extractMarkedField(source, /(?:maid|maidName):\s*/i) || '';
-        const valet = extractMarkedField(source, /(?:valet|valetName):\s*/i) || '';
-
-        if (valet) {
-            return {
-                name: valet,
-                type: 'valet',
-                gender: 'male',
-                label: 'Valet',
-                title: "Valet's Diary"
-            };
-        }
-
-        return {
-            name: maid,
-            type: 'maid',
-            gender: 'female',
-            label: 'Maid',
-            title: "Maid's Diary"
-        };
-    };
-
-    const renderDailyNoteCreate = ({ agentName, agentType = 'maid', agentGender = 'female', agentLabel = 'Maid', defaultTitle = "Maid's Diary", date, fileName, folder, diaryContent, diaryTag }) => {
-        let html = `<div class="maid-diary-bubble ${agentType}-diary-bubble" data-vcp-block-type="maid-diary" data-agent-gender="${escapeHtml(agentGender)}" data-vcp-preserve-children="true">`;
-        html += `<div class="diary-header">`;
-        html += `<span class="diary-title">${fileName ? escapeHtml(fileName) : escapeHtml(defaultTitle)}</span>`;
-        if (date) {
-            html += `<span class="diary-date">${escapeHtml(date)}</span>`;
-        }
-        html += `</div>`;
-
-        if (agentName || folder) {
-            html += `<div class="diary-maid-info">`;
-            if (agentName) {
-                html += `<span class="diary-maid-label">${escapeHtml(agentLabel)}:</span> `;
-                html += `<span class="diary-maid-name">${escapeHtml(agentName)}</span>`;
-            }
-            if (folder) {
-                if (agentName) html += ` <span class="diary-meta-separator">·</span> `;
-                html += `<span class="diary-folder-label">Folder:</span> `;
-                html += `<span class="diary-folder-name">${escapeHtml(folder)}</span>`;
-            }
-            html += `</div>`;
-        }
-
-        let diaryBody = diaryContent || '[日记内容解析失败]';
-        if (diaryTag) {
-            diaryBody += `\n\nTag:${diaryTag}`;
-        }
-
-        html += `<div class="diary-content">${renderMarkdownField(diaryBody)}</div>`;
-        html += `</div>`;
-
-        return `\n\n${html}\n\n`;
-    };
-
-    const renderDailyNoteUpdate = ({ agentName, agentType = 'maid', agentGender = 'female', folder, target, replace }) => {
-        const hasTarget = target && target.trim();
-        const hasReplace = replace && replace.trim();
-
-        let html = `<div class="maid-diary-update-bubble ${agentType}-diary-update-bubble" data-vcp-block-type="maid-diary-update" data-agent-gender="${escapeHtml(agentGender)}" data-vcp-preserve-children="true">`;
-        html += `<div class="diary-update-header">`;
-        html += `<span class="diary-update-title">DailyNote Update</span>`;
-        if (agentName || folder) {
-            html += `<span class="diary-update-meta">`;
-            if (agentName) html += `<span class="diary-maid-name">${escapeHtml(agentName)}</span>`;
-            if (agentName && folder) html += ` <span class="diary-meta-separator">·</span> `;
-            if (folder) html += `<span class="diary-folder-name">${escapeHtml(folder)}</span>`;
-            html += `</span>`;
-        }
-        html += `</div>`;
-
-        html += `<div class="diary-update-body">`;
-        html += `<div class="diary-update-side diary-update-before">`;
-        html += `<div class="diary-update-label">A</div>`;
-        html += `<div class="diary-update-content">${hasTarget ? renderMarkdownField(target) : '<em>原文解析失败</em>'}</div>`;
-        html += `</div>`;
-        html += `<div class="diary-update-arrow" aria-hidden="true">→</div>`;
-        html += `<div class="diary-update-side diary-update-after">`;
-        html += `<div class="diary-update-label">B</div>`;
-        html += `<div class="diary-update-content">${hasReplace ? renderMarkdownField(replace) : '<em>替换内容解析失败</em>'}</div>`;
-        html += `</div>`;
-        html += `</div>`;
-        html += `</div>`;
-
-        return `\n\n${html}\n\n`;
-    };
-
-    // Process Tool Call Summaries
-    const renderToolCallSummaryBlock = (rawContent) => renderToolCallSummaryHtml(restoreBlocks(rawContent || ''));
-
-
-    const transformToolCallSummariesInRoleSections = (source) => {
-        if (typeof source !== 'string' || !source.includes('[本轮工具调用摘要:]') || !source.includes('<<<[ROLE_DIVIDE_')) {
-            return source;
-        }
-
-        let result = '';
-        let cursor = 0;
-        const roleStartRegex = /<<<\[ROLE_DIVIDE_(SYSTEM|ASSISTANT|USER)\]>>>/g;
-
-        while (cursor < source.length) {
-            roleStartRegex.lastIndex = cursor;
-            const startMatch = roleStartRegex.exec(source);
-            if (!startMatch) {
-                result += source.slice(cursor);
-                break;
-            }
-
-            result += source.slice(cursor, startMatch.index);
-
-            const role = startMatch[1];
-            const endToken = `<<<[END_ROLE_DIVIDE_${role}]>>>`;
-            const sectionContentStart = startMatch.index + startMatch[0].length;
-            const endIndex = source.indexOf(endToken, sectionContentStart);
-
-            if (endIndex === -1) {
-                result += source.slice(startMatch.index);
-                break;
-            }
-
-            const sectionContent = source.slice(sectionContentStart, endIndex);
-            const transformedSectionContent = sectionContent.replace(TOOL_CALL_SUMMARY_REGEX, (match, rawContent) => {
-                return renderToolCallSummaryBlock(rawContent);
-            });
-            TOOL_CALL_SUMMARY_REGEX.lastIndex = 0;
-
-            result += startMatch[0] + transformedSectionContent + endToken;
-            cursor = endIndex + endToken.length;
-        }
-
-        return result;
-    };
-
-    processed = transformToolCallSummariesInRoleSections(processed);
-
-    // Process Tool Requests
-    processed = replaceToolRequestBlocks(processed, (match, content) => {
-        // 保护阶段已把「始」「末」字段值转义过一次（日记分支仍按这份交给 Markdown）。
-        // 工具气泡在输出处自己转义，必须用原文，否则引号等会显示成 &#039;。
-        const source = toolRequestSourceMap?.get(match) ?? content;
-        const detectedToolName = extractMarkedField(content, /tool_name:\s*/i);
-        const detectedCommand = extractMarkedField(content, /command:\s*/i);
-        const detectedJev = parseJevToolUse(extractMarkedField(source, /JEV:\s*/i));
-        const normalizedToolName = (detectedToolName || '').trim().toLowerCase();
-        const normalizedCommand = (detectedCommand || '').trim().toLowerCase();
-
-        // DailyNote 新版 Tool Request:
-        // 1) tool_name 为 DailyNote 且 command 为 update 时渲染为 A → B 替换预览；
-        // 2) 如果没有 create/update 指令，但同时存在 target 和 replace 字段，也按 update 渲染；
-        // 3) tool_name 为 DailyNote 且 command 为 create 时渲染为日记创建；
-        // 4) 如果没有 create/update 指令，但存在 content 字段，也按 create 渲染。
-        const dailyNoteContent = extractMarkedField(content, /Content:\s*/i);
-        const dailyNoteTarget = extractMarkedField(content, /target:\s*/i);
-        const dailyNoteReplace = extractMarkedField(content, /replace:\s*/i);
-        const isDailyNoteTool = normalizedToolName === 'dailynote';
-        const isDailyNoteUpdate = isDailyNoteTool && (normalizedCommand === 'update' || (!normalizedCommand && dailyNoteTarget && dailyNoteReplace));
-        const isDailyNoteCreate = isDailyNoteTool && !isDailyNoteUpdate && (normalizedCommand === 'create' || (!normalizedCommand && dailyNoteContent));
-
-        if (isDailyNoteCreate) {
-            const dailyNoteAgent = getDailyNoteAgentInfo(content);
-            return renderDailyNoteCreate({
-                agentName: dailyNoteAgent.name,
-                agentType: dailyNoteAgent.type,
-                agentGender: dailyNoteAgent.gender,
-                agentLabel: dailyNoteAgent.label,
-                defaultTitle: dailyNoteAgent.title,
-                date: extractMarkedField(content, /Date:\s*/i) || '',
-                fileName: extractMarkedField(content, /fileName:\s*/i) || '',
-                folder: extractMarkedField(content, /folder:\s*/i) || '',
-                diaryContent: dailyNoteContent || '[日记内容解析失败]',
-                diaryTag: extractMarkedField(content, /Tag:\s*/i) || ''
-            });
-        } else if (isDailyNoteUpdate) {
-            const dailyNoteAgent = getDailyNoteAgentInfo(content);
-            return renderDailyNoteUpdate({
-                agentName: dailyNoteAgent.name,
-                agentType: dailyNoteAgent.type,
-                agentGender: dailyNoteAgent.gender,
-                folder: extractMarkedField(content, /folder:\s*/i) || '',
-                target: dailyNoteTarget || '',
-                replace: dailyNoteReplace || ''
-            });
-        } else if (detectedJev) {
-            // JEV 是自然语言工具入口的兼容展示分支，不替代既有 tool_name/XML 协议。
-            // 显式单引号工具名优先；未显式指定时才展示能力名称。
-            const escapedFullContent = escapeHtml(restoreBlocks(source))
-                .replace(/\r\n?|\n/g, '&#10;');
-            const jevLabel = detectedJev.displayName ? 'JEVToolUse:' : 'JEVToolUse';
-            const jevNameHtml = detectedJev.displayName
-                ? ` <span class="vcp-tool-name-highlight">${escapeHtml(detectedJev.displayName)}</span>`
-                : '';
-            return `\n\n<div class="vcp-tool-use-bubble vcp-jev-tool-use-bubble" data-vcp-block-type="jev-tool-use" data-vcp-preserve-children="true">` +
-                `<div class="vcp-tool-summary">` +
-                `<span class="vcp-tool-label">${jevLabel}</span>` +
-                jevNameHtml +
-                `</div>` +
-                `<div class="vcp-tool-details"></div>` +
-                `<template class="vcp-tool-details-template"><pre>${escapedFullContent}</pre></template>` +
-                `</div>\n\n`;
-        } else {
-            // --- It's a regular tool call, render it normally ---
-            const xmlToolNameMatch = source.match(/<tool_name>([\s\S]*?)<\/tool_name>/i);
-
-            let toolName = '';
-            let extractedName = (xmlToolNameMatch?.[1] || extractMarkedField(source, /tool_name:\s*/i) || '').trim();
-            if (extractedName) {
-                extractedName = extractedName.replace(/[「{](?:始|末)(?:[Ee][Ss][Cc][Aa][Pp][Ee])?[」}]/gi, '').replace(/,$/, '').trim();
-            }
-            if (extractedName) {
-                toolName = extractedName;
-            }
-
-            const malformedFields = findMalformedToolFields(source);
-            const markerProblem = describeToolRequestMarkerProblem({ toolName, malformedFields, content: source });
-            toolName = markerProblem.displayName;
-            const malformedClass = markerProblem.isMalformed ? ' is-malformed' : '';
-            const malformedHintHtml = markerProblem.hint
-                ? ` <span class="vcp-tool-malformed-hint">${escapeHtml(markerProblem.hint)}</span>`
-                : '';
-
-            // 工具气泡会在外层继续经过 marked.parse()。如果把参数中的真实换行直接放进
-            // <pre>，空行会终止 CommonMark raw HTML block，导致后续 Markdown 被浏览器
-            // 收进尚未闭合的 <pre>，表现为“后续渲染被吞”。用字符实体保存换行，使整个
-            // 气泡对 Markdown 解析器保持为单行、不可拆分 HTML；写入 DOM 后仍显示为换行。
-            const escapedFullContent = escapeHtml(restoreBlocks(source))
-                .replace(/\r\n?|\n/g, '&#10;');
-            /*
-             * ToolUse 载荷可能包含超长单行 JSON / JavaScript。折叠时若仍把
-             * <pre> 放在活动 DOM 中，展开会同时触发内在宽度、换行、高度与
-             * 祖先 backdrop-filter 表面的重新计算。
-             *
-             * <template> 的 DocumentFragment 不参与样式、布局、绘制与合成；
-             * 点击展开时才将其克隆到 .vcp-tool-details，收起时再次释放。
-             */
-            return `\n\n<div class="vcp-tool-use-bubble${malformedClass}" data-vcp-block-type="tool-use" data-vcp-preserve-children="true">` +
-                `<div class="vcp-tool-summary">` +
-                `<span class="vcp-tool-label">VCP-ToolUse:</span> ` +
-                `<span class="vcp-tool-name-highlight">${escapeHtml(toolName)}</span>` +
-                malformedHintHtml +
-                `</div>` +
-                `<div class="vcp-tool-details"></div>` +
-                `<template class="vcp-tool-details-template"><pre>${escapedFullContent}</pre></template>` +
-                `</div>\n\n`;
-        }
-    });
-
-    // Process Daily Notes
-    processed = processed.replace(NOTE_REGEX, (match, rawContent) => {
-        const content = rawContent.trim();
-        const maidRegex = /Maid:\s*([^\n\r]*)/;
-        const dateRegex = /Date:\s*([^\n\r]*)/;
-        const contentRegex = /Content:\s*([\s\S]*)/;
-
-        const maidMatch = content.match(maidRegex);
-        const dateMatch = content.match(dateRegex);
-        const contentMatch = content.match(contentRegex);
-
-        const maid = maidMatch ? maidMatch[1].trim() : '';
-        const date = dateMatch ? dateMatch[1].trim() : '';
-        // The rest of the text after "Content:", or the full text if "Content:" is not found
-        const diaryContent = contentMatch ? contentMatch[1].trim() : content;
-
-        let html = `<div class="maid-diary-bubble" data-vcp-block-type="maid-diary" data-vcp-preserve-children="true">`;
-        html += `<div class="diary-header">`;
-        html += `<span class="diary-title">Maid's Diary</span>`;
-        if (date) {
-            html += `<span class="diary-date">${escapeHtml(date)}</span>`;
-        }
-        html += `</div>`;
-
-        if (maid) {
-            html += `<div class="diary-maid-info">`;
-            html += `<span class="diary-maid-label">Maid:</span> `;
-            html += `<span class="diary-maid-name">${escapeHtml(maid)}</span>`;
-            html += `</div>`;
-        }
-
-        let processedDiaryContent;
-        if (mainRendererReferences.markedInstance) {
-            try {
-                processedDiaryContent = mainRendererReferences.markedInstance.parse(restoreBlocks(diaryContent));
-            } catch (e) {
-                processedDiaryContent = escapeHtml(restoreBlocks(diaryContent));
-            }
-        } else {
-            processedDiaryContent = escapeHtml(restoreBlocks(diaryContent));
-        }
-        html += `<div class="diary-content">${processedDiaryContent}</div>`;
-        html += `</div>`;
-
-        return `\n\n${html}\n\n`;
-    });
-
-    // Process Role Dividers before restoring thought chains.
-    // 思维链内部的角色分隔标记必须保持普通 Markdown 文本，不能生成外层角色分隔组件。
-    processed = processed.replace(ROLE_DIVIDER_REGEX, (match, isEnd, role) => {
-        const isEndMarker = !!isEnd;
-        const roleLower = role.toLowerCase();
-
-        let label = '';
-        if (roleLower === 'system') label = 'System';
-        else if (roleLower === 'assistant') label = 'Assistant';
-        else if (roleLower === 'user') label = 'User';
-
-        const actionText = isEndMarker ? '末' : '始';
-
-        return `\n\n<div class="vcp-role-divider role-${roleLower} type-${isEndMarker ? 'end' : 'start'}" data-vcp-block-type="role-divider" data-vcp-preserve-children="true"><span class="divider-text">${label} 分界之${actionText}</span></div>\n\n`;
-    });
-
-    // 所有外层特殊协议转换完成后才恢复思维链。
-    // 从这里开始只执行思维链专用 Markdown/LaTeX 渲染，不再运行任何 VCP 特殊规则。
-    if (thoughtChainMap && thoughtChainMap.size > 0) {
-        for (const [placeholder, original] of thoughtChainMap.entries()) {
-            processed = processed.split(placeholder).join(original);
-        }
-    }
-
-    // Process VCP Thought Chains
-    const renderThoughtChainMarkdown = (rawText) => {
-        const restoredText = restoreBlocks(rawText || '');
-
-        if (!mainRendererReferences.markedInstance) {
-            return `<pre>${escapeHtml(restoredText)}</pre>`;
-        }
-
-        try {
-            // 思维链是隔离渲染域：只解释 Markdown、普通代码围栏与 LaTeX。
-            // 先保护公式，再封印代码围栏外的原始 HTML；工具、Mermaid、Flowlock、
-            // 桌面推送、日记等 VCP 特殊协议均不会再次进入完整内容流水线。
-            const { text: latexProtectedText, map: latexMap } = protectLatexBlocks(restoredText);
-            const sealedMarkdown = escapeRawHtmlOutsideCodeFences(latexProtectedText);
-            const renderedMarkdown = mainRendererReferences.markedInstance.parse(
-                sealedMarkdown,
-                TOOL_RESULT_SAFE_MARKDOWN_OPTIONS
-            );
-            return restoreLatexBlocks(renderedMarkdown, latexMap);
-        } catch (e) {
-            return `<pre>${escapeHtml(restoredText)}</pre>`;
-        }
-    };
-
-    const renderThoughtChain = (theme, rawContent) => {
-        const displayTheme = theme ? theme.trim() : "元思考链";
-        const content = rawContent.trim();
-
-        let html = `<div class="vcp-thought-chain-bubble collapsible" data-vcp-block-type="thought-chain" data-vcp-preserve-children="true">`;
-        html += `<div class="vcp-thought-chain-header">`;
-        html += `<span class="vcp-thought-chain-icon">🧠</span>`;
-        html += `<span class="vcp-thought-chain-label">${escapeHtml(displayTheme)}</span>`;
-        html += `<span class="vcp-result-toggle-icon"></span>`;
-        html += `</div>`;
-
-        html += `<div class="vcp-thought-chain-collapsible-content">`;
-
-        const processedContent = renderThoughtChainMarkdown(content);
-        html += `<div class="vcp-thought-chain-body">${processedContent}</div>`;
-        html += `</div>`; // End of vcp-thought-chain-collapsible-content
-        html += `</div>`; // End of vcp-thought-chain-bubble
-
-        return `\n\n${html}\n\n`;
-    };
-
-    processed = processed.replace(THOUGHT_CHAIN_REGEX, (match, theme, rawContent) => {
-        return renderThoughtChain(theme, rawContent);
-    });
-
-    // Process Conventional Thought Chains (<think>...</think> / <thinking>...</thinking>)
-    // 同时兼容单行与多行格式；正则反向引用确保开始、结束标签一致。
-    processed = processed.replace(CONVENTIONAL_THOUGHT_REGEX, (match, tagName, rawContent) => {
-        return renderThoughtChain("思维链", rawContent);
-    });
-
-    // Desktop Push blocks 已在 preprocessFullContent 中于代码块保护之后统一处理
-    // 这里不再重复处理，避免与代码块内的语法冲突
-
-    return processed;
-}
+const transformSpecialBlocks = (...args) => templateCompiler.transformSpecialBlocks(...args);
 
 /**
  * Transforms user's "clicked button" indicators into styled bubbles.
@@ -1448,7 +709,21 @@ function extractSpeakableTextFromContentElement(contentElement) {
     // 工具结果优先级最高且嵌套感知，最先整体剥离；其内部的工具请求/推送标记随之移除。
     // 工具请求扫描器不依赖换行，支持“前文<<<[TOOL_REQUEST]>>>tool_name...结束标记后文”。
     // 因此即使 Markdown 没有生成独立气泡，也不会把完整工具载荷送入 TTS。
-    const speakableToolResultRanges = collectClosedToolResultRanges(speakableText);
+    // Speech is conservative: DOM text may concatenate line-oriented protocol
+    // closers with prose. Match nested receipt literals without requiring lines.
+    const speakableToolResultRanges = [];
+    const receiptMarkers = /\[\[VCP调用结果信息汇总:|VCP调用结果结束\]\]/g;
+    let receiptDepth = 0;
+    let receiptStart = 0;
+    let receiptMarker;
+    while ((receiptMarker = receiptMarkers.exec(speakableText))) {
+        if (receiptMarker[0].startsWith('[[')) {
+            if (receiptDepth++ === 0) receiptStart = receiptMarker.index;
+        } else if (receiptDepth > 0 && --receiptDepth === 0) {
+            speakableToolResultRanges.push({ start: receiptStart, end: receiptMarkers.lastIndex });
+        }
+    }
+    if (receiptDepth > 0) speakableToolResultRanges.push({ start: receiptStart, end: speakableText.length });
     if (speakableToolResultRanges.length > 0) {
         speakableText = replaceToolResultRanges(speakableText, speakableToolResultRanges, () => '');
     }
@@ -1495,7 +770,7 @@ function processAndInjectScopedCss(content, scopeId, options = {}) {
     if (options.cssChunks) {
         if (cssContent.trim()) {
             try {
-                options.cssChunks.push(contentProcessor.scopeCss(cssContent, scopeId));
+                options.cssChunks.push(scopeCssCached(cssContent, scopeId));
             } catch (error) {
                 console.warn('[ScopedCSS] Rejected invalid domain CSS:', error);
             }
@@ -1504,7 +779,7 @@ function processAndInjectScopedCss(content, scopeId, options = {}) {
     }
     if (injectStyles && (cssContent.length > 0 || options.scopedCssOverride)) {
         try {
-            const scopedCss = options.scopedCssOverride ?? contentProcessor.scopeCss(cssContent, scopeId);
+            const scopedCss = options.scopedCssOverride ?? scopeCssCached(cssContent, scopeId);
             if (!scopedCss.trim()) {
                 if (options.messageItem) {
                     options.messageItem.dataset.vcpScopedStyleState = 'rejected';
@@ -1529,7 +804,7 @@ function processAndInjectScopedCss(content, scopeId, options = {}) {
 
             // 流式渲染会多次经过此函数：复用节点并原子替换文本，
             // 避免同一消息累积多个样式节点或出现旧规则覆盖新规则。
-            styleElement.textContent = scopedCss;
+            if (styleElement.textContent !== scopedCss) styleElement.textContent = scopedCss;
             styleInjected = true;
             if (options.messageItem) {
                 options.messageItem.dataset.vcpScopedStyleState = 'active';
@@ -1576,6 +851,7 @@ function processAssistantScopedHtmlContent(content, scopeId, messageItem = null,
             processAssistantScopedHtmlContent(source, scopeId, null, {
                 ...options, injectStyles: false, cssChunks,
             }));
+        if (options.cssChunks) options.cssChunks.push(...cssChunks);
         if (options.injectStyles !== false) {
             removeOwnedMessageScopeStyle(scopeId);
             if (cssChunks.length) {
@@ -1608,102 +884,22 @@ function processAssistantScopedHtmlContent(content, scopeId, messageItem = null,
         }
     }
 
-    // --- 🟢 关键修复：先保护所有可能包含 <style> 的特殊区域，再提取样式 ---
-    // 这样可以避免 HTML 注释、代码块、推送块、工具请求块、工具结果块和
-    // 「始」「末」标记内的 <style> 被误当作真正的样式注入。
-    // 即使只是结构化 HTML / 内联 style，也会进入该路径以跳过 HTML 缓存并统一保护扫描。
-    const protectedBlocks = [];
-
-    // 🔴 最高优先级：保护工具结果块（[[VCP调用结果信息汇总:...VCP调用结果结束]]），
-    // 包括流式中尚未闭合、延伸到流尾的工具结果。工具协议载荷属于不可信数据域，
-    // 不是可执行的 assistant HTML 岛；其中任意 style/script/HTML/注释都只是工具数据。
-    // 必须先于 HTML 注释保护：否则工具结果之前的 <!-- 可能与工具数据中的 --> 配对，
-    // 把起始标记吞进注释，使剩余载荷暴露给消息级 CSS 提取器。
-    const toolResultRanges = collectToolDataRanges(content);
-    let textWithProtectedBlocks = toolResultRanges.length > 0
-        ? replaceToolResultRanges(content, toolResultRanges, (match) => {
-            const placeholder = `__VCP_STYLE_PROTECT_${protectedBlocks.length}__`;
-            protectedBlocks.push(match);
-            return placeholder;
-        })
-        : content;
-
-    // HTML 注释是字面量域。诸如
-    // <!-- 子组件拥有独立的 <style> 标签 -->
-    // 这样的说明不能让 STYLE_REGEX 从伪开始标签跨越吞到后续真实 </style>。
-    // 未闭合注释在流式中同样拥有当前尾部，直到 --> 到达前不得产生 CSS 副作用。
-    textWithProtectedBlocks = textWithProtectedBlocks.replace(/<!--[\s\S]*?(?:-->|$)/g, (match) => {
-        const placeholder = `__VCP_STYLE_PROTECT_${protectedBlocks.length}__`;
-        protectedBlocks.push(match);
-        return placeholder;
-    });
-
-    // 🔴 保护完整工具请求块（<<<[TOOL_REQUEST]>>>...<<<[END_TOOL_REQUEST]>>>）。
-    // 使用 ESCAPE 感知的扫描器，避免参数内容里的 END 标记导致工具块提前闭合。
-    textWithProtectedBlocks = replaceToolRequestBlocks(textWithProtectedBlocks, (match) => {
-        const placeholder = `__VCP_STYLE_PROTECT_${protectedBlocks.length}__`;
-        protectedBlocks.push(match);
-        return placeholder;
-    });
-
-    // 🔴 流式严格封印：完整块替换后，若仍有未闭合的请求或结果，则从源码中
-    // 最早的未闭合协议入口一直保护到流尾。不能等待结束标记，因为在等待期间
-    // 已生成的 <style> 就足以产生 document.head 注入副作用。
-    const unclosedToolBlock = findEarliestUnclosedToolBlock(textWithProtectedBlocks);
-
-    if (unclosedToolBlock) {
-        const placeholder = `__VCP_STYLE_PROTECT_${protectedBlocks.length}__`;
-        protectedBlocks.push(textWithProtectedBlocks.slice(unclosedToolBlock.startIndex));
-        textWithProtectedBlocks =
-            textWithProtectedBlocks.slice(0, unclosedToolBlock.startIndex) + placeholder;
+    if (!containsStyleTag(content)) {
+        if (options.injectStyles !== false && messageItem) {
+            removeOwnedMessageScopeStyle(scopeId);
+            delete messageItem.dataset.vcpScopedStyleState;
+        }
+        return content;
     }
 
-    // 「始」「末」与「始ESCAPE」「末ESCAPE」只在工具请求围栏内部作为字段边界语法。
-    // 工具请求块已在上一步整体保护；这里不再扫描工具围栏外的裸始末标记，
-    // 避免普通聊天提及这些标记时误保护大段正文或影响 <style> 提取边界。
-
-    // 保护桌面推送块（必须在代码块之前，因为推送块可能包含代码围栏）。
-    textWithProtectedBlocks = textWithProtectedBlocks.replace(DESKTOP_PUSH_REGEX, (match) => {
-        const placeholder = `__VCP_STYLE_PROTECT_${protectedBlocks.length}__`;
-        protectedBlocks.push(match);
-        return placeholder;
-    });
-    // 也保护未闭合的推送块。
-    textWithProtectedBlocks = textWithProtectedBlocks.replace(DESKTOP_PUSH_PARTIAL_REGEX, (match) => {
-        const placeholder = `__VCP_STYLE_PROTECT_${protectedBlocks.length}__`;
-        protectedBlocks.push(match);
-        return placeholder;
-    });
-
-    // 保护所有 Markdown 代码域。不能只保护固定三个反引号的 fenced code：
-    // 正文中的 inline code（例如 `<style>`、`<div>`）如果暴露给 STYLE_REGEX，
-    // 会从伪开始标签跨越匹配到后续动画岛的真实 </style>，吞掉整段 CSS 与 HTML。
-    // 共享扫描器同时覆盖可变长度反引号、波浪号围栏和未闭合流尾。
-    textWithProtectedBlocks = replaceMarkdownCodeDomains(textWithProtectedBlocks, (match) => {
-        const placeholder = `__VCP_STYLE_PROTECT_${protectedBlocks.length}__`;
-        protectedBlocks.push(match);
-        return placeholder;
-    });
-
-    // 现在只会匹配不在保护区域内的 <style> 标签。
-    // 流式分片可选择只剥离 style；注入副作用由完整可见源码统一执行。
-    const { processedContent: contentWithoutStyles } = processAndInjectScopedCss(
-        textWithProtectedBlocks,
-        scopeId,
-        { ...options, messageItem }
-    );
-
-    // 恢复所有被保护的块。
-    // 保护域允许嵌套：例如 fenced HTML 中的注释会先被保护，随后包含该
-    // 注释占位符的整个代码围栏又被保护。必须按 LIFO 逆序恢复，先展开
-    // 外层围栏，再恢复其中的注释；正序恢复会让内部占位符永久泄漏。
-    // 使用 split/join，避免代码块中的 $ 字符（如 $'、$$、$&）被
-    // String.replace() 误解释为特殊替换模式。
-    let restoredContent = contentWithoutStyles;
-    for (let i = protectedBlocks.length - 1; i >= 0; i--) {
-        const placeholder = `__VCP_STYLE_PROTECT_${i}__`;
-        restoredContent = restoredContent.split(placeholder).join(protectedBlocks[i]);
-    }
+    const styles = [];
+    const restoredContent = tokenizeVcpDocument(content, { mode: options.mode || 'final' }).map(region => {
+        const raw = content.slice(region.start, region.end);
+        if (region.kind !== 'style' || !region.closed) return raw;
+        styles.push(raw);
+        return '<!-- VCP-SCOPED-STYLE-EXTRACTED -->';
+    }).join('');
+    processAndInjectScopedCss(styles.join('\n'), scopeId, { ...options, messageItem });
 
     return restoredContent;
 }
@@ -1719,74 +915,7 @@ function processAssistantScopedHtmlContent(content, scopeId, messageItem = null,
  * Wraps raw HTML documents in markdown code fences if they aren't already.
  * 🟢 跳过「始」「末」标记内的 HTML，防止工具调用参数被错误封装
  */
-function ensureHtmlFenced(text) {
-    const doctypeTag = '<!DOCTYPE html>';
-    const htmlCloseTag = '</html>';
-    const lowerText = text.toLowerCase();
-
-    // 已在代码块中，不处理
-    if (HTML_FENCE_CHECK_REGEX.test(text)) {
-        return text;
-    }
-
-    // 快速检查：没有 doctype 直接返回
-    if (!lowerText.includes(doctypeTag.toLowerCase())) {
-        return text;
-    }
-
-    // 🟢 只保护工具请求围栏区域内的 HTML。
-    // 「始」「末」标记不再作为全局保护区入口，避免普通正文提及该语法时导致 HTML fenced 边界误判。
-    const protectedRanges = [];
-    replaceToolRequestBlocks(text, (match, content, startIndex, endIndex) => {
-        protectedRanges.push({ start: startIndex, end: endIndex });
-        return match;
-    });
-
-    // 🟢 检查位置是否在保护区域内
-    const isProtected = (index) => {
-        return protectedRanges.some(range => index >= range.start && index < range.end);
-    };
-
-    let result = '';
-    let lastIndex = 0;
-
-    while (true) {
-        const startIndex = text.toLowerCase().indexOf(doctypeTag.toLowerCase(), lastIndex);
-
-        result += text.substring(lastIndex, startIndex === -1 ? text.length : startIndex);
-
-        if (startIndex === -1) break;
-
-        const endIndex = text.toLowerCase().indexOf(htmlCloseTag.toLowerCase(), startIndex + doctypeTag.length);
-
-        if (endIndex === -1) {
-            result += text.substring(startIndex);
-            break;
-        }
-
-        const block = text.substring(startIndex, endIndex + htmlCloseTag.length);
-
-        // 🔴 核心修复：如果在工具请求保护区内，直接添加不封装
-        if (isProtected(startIndex)) {
-            result += block;
-            lastIndex = endIndex + htmlCloseTag.length;
-            continue;
-        }
-
-        // 正常逻辑：检查是否已在代码块内
-        const fencesInResult = (result.match(/```/g) || []).length;
-
-        if (fencesInResult % 2 === 0) {
-            result += `\n\`\`\`html\n${block}\n\`\`\`\n`;
-        } else {
-            result += block;
-        }
-
-        lastIndex = endIndex + htmlCloseTag.length;
-    }
-
-    return result;
-}
+const ensureHtmlFenced = (...args) => templateCompiler.ensureHtmlFenced(...args);
 
 
 /**
@@ -1796,26 +925,7 @@ function ensureHtmlFenced(text) {
  * @param {string} text The text content.
  * @returns {string} The processed text.
  */
-function deIndentHtml(text) {
-    const lines = text.split('\n');
-    let inFence = false;
-    return lines.map(line => {
-        if (line.trim().startsWith('```')) {
-            inFence = !inFence;
-            return line;
-        }
-
-        // 🟢 新增：如果行内包含 <img>，不要拆分它
-        if (!inFence && line.includes('<img')) {
-            return line; // 保持原样
-        }
-
-        if (!inFence && /^\s+<(!|[a-zA-Z])/.test(line)) {
-            return line.trimStart();
-        }
-        return line;
-    }).join('\n');
-}
+const deIndentHtml = (...args) => templateCompiler.deIndentHtml(...args);
 
 
 /**
@@ -1863,21 +973,7 @@ function calculateDepthByTurns(messageId, history) {
  * @param {string} text The raw text content.
  * @returns {string} The processed text.
  */
-function preprocessFullContent(text, settings = {}, messageRole = 'assistant', depth = 0) {
-    if (!contentPipeline) {
-        console.warn('[MessageRenderer] contentPipeline not initialized, falling back to raw text');
-        return { text, toolResultMap: null };
-    }
-
-    const result = contentRuntime.processFull(text, {
-        mode: PIPELINE_MODES.FULL_RENDER,
-        settings,
-        messageRole,
-        depth
-    });
-
-    return { text: result.text, toolResultMap: result.state.toolResultMap || null };
-}
+const preprocessFullContent = (...args) => templateCompiler.preprocessFullContent(...args);
 
 function preprocessStreamTailContent(text) {
     if (!contentPipeline) {
@@ -1885,21 +981,14 @@ function preprocessStreamTailContent(text) {
         return text;
     }
 
-    return contentRuntime.processStream(text).text;
+    return templateCompiler.processStream(text);
 }
 
 function estimateStringBytes(str) {
     return typeof str === 'string' ? str.length * 2 : 0;
 }
 
-function hashStringFNV1a(str) {
-    let hash = 0x811c9dc5;
-    for (let i = 0; i < str.length; i++) {
-        hash ^= str.charCodeAt(i);
-        hash = Math.imul(hash, 0x01000193);
-    }
-    return (hash >>> 0).toString(16);
-}
+const hashStringFNV1a = (...args) => templateCompiler.hashStringFNV1a(...args);
 
 function buildRenderSettingsFingerprint(settings = {}) {
     // 仅纳入会影响 Markdown → raw HTML 或按钮标记处理的稳定设置；后续新增渲染相关设置时可 bump RENDER_PIPELINE_VERSION。
@@ -1908,20 +997,24 @@ function buildRenderSettingsFingerprint(settings = {}) {
     });
 }
 
-function shouldBypassRenderHtmlCache(text, options = {}) {
-    if (typeof text !== 'string' || !text) return true;
-    if (text.length < RENDER_HTML_CACHE_MIN_TEXT_LENGTH) return true;
-    if (text.length > RENDER_HTML_CACHE_MAX_TEXT_LENGTH) return true;
+function shouldBypassRenderHtmlCache(text) {
+    return typeof text !== 'string' || !text || text.length > RENDER_HTML_CACHE_MAX_TEXT_LENGTH;
+}
 
-    // 大工具结果 HTML 含运行时 data-content-id，其完整文本由消息级 Map 持有，
-    // 不能跨消息/内容 revision 复用缓存 HTML，否则按钮会引用已释放的条目。
-    if (text.includes('<<<[VCP_TOOL_BATCH_START:') || text.includes('[[VCP调用结果信息汇总:') || text.includes('<<<[TOOL_REQUEST]>>>')) return true;
-
-    // scoped CSS 有 scopeId 与 document.head 注入副作用，第一版保守跳过。
-    // 同时用大小写无关的 HTML/CSS 风险识别覆盖 <STYLE>、结构化 HTML 与内联 style 场景。
-    if ((options.messageRole || 'assistant') === 'assistant' && containsAssistantHtmlNeedingScope(text)) return true;
-
-    return false;
+function buildRenderSourceFingerprint(text) {
+    // Two 32-bit accumulators in one traversal. This is a probabilistic cache
+    // fingerprint, not a cryptographic identity or a proof of source equality.
+    let first = 0x811c9dc5;
+    let second = 0x9e3779b9;
+    for (let i = 0; i < text.length; i++) {
+        const char = text.charCodeAt(i);
+        first = Math.imul(first ^ char, 0x01000193);
+        second = Math.imul(second ^ char, 0x5bd1e995);
+        second ^= second >>> 13;
+    }
+    return JSON.stringify([
+        first >>> 0, second >>> 0, text.length, text.slice(0, 64), text.slice(-64)
+    ]);
 }
 
 function buildRenderHtmlCacheKey(text, options = {}) {
@@ -1934,16 +1027,15 @@ function buildRenderHtmlCacheKey(text, options = {}) {
         messageRole,
         depth,
         buildRenderSettingsFingerprint(settings),
-        text.length,
-        hashStringFNV1a(text)
+        options.resultOrdinal || 0,
+        Boolean(options.batchDomain),
+        buildRenderSourceFingerprint(text)
     ].join('|');
 }
 
-function getRenderHtmlCache(key, sourceText) {
+function getRenderHtmlCache(key) {
     const entry = renderHtmlCache.get(key);
     if (!entry) return null;
-    // FNV-1a 与长度只用于快速索引；命中后必须比较原文，避免哈希碰撞返回其他消息 HTML。
-    if (entry.sourceText !== sourceText) return null;
 
     renderHtmlCache.delete(key);
     entry.lastUsed = Date.now();
@@ -1951,7 +1043,7 @@ function getRenderHtmlCache(key, sourceText) {
     renderHtmlCache.set(key, entry);
     renderHtmlCacheStats.hits += 1;
 
-    return entry.html;
+    return entry.template;
 }
 
 function trimRenderHtmlCache() {
@@ -1969,8 +1061,13 @@ function trimRenderHtmlCache() {
     }
 }
 
-function setRenderHtmlCache(key, html, sourceText) {
-    const size = estimateStringBytes(html) + estimateStringBytes(sourceText);
+function setRenderHtmlCache(key, template) {
+    // Lazy payloads are necessary to restore tools after DOM cleanup; include them
+    // and metadata in the budget rather than hiding them in an unbounded side map.
+    const size = estimateStringBytes(key) + estimateStringBytes(template.html)
+        + template.tools.reduce((bytes, entry) => bytes
+            + estimateStringBytes(entry.id) + estimateStringBytes(entry.type)
+            + estimateStringBytes(entry.raw) + estimateStringBytes(JSON.stringify(entry.meta)) + 8, 0);
     if (size <= 0 || size > RENDER_HTML_CACHE_MAX_SINGLE_BYTES) {
         return;
     }
@@ -1982,8 +1079,7 @@ function setRenderHtmlCache(key, html, sourceText) {
     }
 
     renderHtmlCache.set(key, {
-        html,
-        sourceText,
+        template,
         size,
         hits: 0,
         lastUsed: Date.now()
@@ -1998,33 +1094,7 @@ function clearRenderHtmlCache() {
     renderHtmlCacheBytes = 0;
 }
 
-function renderMarkdownToHtmlUncached(text, options = {}) {
-    const markedInstance = mainRendererReferences.markedInstance;
-    if (!markedInstance) return escapeHtml(text);
-
-    if (!options.batchDomain && collectToolBatchRanges(text).length) {
-        let ordinal = 0;
-        return composeToolBatchHtml(splitToolBatchDomains(text), domain => {
-            const html = renderMarkdownToHtmlUncached(domain.source, {
-                ...options, batchDomain: true, resultOrdinal: ordinal,
-            });
-            ordinal += collectClosedToolResultRanges(domain.source).length;
-            return html;
-        }, mainRendererReferences.document || mainRendererReferences.chatMessagesDiv?.ownerDocument);
-    }
-    const globalSettings = options.settings || mainRendererReferences.globalSettingsRef.get();
-    const {
-        messageRole = 'assistant',
-        depth = 0
-    } = options;
-
-    const { text: processedText, toolResultMap } = preprocessFullContent(text, globalSettings, messageRole, depth);
-    const { text: protectedText, map: latexMap } = protectLatexBlocks(processedText);
-    let html = markedInstance.parse(protectedText);
-    html = restoreLatexBlocks(html, latexMap);
-    html = restoreRenderedToolResults(html, toolResultMap, options.resultOrdinal || 0);
-    return html;
-}
+const renderMarkdownToHtmlUncached = (...args) => templateCompiler.renderMarkdownToHtmlUncached(...args);
 
 function renderMarkdownToHtml(text, options = {}) {
     if (isContextCheckpoint(options.message)) {
@@ -2064,21 +1134,23 @@ function renderMarkdownToHtml(text, options = {}) {
     const markedInstance = mainRendererReferences.markedInstance;
     if (!markedInstance) return escapeHtml(text);
 
-    if (shouldBypassRenderHtmlCache(text, options)) {
+    if (shouldBypassRenderHtmlCache(text)) {
         renderHtmlCacheStats.skips += 1;
         return renderMarkdownToHtmlUncached(text, options);
     }
 
     const cacheKey = buildRenderHtmlCacheKey(text, options);
-    const cachedHtml = getRenderHtmlCache(cacheKey, text);
-    if (cachedHtml !== null) {
-        return cachedHtml;
+    const cachedTemplate = getRenderHtmlCache(cacheKey);
+    if (cachedTemplate !== null) {
+        return hydrateRenderTemplate(cachedTemplate);
     }
 
     renderHtmlCacheStats.misses += 1;
-    const html = renderMarkdownToHtmlUncached(text, options);
-    setRenderHtmlCache(cacheKey, html, text);
-    return html;
+    // Scoped CSS extraction/injection happens at the caller before this pure
+    // template stage. Media, events and scripts are still processed after mount.
+    const template = buildRenderTemplate(text, options);
+    setRenderHtmlCache(cacheKey, template);
+    return hydrateRenderTemplate(template);
 }
 
 function parseFullMarkdown(text, options = {}) {
@@ -2339,156 +1411,7 @@ function prepareFinalTextForRender(messageId, rawText, role = 'assistant', histo
  * @param {string} fullMatch - 完整的工具结果文本（含 [[VCP调用结果信息汇总: ... VCP调用结果结束]] 标记）
  * @returns {string} 渲染后的 HTML
  */
-function renderToolResultBlock(fullMatch, ordinal = -1, deferred = true) {
-    const startMarker = '[[VCP调用结果信息汇总:';
-    const endMarker = 'VCP调用结果结束]]';
-    const markdownFieldKeys = new Set(['返回内容', '内容', 'Result', '返回结果', 'output']);
-    const knownFieldKeys = new Set(['工具名称', '执行状态', '命令', '参数', '返回内容', '内容', 'Result', '返回结果', 'output', '可访问URL', 'url', 'image']);
-    let content = fullMatch;
-    if (content.startsWith(startMarker)) {
-        content = content.slice(startMarker.length);
-    }
-    if (content.endsWith(endMarker)) {
-        content = content.slice(0, -endMarker.length);
-    }
-    content = content.trim();
-
-    const lines = content.split('\n');
-    let toolName = 'Unknown Tool';
-    let status = 'Unknown Status';
-    const details = [];
-    let otherContent = [];
-    let currentKey = null;
-    let currentValue = [];
-
-    lines.forEach(line => {
-        const kvMatch = line.match(/^-\s*([^:]+):\s*(.*)/);
-        const matchedKey = kvMatch?.[1]?.trim();
-        const isKnownField = matchedKey && knownFieldKeys.has(matchedKey);
-        const shouldStartNewField = isKnownField && !markdownFieldKeys.has(currentKey);
-
-        if (shouldStartNewField) {
-            if (currentKey) {
-                const val = currentValue.join('\n').trim();
-                if (currentKey === '工具名称') toolName = val;
-                else if (currentKey === '执行状态') status = val;
-                else details.push({ key: currentKey, value: val });
-            }
-            currentKey = matchedKey;
-            currentValue = [kvMatch[2].trim()];
-        } else if (currentKey) {
-            currentValue.push(line);
-        } else if (line.trim() !== '') {
-            otherContent.push(line);
-        }
-    });
-
-    if (currentKey) {
-        const val = currentValue.join('\n').trim();
-        if (currentKey === '工具名称') toolName = val;
-        else if (currentKey === '执行状态') status = val;
-        else details.push({ key: currentKey, value: val });
-    }
-
-    // 序号 + 原文哈希用于在消息原始内容中精确定位该工具结果块（删除功能使用）。
-    const toolResultHash = hashStringFNV1a(fullMatch);
-    const isHidden = isToolResultHidden(fullMatch);
-    const previewSource = (details.find(item => markdownFieldKeys.has(item.key))?.value || otherContent.join('\n')).slice(0, 600);
-    const preview = previewSource.split('\n').map(line => line.trim()).find(line => line && !/^(```|~~~)/.test(line))?.replace(/^[#>*\s]+|[*`]/g, '').slice(0, 160) || '';
-    const rich = details.some(({ key, value }) =>
-        /^(?:可访问URL|返回内容|url|image)$/.test(key) && /^https?:\/\/[^\s]+$/i.test(value) && /\.(jpeg|jpg|png|gif|webp)([?&#]|$)/i.test(value)
-        || markdownFieldKeys.has(key) && /!\[[^\]]*\]\([^)\n]+\)/.test(value));
-    const lazyId = deferred ? registerLazyTool({ type: 'result', raw: fullMatch, ordinal, meta: { preview, rich } }) : null;
-    let html = `<div class="vcp-tool-result-bubble collapsible${isHidden ? ' vcp-tool-result-bubble--hidden' : ''}" data-vcp-block-type="tool-result" data-vcp-preserve-children="true"${lazyId ? ` data-vcp-lazy-tool-id="${lazyId}"` : ''} data-vcp-tool-result-index="${Number.isInteger(ordinal) ? ordinal : -1}" data-vcp-tool-result-hash="${toolResultHash}">`;
-    html += `<div class="vcp-tool-result-header">`;
-    html += `<span class="vcp-tool-result-label">VCP-ToolResult</span>`;
-    html += `<span class="vcp-tool-result-name">${escapeHtml(toolName)}</span>`;
-    html += `<span class="vcp-tool-result-status">${escapeHtml(status.replace(/[✅❌⚠⏳\uFE0F]/gu, '').trim())}</span>`;
-    if (isHidden) {
-        html += `<span class="vcp-tool-result-hidden-badge" title="当前工具结果已排除，后续对话不会注入到AI上下文中">已隐藏</span>`;
-    }
-    html += `<span class="vcp-result-toggle-icon"></span>`;
-    const btnTitle = isHidden ? '当前已从上下文中隐藏（点击恢复注入）' : '当前已注入上下文（点击在上下文中隐藏）';
-    // 视觉语义：可见时为单纯睁眼图标；不可见时为带斜杠划掉的眼睛图标
-    const btnIcon = isHidden ? TOOL_RESULT_HIDE_ICON : TOOL_RESULT_SHOW_ICON;
-    html += `<button type="button" class="vcp-tool-result-delete-btn vcp-tool-result-toggle-btn${isHidden ? ' is-hidden' : ''}" data-vcp-hidden="${isHidden ? 'true' : 'false'}" title="${btnTitle}" aria-label="${btnTitle}">${btnIcon}</button>`;
-    html += `</div>`;
-    html += `<div class="vcp-tool-result-collapsible-content">`;
-    if (deferred) return html + `</div></div>`;
-    html += `<div class="vcp-tool-result-details">`;
-
-    details.forEach(({ key, value }) => {
-        const isMarkdownField = markdownFieldKeys.has(key);
-        const isImageUrl = typeof value === 'string' && /^https?:\/\/[^\s]+$/i.test(value) && /\.(jpeg|jpg|png|gif|webp)([?&#]|$)/i.test(value);
-        let processedValue;
-
-        if (isImageUrl && (key === '可访问URL' || key === '返回内容' || key === 'url' || key === 'image')) {
-            processedValue = `<a href="${escapeHtml(value)}" target="_blank" rel="noopener noreferrer" title="点击预览"><img src="${escapeHtml(value)}" class="vcp-tool-result-image" alt="Generated Image"></a>`;
-        } else if (isMarkdownField) {
-            // 🟢 架构级修复：工具结果内容使用独立的 Markdown 渲染
-            // 由于工具结果块已经从外部文本中完全隔离，这里可以安全地使用 Markdown 解析器
-            // 支持表格、代码围栏、列表等完整 Markdown 语法，不再需要 escapeHtml + <pre> 的妥协方案
-
-            // 🟢 性能优化：大内容二级截断
-            const isLargeContent = value.length > TOOL_RESULT_TRUNCATE_THRESHOLD;
-            let valueToRender = value;
-            let truncationNotice = '';
-
-            if (isLargeContent) {
-                // 截断到前 N 行
-                const allLines = value.split('\n');
-                const truncatedLines = allLines.slice(0, TOOL_RESULT_TRUNCATE_LINES);
-                valueToRender = truncatedLines.join('\n');
-
-                // 存储完整内容供懒加载
-                const contentId = toolResultContentIdCounter++;
-                toolResultFullContentMap.set(contentId, { raw: value, fieldKey: key });
-
-                const remainingLines = allLines.length - TOOL_RESULT_TRUNCATE_LINES;
-                const sizeKB = Math.round(value.length / 1024);
-                truncationNotice = `<div class="vcp-tool-result-truncated-notice" data-content-id="${contentId}">` +
-                    `<span>📄 内容已截断（共 ${allLines.length} 行 / ${sizeKB}KB），当前显示前 ${TOOL_RESULT_TRUNCATE_LINES} 行</span>` +
-                    `<span style="font-weight:600;">点击展开全部</span>` +
-                    `</div>`;
-            }
-
-            const renderedMarkdown = renderSafeToolResultMarkdown(valueToRender);
-            const sealClass = TOOL_RESULT_DANGEROUS_HTML_REGEX.test(valueToRender)
-                ? ' vcp-tool-result-markdown-content--sealed-html'
-                : '';
-            processedValue = `<div class="vcp-tool-result-markdown-content${sealClass}">${renderedMarkdown}</div>${truncationNotice}`;
-        } else {
-            const urlRegex = /(https?:\/\/[^\s]+)/g;
-            processedValue = escapeHtml(value);
-            processedValue = processedValue.replace(urlRegex, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>');
-
-            if (key === '返回内容') {
-                processedValue = processedValue.replace(/###(.*?)###/g, '<strong>$1</strong>');
-            }
-        }
-
-        const itemClass = (isMarkdownField && !isImageUrl)
-            ? 'vcp-tool-result-item vcp-tool-result-item-markdown'
-            : 'vcp-tool-result-item';
-        html += `<div class="${itemClass}">`;
-        html += `<span class="vcp-tool-result-item-key">${escapeHtml(key)}:</span> `;
-        const valueTag = (isMarkdownField && !isImageUrl) ? 'div' : 'span';
-        html += `<${valueTag} class="vcp-tool-result-item-value">${processedValue}</${valueTag}>`;
-        html += `</div>`;
-    });
-    html += `</div>`;
-
-    if (otherContent.length > 0) {
-        const footerText = otherContent.join('\n');
-        const processedFooter = `<pre class="vcp-tool-result-raw-content">${escapeHtml(footerText)}</pre>`;
-        html += `<div class="vcp-tool-result-footer">${processedFooter}</div>`;
-    }
-
-    html += `</div>`;
-    html += `</div>`;
-
-    return html;
-}
+const renderToolResultBlock = (...args) => templateCompiler.renderToolResultBlock(...args);
 
 /**
  * 🟢 在 Markdown 解析后恢复工具结果占位符为渲染好的 HTML
@@ -2496,69 +1419,11 @@ function renderToolResultBlock(fullMatch, ordinal = -1, deferred = true) {
  * @param {Map|null} toolResultMap - 占位符到原始工具结果文本的映射
  * @returns {string} 恢复后的 HTML
  */
-function renderToolCallSummaryHtml(rawContent) {
-    const statuses = [
-        [/拒绝|被拒|denied|rejected|refused/i, 'rejected', '拒绝'],
-        [/失败|错误|异常|error|failed/i, 'failure', '失败'],
-        [/超时|timeout/i, 'timeout', '超时'],
-        [/成功|完成|success|succeeded|ok/i, 'success', '成功'],
-        [/取消|中止|cancel/i, 'cancelled', '取消'],
-        [/跳过|skip/i, 'skipped', '跳过'],
-    ];
-    const entries = String(rawContent || '').trim().split(/[；;。]\s*/u).map(value => value.trim()).filter(Boolean);
-    const chips = entries.map(entry => {
-        const [, key, label] = statuses.find(([pattern]) => pattern.test(entry)) || [null, 'unknown', '未知'];
-        const name = (entry.match(/^(.+?)\s*调用/u)?.[1] || entry.replace(/调用.*/u, '') || 'Tool').trim();
-        return `<span class="vcp-tool-call-summary-chip status-${key}"><span class="vcp-tool-call-summary-tool">${escapeHtml(name)}</span><span class="vcp-tool-call-summary-status">${label}</span></span>`;
-    }).join('');
-    return `<div class="vcp-tool-call-summary-bubble" data-vcp-block-type="tool-call-summary" data-vcp-preserve-children="true"><div class="vcp-tool-call-summary-header"><span class="vcp-tool-call-summary-icon">🧾</span><span class="vcp-tool-call-summary-title">本轮工具调用摘要</span></div>${chips ? `<div class="vcp-tool-call-summary-list">${chips}</div>` : '<div class="vcp-tool-call-summary-raw">无摘要内容</div>'}</div>`;
-}
+const renderToolCallSummaryHtml = (...args) => templateCompiler.renderToolCallSummaryHtml(...args);
 
-function renderToolBatchBody(body, ranges, firstOrdinal = 0) {
-    let cursor = 0;
-    let html = '';
-    const plain = source => {
-        let result = '';
-        let offset = 0;
-        for (const match of source.matchAll(new RegExp(TOOL_CALL_SUMMARY_REGEX.source, 'g'))) {
-            const preceding = source.slice(offset, match.index);
-            if (preceding.trim()) result += `<pre>${escapeHtml(preceding)}</pre>`;
-            result += renderToolCallSummaryHtml(match[1]);
-            offset = match.index + match[0].length;
-        }
-        const tail = source.slice(offset);
-        return result + (tail.trim() ? `<pre>${escapeHtml(tail)}</pre>` : '');
-    };
-    let ordinal = firstOrdinal;
-    for (const range of ranges) {
-        html += plain(body.slice(cursor, range.start));
-        html += renderToolResultBlock(body.slice(range.start, range.end), ordinal++);
-        cursor = range.end;
-    }
-    html += plain(body.slice(cursor));
-    return `<div data-vcp-block-type="tool-batch" data-vcp-preserve-children="true">${html}</div>`;
-}
+const renderToolBatchBody = (...args) => templateCompiler.renderToolBatchBody(...args);
 
-function restoreRenderedToolResults(html, toolResultMap, firstOrdinal = 0) {
-    if (!toolResultMap || toolResultMap.size === 0 || typeof html !== 'string') return html;
-
-    let resultOrdinal = firstOrdinal;
-    // P1-5：工具结果占位符使用 HTML 注释格式，单遍匹配即可恢复。
-    // 同时兼容 marked 将注释占位符包裹成 <p><!--VCP_TOOL_RESULT_n--></p> 的情况。
-    return html.replace(/<p>\s*(<!--VCP_TOOL_RESULT_(\d+)-->)\s*<\/p>|<!--VCP_TOOL_RESULT_(\d+)-->/g, (match, wrappedPlaceholder, wrappedId, bareId) => {
-        const placeholder = wrappedPlaceholder || `<!--VCP_TOOL_RESULT_${bareId}-->`;
-        const rawMatch = toolResultMap.get(placeholder);
-        if (!rawMatch) return match;
-        if (rawMatch.type === 'batch') {
-            const result = renderToolBatchBody(rawMatch.body, rawMatch.results, resultOrdinal);
-            resultOrdinal += rawMatch.results.length;
-            return result;
-        }
-        // 占位符 ID 按源文本中出现顺序从 0 递增，可直接作为序号。
-        const ordinal = resultOrdinal++;
-        return `\n\n${renderToolResultBlock(rawMatch, ordinal)}\n\n`;
-    });
-}
+const restoreRenderedToolResults = (...args) => templateCompiler.restoreRenderedToolResults(...args);
 
 // 隐藏图标（Eye-Off：当前正常注入，点击后在上下文中隐藏）
 const TOOL_RESULT_HIDE_ICON = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>`;
@@ -2758,6 +1623,130 @@ function fixEmoticonUrlsInMarkdown(text) {
 let mainRendererReferences = null;
 
 
+let rendererDisposed = false;
+let offscreenWindow = null;
+function releaseUnMountedHtml(html) {
+    if (typeof html !== 'string') return;
+    for (const match of html.matchAll(/data-vcp-lazy-tool-id="([^"]+)"/g)) lazyToolContents.delete(match[1]);
+}
+let renderWorkerClient = null;
+
+function observeRenderedMessage(item) {
+    visibilityOptimizer.observeMessage(item);
+    offscreenWindow?.observe(item);
+}
+function canEvictMessage(item) {
+    const id = item.dataset.messageId;
+    const content = item.querySelector('.md-content');
+    const model = mainRendererReferences.currentChatHistoryRef.get().find(message => message.id === id);
+    if (!model || model.isThinking || streamManager.isMessageActive?.(id)
+        || item.matches('.streaming, .thinking, .editing')
+        || !content || content.dataset.vcpOffscreenReady !== 'true'
+        || item.dataset.vcpHeavyActivating === 'true'
+        || item.querySelector('textarea, input, select, [contenteditable]:not([contenteditable="false"]), iframe, canvas, video, audio, script, details[open], .preview-mode, .vcp-thought-chain-bubble.expanded, .mermaid-viewer[data-scale]:not([data-scale="1"])')
+        || /<\s*(?:script|canvas|iframe|video|audio)\b/i.test(typeof model.content === 'string' ? model.content : model.content?.text || '')
+        || item.contains(item.ownerDocument.activeElement)) return false;
+    const source = typeof model.content === 'string' ? model.content : model.content?.text || '';
+    if (/\son[a-z]+\s*=/i.test(source)) return false;
+    if ([content, ...content.querySelectorAll('pre, .mermaid-viewer-viewport')].some(node => node.scrollTop || node.scrollLeft)) return false;
+    // Legacy disclosures have no persisted presentation keys. Preserve their state.
+    if (content.dataset.vcpToolPresentation === 'legacy' && content.querySelector('.expanded')) return false;
+    const selection = item.ownerDocument.defaultView.getSelection?.();
+    if (selection && !selection.isCollapsed) {
+        for (let i = 0; i < selection.rangeCount; i++) {
+            if (selection.getRangeAt(i).intersectsNode(item)) return false;
+        }
+    }
+    return true;
+}
+function evictMessageContent(item) {
+    const content = item.querySelector('.md-content');
+    toolPresentation?.capture(content);
+    content._vcpRenderRevision = (Number(content._vcpRenderRevision) || 0) + 1;
+    delete content.dataset.vcpOffscreenReady;
+    delete item._vcp_activateHeavy;
+    delete item._vcp_process;
+    cleanupMessageDomResources(item, item.dataset.messageId, { preserveShell: true });
+}
+async function restoreMessageContent(item, isValid) {
+    const content = item.querySelector('.md-content');
+    const root = item.closest('[data-vcp-projectforge-root]');
+    const session = getActiveRenderSessionId(root);
+    const revision = content._vcpRenderRevision;
+    const model = mainRendererReferences.currentChatHistoryRef.get().find(message => message.id === item.dataset.messageId);
+    if (!model) throw new Error('Message no longer belongs to the current projection');
+    const prepared = prepareFinalTextForRender(model.id, model.content, model.role);
+    let text = prepared.text;
+    if (model.role === 'assistant') text = processAssistantScopedHtmlContent(text, item.id, item);
+    const valid = () => isValid() && content._vcpRenderRevision === revision && isRenderSessionActive(session);
+    const html = await renderHistoryTemplate(text, {
+        message: model, settings: mainRendererReferences.globalSettingsRef.get(),
+        messageRole: prepared.role, depth: prepared.depth,
+    }, root, session, model, valid);
+    if (!valid()) { releaseUnMountedHtml(html); return; }
+    if (html === null) throw new Error('Render settings changed during offscreen restoration');
+    delete item.dataset.vcpHeavyActivated;
+    delete content.dataset.vcpHeavyActivated;
+    visibilityOptimizer.observeMessage(item);
+    await renderPostProcessedHtml(content, html, {
+        messageId: model.id, message: model, renderSessionId: session,
+        includeAttachments: true, runHeavy: true,
+    });
+    if (isValid()) visibilityOptimizer.recheckVisibility?.();
+}
+let templateCompiler = null;
+
+async function renderHistoryTemplate(text, renderOptions, root, session, message, isValid = () => true) {
+    const parser = mainRendererReferences.markedInstance;
+    // Custom injected parsers/extensions have no cross-thread equivalence contract.
+    if (!renderWorkerClient || options.contentProcessor || options.emoticonUrlFixer
+        || (mainRendererReferences.flowlockProtocol
+            && mainRendererReferences.flowlockProtocol !== mainRendererReferences.realm.flowlockProtocol)
+        || parser?.constructor?.name !== 'Marked'
+        || parser.defaults?.renderer || parser.defaults?.tokenizer || parser.defaults?.hooks
+        || parser.defaults?.walkTokens || parser.defaults?.extensions
+        || isContextCheckpoint(message)
+        || shouldBypassRenderHtmlCache(text)) {
+        return renderMarkdownToHtml(text, renderOptions);
+    }
+    const key = buildRenderHtmlCacheKey(text, renderOptions);
+    const cached = getRenderHtmlCache(key);
+    if (cached) {
+        renderOptions.workerCompiled = true;
+        return hydrateRenderTemplate(cached);
+    }
+    const settingsIdentity = JSON.stringify(mainRendererReferences.globalSettingsRef.get());
+    const selectionIdentity = JSON.stringify(mainRendererReferences.currentSelectedItemRef.get());
+    const wasPresent = mainRendererReferences.currentChatHistoryRef.get().some(item => item.id === message.id);
+    const originalContent = JSON.stringify(message.content);
+    const bridge = mainRendererReferences.pretextBridge;
+    const width = root.clientWidth;
+    const measure = width > 0 ? bridge?.getMeasurementOptions?.('body', width) || null : null;
+    const result = await renderWorkerClient.submit(root, {
+        text, settings: { enableAiMessageButtons: renderOptions.settings?.enableAiMessageButtons },
+        role: renderOptions.messageRole,
+        depth: renderOptions.depth, markdown: parser.defaults,
+        flowlock: Boolean(mainRendererReferences.flowlockProtocol),
+        emoticons: /!\[|<img\b/i.test(text) ? emoticonUrlFixer.snapshot?.() || [] : [],
+        measure,
+    });
+    const latest = mainRendererReferences.currentChatHistoryRef.get().find(item => item.id === message.id);
+    if (rendererDisposed || !isValid() || !isRenderSessionActive(session)
+        || settingsIdentity !== JSON.stringify(mainRendererReferences.globalSettingsRef.get())
+        || selectionIdentity !== JSON.stringify(mainRendererReferences.currentSelectedItemRef.get())
+        || (wasPresent && !latest)
+        || (latest && JSON.stringify(latest.content) !== originalContent)) return null;
+    if (!result) return renderMarkdownToHtml(text, renderOptions);
+    const html = result.isolatedDomains
+        ? composeToolBatchHtml(result.parts, part => part, root.ownerDocument)
+        : result.parts[0] || '';
+    const template = { html, tools: result.tools };
+    renderOptions.workerCompiled = true;
+    renderOptions.estimatedHeight = result.estimatedHeight;
+    renderHtmlCacheStats.misses++;
+    setRenderHtmlCache(key, template);
+    return hydrateRenderTemplate(template);
+}
 let contentPipeline = null;
 let contentRuntime = null;
 let rendererListenerDisposers = [];
@@ -2771,9 +1760,17 @@ function disposeRendererListeners() {
     rendererListenerDisposers.splice(0).reverse().forEach(dispose => { try { dispose(); } catch (error) { console.warn('[MessageRenderer] listener dispose failed:', error); } });
 }
 function disposeRendererResources() {
+    rendererDisposed = true;
+    invalidateRenderSession();
+    for (const content of [...ownedAnimationContents]) {
+        try { cleanupAnimationsInContent(content); } catch (error) { console.warn('[Animation] renderer cleanup failed:', error); }
+    }
+    offscreenWindow?.destroy();
+    renderWorkerClient?.dispose();
     disposeRendererListeners();
     projectForgeTopicSurface.dispose();
     if (mainRendererReferences?.chatMessagesDiv) releaseLazyTools(mainRendererReferences.chatMessagesDiv);
+    clearRenderHtmlCache();
     lazyToolContents.clear();
     contentProcessor.dispose?.();
     middleClickHandler.dispose?.();
@@ -2785,6 +1782,8 @@ function disposeRendererResources() {
         styleElement.remove();
     }
     ownedStyleElements.clear();
+    scopedCssCache.clear();
+    persistedAvatarColorKeys.clear();
 }
 async function disposeRootResources(root) {
     if (!root?.querySelectorAll) return;
@@ -2806,7 +1805,12 @@ const renderTaskOwner = createSurfaceTaskOwner();
 
 function invalidateRenderSession(root = null) {
     const ownerRoot = root || mainRendererReferences?.chatMessagesDiv || null;
-    if (ownerRoot) renderTaskOwner.revoke(ownerRoot);
+    if (ownerRoot) {
+        // Navigation/teardown must never leave a retained root visually hidden.
+        delete ownerRoot.dataset.vcpHistoryPresentation;
+        renderWorkerClient?.cancel(ownerRoot);
+        renderTaskOwner.revoke(ownerRoot);
+    }
     return renderSessionAuthority.invalidate(ownerRoot);
 }
 
@@ -2831,6 +1835,7 @@ function cleanupScopedStylesForMessage(messageItem, messageId = null) {
     if (!messageItem && !messageId) return;
     const scopeId = messageItem?.id;
     const chatScopeId = messageItem?.getAttribute?.('data-chat-scope') || (messageId ? `vcp-${surfaceId}-chat-${messageId}` : null);
+    scopedCssCache.delete(scopeId);
     for (const styleElement of ownedStyleElements) {
         if ((styleElement.getAttribute('data-vcp-surface-id') === surfaceId)
             && ((scopeId && styleElement.getAttribute('data-vcp-scope-id') === scopeId)
@@ -2848,36 +1853,36 @@ function cleanupToolResultFullContentForRoot(root) {
     });
 }
 
-function cleanupMessageDomResources(messageItem, messageId = null) {
+function cleanupMessageDomResources(messageItem, messageId = null, cleanupOptions = {}) {
     if (!messageItem) return;
-
-    releaseLazyTools(messageItem);
-    cleanupToolResultFullContentForRoot(messageItem);
+    const release = action => {
+        try { action(); } catch (error) { console.warn('[MessageRenderer] resource cleanup failed:', error); }
+    };
     const contentDiv = messageItem.querySelector('.md-content');
+    release(() => cleanupAnimationsInContent(contentDiv));
+    if (!cleanupOptions.preserveShell) release(() => offscreenWindow?.unobserve(messageItem));
+    release(() => releaseLazyTools(messageItem));
+    release(() => cleanupToolResultFullContentForRoot(messageItem));
     if (contentDiv) {
-        chartEmbedHost?.beforeReplace(contentDiv);
-        imageHandler.cleanupContent?.(contentDiv);
+        release(() => chartEmbedHost?.beforeReplace(contentDiv));
+        release(() => imageHandler.cleanupContent?.(contentDiv));
         if (contentDiv._vcpDeferredHighlightTimer) {
-            clearTimeout(contentDiv._vcpDeferredHighlightTimer);
+            contentDiv.ownerDocument.defaultView.clearTimeout(contentDiv._vcpDeferredHighlightTimer);
             delete contentDiv._vcpDeferredHighlightTimer;
         }
-        cancelPretextEstimate(contentDiv);
-        cleanupMermaidViewers(contentDiv);
-        contentProcessor.cleanupPreviewsInContent(contentDiv);
-        cleanupAnimationsInContent(contentDiv);
+        release(() => cancelPretextEstimate(contentDiv));
+        release(() => cleanupMermaidViewers(contentDiv));
+        release(() => contentProcessor.cleanupPreviewsInContent(contentDiv));
         contentDiv.querySelectorAll('[data-vcp-attachment-cleanup], .message-attachment-wrapper *').forEach(node => {
-            node._vcpAttachmentCleanup?.();
+            release(() => node._vcpAttachmentCleanup?.());
             delete node._vcpAttachmentCleanup;
         });
-        cleanupChatMedia(contentDiv);
+        release(() => cleanupChatMedia(contentDiv));
     }
-
-    cleanupScopedStylesForMessage(messageItem, messageId || messageItem.dataset?.messageId || null);
+    if (!cleanupOptions.preserveShell) release(() => cleanupScopedStylesForMessage(messageItem, messageId || messageItem.dataset?.messageId || null));
     const ownedMessageId = messageId || messageItem.dataset?.messageId || null;
-    if (ownedMessageId && mainRendererReferences?.pretextBridge?.evict) {
-        mainRendererReferences.pretextBridge.evict(ownedMessageId);
-    }
-    visibilityOptimizer.unobserveMessage(messageItem);
+    if (ownedMessageId) release(() => mainRendererReferences?.pretextBridge?.evict?.(ownedMessageId));
+    release(() => visibilityOptimizer.unobserveMessage(messageItem));
 }
 
 function removeMessageById(messageId, saveHistory = false, root = mainRendererReferences.chatMessagesDiv) {
@@ -2926,8 +1931,8 @@ function clearChat(root = mainRendererReferences.chatMessagesDiv) {
     chartEmbedHost?.clear();
     mainRendererReferences.uiHelper.resetChatScrollFollow?.();
 
-    // 清空聊天通常意味着用户希望释放当前渲染上下文占用；HTML 字符串缓存不持有 DOM，但这里主动释放更保守。
-    clearRenderHtmlCache();
+    // Topic switches revoke mounted resources, not reusable templates. The bounded
+    // cache survives navigation and is cleared explicitly or on renderer disposal.
 
     // 只清理当前视图的 DOM/渲染相关内容，不触碰底层异步流状态
     // 这样可避免切换话题时误伤同窗口内其他 agent 的后台流式聊天
@@ -2950,8 +1955,18 @@ function clearChat(root = mainRendererReferences.chatMessagesDiv) {
 
 
 function initializeMessageRenderer(refs) {
+    rendererDisposed = false;
     disposeRendererListeners();
+    // Re-injection may replace Markdown/Flowlock dependencies.
+    clearRenderHtmlCache();
     mainRendererReferences = createRenderDependencies(refs);
+    renderWorkerClient?.dispose();
+    const WorkerClass = mainRendererReferences.realm.Worker;
+    renderWorkerClient = options.enableRenderWorker === false ? null : createRenderWorkerClient({
+        createWorker: options.createRenderWorker || (WorkerClass
+            ? () => new WorkerClass(new URL('./renderer/renderWorker.js', import.meta.url), { type: 'module' })
+            : null),
+    });
     chartEmbedHost = createChartEmbedHost({
         root: mainRendererReferences.chatMessagesDiv,
         api: mainRendererReferences.electronAPI,
@@ -2959,40 +1974,9 @@ function initializeMessageRenderer(refs) {
     mainRendererReferences.chatMessagesDiv.setAttribute('data-vcp-projectforge-root', '');
     projectForgeTopicSurface.replaceHistory(mainRendererReferences.chatMessagesDiv, mainRendererReferences.currentChatHistoryRef.get());
 
-    contentPipeline = createContentPipeline({
-        escapeHtml,
-        processStartEndMarkers: contentProcessor.processStartEndMarkers,
-        fixEmoticonUrlsInMarkdown,
-        deIndentMisinterpretedCodeBlocks: contentProcessor.deIndentMisinterpretedCodeBlocks,
-        deIndentHtml,
-        deIndentToolRequestBlocks: contentProcessor.deIndentToolRequestBlocks,
-        applyContentProcessors: contentProcessor.applyContentProcessors,
-        transformSpecialBlocks: (text, codeBlockMap, thoughtChainMap, toolRequestSourceMap) =>
-            transformSpecialBlocks(text, codeBlockMap, thoughtChainMap, toolRequestSourceMap),
-        ensureHtmlFenced,
-        transformFlowlockBlocks: (text) => {
-            if (!mainRendererReferences.flowlockProtocol || typeof mainRendererReferences.flowlockProtocol.transformForRender !== 'function') {
-                return text;
-            }
-            return mainRendererReferences.flowlockProtocol.transformForRender(text);
-        },
-        transformMermaidPlaceholders: text =>
-            createMermaidPlaceholderTransform({ escapeHtml })(transformChartReferences(text)),
-        getToolResultRegex: () => TOOL_RESULT_REGEX,
-        getToolRequestRegex: () => TOOL_REGEX,
-        replaceToolRequestBlocks,
-        deferToolRequest,
-        getCodeFenceRegex: () => CODE_FENCE_REGEX,
-        getDesktopPushRegex: () => DESKTOP_PUSH_REGEX,
-        getDesktopPushPartialRegex: () => DESKTOP_PUSH_PARTIAL_REGEX,
-    });
-    contentRuntime = typeof createContentRuntime === 'function'
-        ? createContentRuntime({ pipeline: contentPipeline })
-        : {
-            normalizeMessage: (message) => ({ ...(message || {}), id: message?.id || `msg_${Date.now()}`, role: message?.role || 'assistant', content: message?.content ?? '' }),
-            processFull: (text, options = {}) => contentPipeline.process(text, { ...options, mode: PIPELINE_MODES.FULL_RENDER }),
-            processStream: (text, options = {}) => contentPipeline.process(text, { ...options, mode: PIPELINE_MODES.STREAM_FAST })
-        };
+    templateCompiler = createRenderTemplateCompiler({ mainRendererReferences, contentProcessor, fixEmoticonUrlsInMarkdown, deferToolRequest, registerLazyTool, toolResultFullContentMap });
+    contentPipeline = templateCompiler;
+    contentRuntime = createContentRuntime({ pipeline: { process: (text, options) => ({ text: templateCompiler.processStream(text), state: {} }) } });
 
     imageHandler.initialize({
         electronAPI: mainRendererReferences.electronAPI,
@@ -3011,6 +1995,11 @@ function initializeMessageRenderer(refs) {
     // 🟢 关键修复：IntersectionObserver 的 root 必须是产生滚动条的那个父容器
     const scrollContainer = mainRendererReferences.chatMessagesDiv.closest('.chat-messages-container');
     visibilityOptimizer.initializeVisibilityOptimizer(scrollContainer || mainRendererReferences.chatMessagesDiv);
+    offscreenWindow?.destroy();
+    offscreenWindow = options.enableOffscreenEviction === false ? null : createOffscreenDomWindow({
+        canEvict: canEvictMessage, evict: evictMessageContent, restore: restoreMessageContent,
+    });
+    offscreenWindow?.initialize(scrollContainer || mainRendererReferences.chatMessagesDiv);
 
 
     toolPresentation = createToolPresentation({
@@ -3229,6 +2218,22 @@ function initializeMessageRenderer(refs) {
         runTextHighlights: contentProcessor.highlightAllPatternsInMessage,
         preprocessFullContent: preprocessFullContent,
         processAssistantScopedHtmlContent,
+        cleanupStreamContent: contentDiv => {
+            cleanupAnimationsInContent(contentDiv);
+            releaseLazyTools(contentDiv);
+            cleanupToolResultFullContentForRoot(contentDiv);
+            contentProcessor.cleanupPreviewsInContent(contentDiv);
+            imageHandler.cleanupContent?.(contentDiv);
+        },
+        observeStreamSource: (content, messageItem) => {
+            const root = messageItem.closest('[data-vcp-projectforge-root]') || mainRendererReferences.chatMessagesDiv;
+            projectForgeTopicSurface.observe(root, { id: messageItem.dataset.messageId, role: 'assistant', content });
+        },
+        updateStreamScopedCss: (chunks, scopeId, messageItem) => {
+            const css = chunks.filter(Boolean).join('\n');
+            if (css) processAndInjectScopedCss('', scopeId, { scopedCssOverride: css, messageItem });
+            else removeOwnedMessageScopeStyle(scopeId);
+        },
         findToolRequestEnd: (text, startIndex) => findToolRequestEnd(text, startIndex),
         removeSpeakerTags: contentProcessor.removeSpeakerTags,
         ensureNewlineAfterCodeBlock: contentProcessor.ensureNewlineAfterCodeBlock,
@@ -3779,17 +2784,18 @@ async function renderPostProcessedHtml(contentDiv, rawHtml, options = {}) {
 
     // 每次替换原始 HTML 都发布一个新的内容版本。任何较旧的异步 Mermaid、
     // 高亮或动画任务恢复后都必须失效，不能继续处理同一节点上的新内容。
+    delete contentDiv.dataset.vcpOffscreenReady;
     const replacesContent = typeof rawHtml === 'string';
     const renderRevision = replacesContent
         ? (Number(contentDiv._vcpRenderRevision) || 0) + 1
         : (Number(contentDiv._vcpRenderRevision) || 0);
-    if (replacesContent) contentDiv._vcpRenderRevision = renderRevision;
+    contentDiv._vcpRenderRevision = renderRevision;
 
     const {
         messageId = null,
         message = null,
         settings = mainRendererReferences.globalSettingsRef.get(),
-        renderSessionId = getActiveRenderSessionId(),
+        renderSessionId = getActiveRenderSessionId(contentDiv.closest?.('[data-vcp-projectforge-root]')),
         runHeavy = true,
         includeAttachments = true,
         deferHighlights = true,
@@ -3799,6 +2805,7 @@ async function renderPostProcessedHtml(contentDiv, rawHtml, options = {}) {
     const messageItem = contentDiv.closest?.('.message-item');
 
     const isStillValid = () => {
+        if (rendererDisposed) return false;
         if (renderSessionId !== null && !isRenderSessionActive(renderSessionId)) return false;
         if (Number(contentDiv._vcpRenderRevision) !== renderRevision) return false;
         if (!contentDiv.isConnected) return false;
@@ -3807,6 +2814,7 @@ async function renderPostProcessedHtml(contentDiv, rawHtml, options = {}) {
     };
 
     if (typeof rawHtml === 'string') {
+        cleanupAnimationsInContent(contentDiv);
         chartEmbedHost?.beforeReplace(contentDiv);
         toolPresentation?.capture(contentDiv);
         // 替换 innerHTML 前必须释放旧子树上的预览 iframe、window message 监听器、
@@ -3815,7 +2823,6 @@ async function renderPostProcessedHtml(contentDiv, rawHtml, options = {}) {
         cleanupChatMedia(contentDiv);
         cleanupToolResultFullContentForRoot(contentDiv);
         contentProcessor.cleanupPreviewsInContent(contentDiv);
-        cleanupAnimationsInContent(contentDiv);
         imageHandler.setContentAndProcessImages(contentDiv, rawHtml, messageId);
     }
 
@@ -3835,6 +2842,7 @@ async function renderPostProcessedHtml(contentDiv, rawHtml, options = {}) {
         // 不在旧任务中扫描删除附件：同一节点可能已被新 revision 重新挂载。
         // 新渲染开始时的统一 DOM 资源清理负责释放旧附件。
         if (!isStillValid()) return;
+        contentDiv.dataset.vcpAttachmentsProcessed = 'true';
     }
 
     if (!isStillValid()) return;
@@ -3849,6 +2857,8 @@ async function renderPostProcessedHtml(contentDiv, rawHtml, options = {}) {
     chartEmbedHost?.scan(contentDiv, { auto: processScripts });
 
     if (!runHeavy) {
+        contentDiv.dataset.vcpOffscreenReady = 'true';
+        if (messageItem) offscreenWindow?.observe(messageItem);
         if (messageItem) {
             messageItem.dataset.vcpHeavyPending = 'true';
         }
@@ -3894,10 +2904,13 @@ async function renderPostProcessedHtml(contentDiv, rawHtml, options = {}) {
         delete messageItem.dataset.vcpHeavyPending;
     }
     contentDiv.dataset.vcpHeavyActivated = 'true';
+    contentDiv.dataset.vcpOffscreenReady = 'true';
+    if (messageItem) offscreenWindow?.observe(messageItem);
     delete contentDiv.dataset.vcpHeavyPending;
 }
 
 async function renderMessage(message, isInitialLoad = false, appendToDom = true, renderSessionId = null, renderContext = {}) {
+    if (rendererDisposed) return null;
     renderSessionId ||= getActiveRenderSessionId(renderContext.root || mainRendererReferences.chatMessagesDiv);
     if (renderSessionId !== null && !isRenderSessionActive(renderSessionId)) {
         return null;
@@ -4037,7 +3050,7 @@ async function renderMessage(message, isInitialLoad = false, appendToDom = true,
                     const loadedItems = typeof window !== 'undefined' && window.itemListManager?.getLoadedItems
                         ? window.itemListManager.getLoadedItems()
                         : [];
-                    
+
                     const matchedItem = loadedItems.find(it => {
                         if (it.type !== 'agent' || !it.name) return false;
                         const itLower = it.name.toLowerCase();
@@ -4083,7 +3096,7 @@ async function renderMessage(message, isInitialLoad = false, appendToDom = true,
         renderRoot.appendChild(messageItem);
         mainRendererReferences.messageCommands.syncNextUiEmptyStateWithMessages?.();
         // 观察新消息的可见性
-        visibilityOptimizer.observeMessage(messageItem);
+        observeRenderedMessage(messageItem);
     }
 
     const isActiveStreamRequest = message.role === 'assistant'
@@ -4145,41 +3158,53 @@ async function renderMessage(message, isInitialLoad = false, appendToDom = true,
         }
         // --- 正则规则应用结束 ---
 
-        let rawHtml = renderMarkdownToHtml(textToRender, {
-            message,
-            settings: globalSettings,
-            messageRole: message.role,
-            depth
-        });
+        const templateOptions = { message, settings: globalSettings, messageRole: message.role, depth };
+        let rawHtml = isInitialLoad && !appendToDom && !renderContext.forceSyncTemplate
+            ? await renderHistoryTemplate(textToRender, templateOptions, renderRoot, renderSessionId, message)
+            : renderMarkdownToHtml(textToRender, templateOptions);
+        if (rawHtml === null || rendererDisposed || !isRenderSessionActive(renderSessionId)) {
+            releaseUnMountedHtml(rawHtml);
+            cleanupMessageDomResources(messageItem);
+            if (!rendererDisposed && isRenderSessionActive(renderSessionId) && !renderContext.forceSyncTemplate) {
+                const latest = mainRendererReferences.currentChatHistoryRef.get().find(item => item.id === message.id);
+                if (latest) return renderMessage(latest, isInitialLoad, appendToDom, renderSessionId,
+                    { ...renderContext, forceSyncTemplate: true });
+            }
+            return null;
+        }
 
         // 修复：清理 Markdown 解析器可能生成的损坏的 SVG viewBox 属性
         // 错误 "Unexpected end of attribute" 表明 viewBox 的值不完整, 例如 "0 "
         rawHtml = rawHtml.replace(/viewBox="0 "/g, 'viewBox="0 0 24 24"');
 
         // Synchronously set the base HTML content
-        const finalHtml = prepareChatMediaHtml(rawHtml, contentDiv.ownerDocument);
-        contentDiv.innerHTML = finalHtml;
+        imageHandler.setContentAndProcessImages(contentDiv, rawHtml, message.id);
+        contentDiv._vcpRenderRevision = 1;
         bindLazyTools(contentDiv);
 
         // [Pretext集成] 延后填充文本高度缓存，避免阻塞首屏与批量历史渲染。
         // 必须传入当前消息自己的内容节点；传聊天根会令 querySelector 始终命中
         // 第一条 .md-content，导致所有消息争用同一个 idle handle。
-        scheduleMessagePretextEstimate(message.id, textToRender, contentDiv);
+        if (!templateOptions.workerCompiled) scheduleMessagePretextEstimate(message.id, textToRender, contentDiv);
+        if (templateOptions.estimatedHeight > 0) contentDiv.dataset.vcpEstimatedHeight = String(templateOptions.estimatedHeight);
 
+        const initialRevision = contentDiv._vcpRenderRevision;
         // Define the post-processing logic as a function.
         // This allows us to control WHEN it gets executed.
         const runPostRenderProcessing = async (postOptions = {}) => {
-            if (!isRenderSessionActive(renderSessionId) || !messageItem.isConnected || !contentDiv.isConnected) {
+            if (!isRenderSessionActive(renderSessionId) || !messageItem.isConnected || !contentDiv.isConnected
+                || contentDiv._vcpRenderRevision !== initialRevision
+                || isActiveStreamRequest) {
                 return;
             }
 
-            return renderPostProcessedHtml(contentDiv, finalHtml, {
+            return renderPostProcessedHtml(contentDiv, null, {
                 messageId: message.id,
                 message,
                 settings: globalSettings,
                 renderSessionId,
                 runHeavy: postOptions.runHeavy !== false,
-                includeAttachments: true
+                includeAttachments: contentDiv.dataset.vcpAttachmentsProcessed !== 'true'
             });
         };
 
@@ -4279,19 +3304,23 @@ async function renderMessage(message, isInitialLoad = false, appendToDom = true,
                     let typeToSave, idToSaveFor;
                     if (message.role === 'user') {
                         typeToSave = 'user'; idToSaveFor = 'user_global';
-                    } else if (message.isGroupMessage && message.agentId) {
+                    } else if (message.agentId) {
                         typeToSave = 'agent'; idToSaveFor = message.agentId;
                     } else if (currentSelectedItem && currentSelectedItem.type === 'agent') {
                         typeToSave = 'agent'; idToSaveFor = currentSelectedItem.id;
                     }
 
-                    if (typeToSave && idToSaveFor) {
+                    const persistKey = `${typeToSave}:${idToSaveFor}:${avatarUrlToUse}:${dominantColor}`;
+                    if (typeToSave && idToSaveFor && !persistedAvatarColorKeys.has(persistKey)) {
+                        persistedAvatarColorKeys.add(persistKey);
                         electronAPI.saveAvatarColor({ type: typeToSave, id: idToSaveFor, color: dominantColor })
                             .then(result => {
                                 if (result.success) {
                                     if (typeToSave === 'user') {
-                                        mainRendererReferences.globalSettingsRef.set({ ...globalSettings, userAvatarCalculatedColor: dominantColor });
-                                    } else if (typeToSave === 'agent' && idToSaveFor === currentSelectedItem.id) {
+                                        const latestSettings = mainRendererReferences.globalSettingsRef.get();
+                                        if (latestSettings.userAvatarUrl !== avatarUrlToUse) return;
+                                        mainRendererReferences.globalSettingsRef.set({ ...latestSettings, userAvatarCalculatedColor: dominantColor });
+                                    } else if (typeToSave === 'agent') {
                                         const liveSelectedItem = mainRendererReferences.currentSelectedItemRef.get();
                                         if (liveSelectedItem?.id !== idToSaveFor || liveSelectedItem.type !== 'agent') return;
                                         const nextSelectedItem = liveSelectedItem.config
@@ -4299,7 +3328,12 @@ async function renderMessage(message, isInitialLoad = false, appendToDom = true,
                                             : { ...liveSelectedItem, avatarCalculatedColor: dominantColor };
                                         mainRendererReferences.currentSelectedItemRef.set(nextSelectedItem);
                                     }
+                                } else {
+                                    persistedAvatarColorKeys.delete(persistKey);
                                 }
+                            }).catch(error => {
+                                persistedAvatarColorKeys.delete(persistKey);
+                                console.warn('[Color] Failed to persist avatar color:', error);
                             });
                     }
                 }
@@ -4337,7 +3371,7 @@ async function renderMessage(message, isInitialLoad = false, appendToDom = true,
                 console.debug(`[DEBUG] Applying chat CSS to message ${message.id}:`, chatCss);
 
                 // 为此消息创建唯一的scope ID
-                const chatScopeId = `vcp-${surfaceId}-chat-${message.id}`;
+                const chatScopeId = `vcp-${surfaceId}-chat-${message.id}-${messageItem.id}`;
                 messageItem.setAttribute('data-chat-scope', chatScopeId);
 
                 // 检查是否已存在相同的style标签
@@ -4397,6 +3431,8 @@ async function renderMessage(message, isInitialLoad = false, appendToDom = true,
 }
 
 function startStreamingMessage(message, messageItem = null) {
+    const item = messageItem || mainRendererReferences.chatMessagesDiv.querySelector(`.message-item[data-message-id="${message.id}"]`);
+    if (item) offscreenWindow?.unobserve(item);
     return streamManager.startStreamingMessage(message, messageItem);
 }
 
@@ -4424,6 +3460,8 @@ async function renderFullMessage(messageId, fullContent, agentName, agentId, opt
     console.debug(`[MessageRenderer renderFullMessage] Rendering full message for ID: ${messageId}`);
     const { chatMessagesDiv: defaultChatMessagesDiv, electronAPI, uiHelper, markedInstance } = mainRendererReferences;
     const chatMessagesDiv = options.root || defaultChatMessagesDiv;
+    const coldItem = chatMessagesDiv.querySelector(`.message-item[data-message-id="${messageId}"]`);
+    if (coldItem) offscreenWindow?.unobserve(coldItem);
     const currentChatHistoryArray = mainRendererReferences.currentChatHistoryRef.get();
     const currentSelectedItem = mainRendererReferences.currentSelectedItemRef.get();
     const currentTopicIdVal = mainRendererReferences.currentTopicIdRef.get();
@@ -4519,7 +3557,7 @@ async function renderFullMessage(messageId, fullContent, agentName, agentId, opt
         messageId,
         message: messageFromHistoryForRegex ? { ...messageFromHistoryForRegex, content: fullContent } : null,
         settings: globalSettings,
-        renderSessionId: null,
+        renderSessionId: getActiveRenderSessionId(chatMessagesDiv),
         runHeavy: true,
         includeAttachments: !!messageFromHistoryForRegex
     });
@@ -4606,6 +3644,8 @@ async function renderFullMessageProjection(messageId, fullContent, agentName, ag
 }
 
 function updateMessageContent(messageId, newContent) {
+    const coldItem = mainRendererReferences.chatMessagesDiv.querySelector(`.message-item[data-message-id="${messageId}"]`);
+    if (coldItem) offscreenWindow?.unobserve(coldItem);
     const { chatMessagesDiv, markedInstance, globalSettingsRef } = mainRendererReferences;
     const messageItem = chatMessagesDiv.querySelector(`.message-item[data-message-id="${messageId}"]`);
     if (!messageItem) return;
@@ -4656,7 +3696,7 @@ function updateMessageContent(messageId, newContent) {
         messageId,
         message: messageInHistory ? { ...messageInHistory, content: newContent } : null,
         settings: globalSettings,
-        renderSessionId: null,
+        renderSessionId: getActiveRenderSessionId(contentDiv.closest('[data-vcp-projectforge-root]')),
         runHeavy: true,
         includeAttachments: !!messageInHistory
     }).catch(error => {
@@ -4707,51 +3747,73 @@ async function renderHistory(history, options = {}) {
     projectForgeTopicSurface.replaceHistory(renderRoot, history || []);
     const renderSessionId = invalidateRenderSession(renderRoot);
     mainRendererReferences.uiHelper.resetChatScrollFollow?.();
-
-    const {
-        initialBatch = 5,
-        batchSize = 10,
-        batchDelay = 100
-    } = options;
-
-    // 核心修复：在开始批量渲染前，只等待一次依赖项。
-    await emoticonUrlFixer.initialize(mainRendererReferences.electronAPI);
-
-    if (!history || history.length === 0) {
-        return Promise.resolve();
-    }
-
-    const renderContext = {
-        depthMap: buildTurnDepthMap(history),
-        root: options.root || null
+    // One presentation boundary per history load, not one animation per card.
+    // Keep layout available for postprocessing and the existing scroll scheduler.
+    renderRoot.dataset.vcpHistoryPresentation = 'preparing';
+    const revealFirstBatch = async () => {
+        await renderTaskOwner.animationFrame(renderRoot, () => {
+            if (!isRenderSessionActive(renderSessionId)) return;
+            renderRoot.dataset.vcpHistoryPresentation = 'ready';
+        });
     };
 
-    // 如果消息数量很少，直接使用原来的方式渲染
-    if (history.length <= initialBatch) {
-        return renderHistoryLegacy(history, renderSessionId, renderContext);
+    try {
+        const {
+            initialBatch = 5,
+            batchSize = 10,
+            batchDelay = 100
+        } = options;
+
+        // 核心修复：在开始批量渲染前，只等待一次依赖项。
+        await emoticonUrlFixer.initialize(mainRendererReferences.electronAPI);
+        if (!isRenderSessionActive(renderSessionId)) return;
+
+        if (!history || history.length === 0) {
+            return Promise.resolve();
+        }
+
+        const renderContext = {
+            depthMap: buildTurnDepthMap(history),
+            root: options.root || null
+        };
+
+        // 如果消息数量很少，直接使用原来的方式渲染
+        if (history.length <= initialBatch) {
+            const result = await renderHistoryLegacy(history, renderSessionId, renderContext);
+            if (isRenderSessionActive(renderSessionId)) await revealFirstBatch();
+            return result;
+        }
+
+        console.debug(`[MessageRenderer] 开始分批渲染 ${history.length} 条消息，首批 ${initialBatch} 条，后续每批 ${batchSize} 条`);
+
+        // 分离最新的消息和历史消息
+        const latestMessages = history.slice(-initialBatch);
+        const olderMessages = history.slice(0, -initialBatch);
+
+        // 第一阶段：立即渲染最新的消息
+        await renderMessageBatch(latestMessages, true, renderSessionId, renderContext);
+        if (!isRenderSessionActive(renderSessionId)) return;
+        await revealFirstBatch();
+        if (!isRenderSessionActive(renderSessionId)) return;
+        console.debug(`[MessageRenderer] 首批 ${latestMessages.length} 条最新消息已渲染`);
+
+        // 第二阶段：分批渲染历史消息（从旧到新）
+        if (olderMessages.length > 0) {
+            await renderOlderMessagesInBatches(olderMessages, batchSize, batchDelay, renderSessionId, renderContext);
+        }
+
+        if (!isRenderSessionActive(renderSessionId)) return;
+
+        // 最终滚动到底部
+        mainRendererReferences.uiHelper.scrollToBottom();
+        console.debug(`[MessageRenderer] 所有 ${history.length} 条消息渲染完成`);
+    } finally {
+        // Empty/error paths fail open; a stale load cannot reveal a newer load.
+        if (isRenderSessionActive(renderSessionId)
+            && renderRoot.dataset.vcpHistoryPresentation === 'preparing') {
+            delete renderRoot.dataset.vcpHistoryPresentation;
+        }
     }
-
-    console.debug(`[MessageRenderer] 开始分批渲染 ${history.length} 条消息，首批 ${initialBatch} 条，后续每批 ${batchSize} 条`);
-
-    // 分离最新的消息和历史消息
-    const latestMessages = history.slice(-initialBatch);
-    const olderMessages = history.slice(0, -initialBatch);
-
-    // 第一阶段：立即渲染最新的消息
-    await renderMessageBatch(latestMessages, true, renderSessionId, renderContext);
-    if (!isRenderSessionActive(renderSessionId)) return;
-    console.debug(`[MessageRenderer] 首批 ${latestMessages.length} 条最新消息已渲染`);
-
-    // 第二阶段：分批渲染历史消息（从旧到新）
-    if (olderMessages.length > 0) {
-        await renderOlderMessagesInBatches(olderMessages, batchSize, batchDelay, renderSessionId, renderContext);
-    }
-
-    if (!isRenderSessionActive(renderSessionId)) return;
-
-    // 最终滚动到底部
-    mainRendererReferences.uiHelper.scrollToBottom();
-    console.debug(`[MessageRenderer] 所有 ${history.length} 条消息渲染完成`);
 }
 
 /**
@@ -4776,7 +3838,7 @@ function processDeferredMessageElement(el, renderSessionId, renderContext = {}) 
         return;
     }
 
-    visibilityOptimizer.observeMessage(el);
+    observeRenderedMessage(el);
 
     if (typeof el._vcp_process === 'function') {
         const runHeavy = shouldRunHeavyForMessage(el, renderContext);
@@ -4821,11 +3883,15 @@ async function renderMessageBatch(messages, scrollToBottom = false, renderSessio
             // 不能只删除 fragment 中的历史快照，否则实时节点会留在旧位置并被
             // 随后追加的历史消息压到顶部。把实时节点移动到快照槽位，才能同时
             // 保持唯一身份和 history 数组定义的最终楼层。
-            messageElements.forEach(el => {
+            messageElements.forEach((el, index) => {
                 const messageId = el.dataset?.messageId;
                 if (!messageId) return;
                 const mounted = renderRoot.querySelector(`.message-item[data-message-id="${messageId}"]`);
-                if (mounted && mounted !== el) el.replaceWith(mounted);
+                if (mounted && mounted !== el) {
+                    cleanupMessageDomResources(el);
+                    el.replaceWith(mounted);
+                    messageElements[index] = mounted;
+                }
             });
 
             // Step 1: Append all elements to the DOM at once.
@@ -4883,11 +3949,15 @@ async function renderOlderMessagesInBatches(olderMessages, batchSize, batchDelay
 
                 // idle 等待期间流式恢复可能已建立同 ID 节点。用实时节点替换
                 // fragment 中的快照槽位，使节点随该批次进入准确的历史位置。
-                elementsForProcessing.forEach(el => {
+                elementsForProcessing.forEach((el, index) => {
                     const messageId = el.dataset?.messageId;
                     if (!messageId) return;
                     const mounted = renderRoot.querySelector(`.message-item[data-message-id="${messageId}"]`);
-                    if (mounted && mounted !== el) el.replaceWith(mounted);
+                    if (mounted && mounted !== el) {
+                        cleanupMessageDomResources(el);
+                        el.replaceWith(mounted);
+                        elementsForProcessing[index] = mounted;
+                    }
                 });
 
                 let insertPoint = renderRoot.firstChild;
@@ -4952,11 +4022,15 @@ async function renderHistoryLegacy(history, renderSessionId = null, renderContex
 
             // 构建 fragment 后到本帧挂载前，活动流补建可能已经恢复同 ID 节点。
             // 将实时节点移入对应快照槽位，避免它停留在历史队列顶部。
-            allMessageElements.forEach(el => {
+            allMessageElements.forEach((el, index) => {
                 const messageId = el.dataset?.messageId;
                 if (!messageId) return;
                 const mounted = renderRoot.querySelector(`.message-item[data-message-id="${messageId}"]`);
-                if (mounted && mounted !== el) el.replaceWith(mounted);
+                if (mounted && mounted !== el) {
+                    cleanupMessageDomResources(el);
+                    el.replaceWith(mounted);
+                    allMessageElements[index] = mounted;
+                }
             });
 
             // Step 1: Append all elements to the DOM.
@@ -4974,6 +4048,7 @@ async function renderHistoryLegacy(history, renderSessionId = null, renderContex
 }
 
 function refreshLayoutDependentState() {
+    offscreenWindow?.invalidateLayout();
     const chatMessagesDiv = mainRendererReferences.chatMessagesDiv;
     if (!chatMessagesDiv) return;
 
@@ -5016,6 +4091,9 @@ const messageRenderer = {
     disposeRendererResources,
     disposeRootResources,
     createDomRenderer: (root = mainRendererReferences.chatMessagesDiv) => createChatDomRenderer({ root, renderer: messageRenderer }),
+    restoreOffscreenMessages: () => offscreenWindow?.restoreAll(),
+    getOffscreenStats: () => offscreenWindow?.getStats() || null,
+    getRenderWorkerStats: () => renderWorkerClient?.getStats() || null,
     getLazyToolStats: () => ({ entries: lazyToolContents.size }),
     getRenderHtmlCacheStats: () => ({
         entries: renderHtmlCache.size,
@@ -5036,7 +4114,7 @@ const messageRenderer = {
             cleanupMessageDomResources(existingMessageDom, messageId);
             existingMessageDom.replaceWith(newMessageDom);
             // 重新观察
-            visibilityOptimizer.observeMessage(newMessageDom);
+            observeRenderedMessage(newMessageDom);
             // 运行后续处理 logic
             if (typeof newMessageDom._vcp_process === 'function') {
                 newMessageDom._vcp_process();

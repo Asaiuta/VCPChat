@@ -1,4 +1,5 @@
 // modules/renderer/animation.js
+import { createAnimationMountController } from './animationMountController.js';
 
 // --- CDN URL Mapping ---
 const CDN_TO_LOCAL_MAP = {
@@ -12,15 +13,6 @@ const CDN_TO_LOCAL_MAP = {
     'https://cdn.jsdelivr.net/npm/pixi.js': 'vendor/pixi.min.js',
     'https://unpkg.com/pixi.js': 'vendor/pixi.min.js',
 };
-
-// 🔥 全局跟踪已加载的脚本，防止跨消息重复加载
-if (!window._vcp_loaded_scripts) {
-    window._vcp_loaded_scripts = new Set();
-}
-
-if (window.PIXI) {
-    window._vcp_loaded_scripts.add('vendor/pixi.min.js');
-}
 
 function replaceCdnUrls(scriptContent) {
     if (!scriptContent || typeof scriptContent !== 'string') {
@@ -72,27 +64,76 @@ function replaceCdnUrls(scriptContent) {
     return processed;
 }
 
-const trackedThreeInstances = new Map();
-const visibilityOwnerByContent = new WeakMap();
-let isThreePatched = false;
+const disposedResources = new WeakSet();
+function disposeResource(resource) {
+    if (!resource || typeof resource.dispose !== 'function' || disposedResources.has(resource)) return;
+    disposedResources.add(resource);
+    try { resource.dispose(); } catch (error) { console.warn('[Animation] resource dispose failed:', error); }
+}
+function disposeScene(scene) {
+    const material = value => {
+        if (!value) return;
+        for (const entry of Object.values(value)) {
+            if (entry?.isTexture || entry?.isWebGLRenderTarget) disposeResource(entry);
+        }
+        for (const uniform of Object.values(value.uniforms || {})) {
+            const values = Array.isArray(uniform?.value) ? uniform.value : [uniform?.value];
+            values.forEach(entry => { if (entry?.isTexture) disposeResource(entry); });
+        }
+        disposeResource(value);
+    };
+    for (const entry of [scene.background, scene.environment]) if (entry?.isTexture) disposeResource(entry);
+    scene.traverse?.(object => {
+        disposeResource(object.geometry);
+        (Array.isArray(object.material) ? object.material : [object.material]).forEach(material);
+    });
+}
+const mounts = new WeakMap();
+const dependencyTasks = new WeakMap();
+const ALLOWED_DEPENDENCIES = new Set(Object.values(CDN_TO_LOCAL_MAP));
+const scriptExecutions = new WeakMap();
 
-function patchThreeJS() {
-    if (isThreePatched || !window.THREE || !window.THREE.WebGLRenderer) return;
-
-    const OriginalWebGLRenderer = window.THREE.WebGLRenderer;
-
-    window.THREE.WebGLRenderer = function(...args) {
+function patchThreeJS(contentDiv, visibilityOptimizer, controller) {
+    const three = contentDiv.ownerDocument.defaultView.THREE;
+    if (!three?.WebGLRenderer) return three;
+    const OriginalWebGLRenderer = three.WebGLRenderer;
+    const MessageWebGLRenderer = function(...args) {
+        if (!controller.isCurrent()) throw new Error('Animation mount revoked');
         const renderer = new OriginalWebGLRenderer(...args);
 
         const originalRender = renderer.render;
         let associatedScene = null;
+        const scenes = new Set();
         let associatedCamera = null;
+        let animationLoop = null;
+        const originalSetAnimationLoop = renderer.setAnimationLoop?.bind(renderer);
+        const context = {
+            renderer,
+            getScene: () => associatedScene,
+            getCamera: () => associatedCamera,
+            isPaused: false,
+            pause() {
+                originalSetAnimationLoop?.(null);
+            },
+            resume() {
+                if (!renderer._disposed && animationLoop) originalSetAnimationLoop?.(animationLoop);
+            },
+        };
+        if (originalSetAnimationLoop) {
+            renderer.setAnimationLoop = callback => {
+                if (!controller.isCurrent() || renderer._disposed) return;
+                animationLoop = callback && controller.guard(callback);
+                originalSetAnimationLoop(context.isPaused ? null : animationLoop);
+            };
+        }
 
         renderer.render = function(scene, camera) {
             if (this._disposed) {
                 return;
             }
             
+            if (!controller.isCurrent()) return;
+            if (scene) scenes.add(scene);
             if (scene && !associatedScene) {
                 associatedScene = scene;
             }
@@ -100,7 +141,7 @@ function patchThreeJS() {
                 associatedCamera = camera;
             }
             
-            if (!document.body.contains(this.domElement)) {
+            if (!contentDiv.isConnected) {
                 if (!this._disposed) this.dispose();
                 return;
             }
@@ -118,60 +159,51 @@ function patchThreeJS() {
         renderer.dispose = function() {
             if (this._disposed) return;
             this._disposed = true;
-            // This observer is owned by the renderer. Disconnect it before
-            // releasing GPU resources so a detached canvas cannot retain the
-            // document or re-register itself after teardown.
-            this._vcpMutationObserver?.disconnect?.();
-            this._vcpMutationObserver = null;
+            animationLoop = null;
+            originalSetAnimationLoop?.(null);
             if (originalDispose) {
                 return originalDispose.call(this);
             }
         };
 
-        const observer = new MutationObserver(() => {
-            if (document.body.contains(renderer.domElement)) {
-                const contentDiv = renderer.domElement.closest('.md-content');
-                if (contentDiv) {
-                    const visibilityOptimizer = visibilityOwnerByContent.get(contentDiv);
-                    if (!trackedThreeInstances.has(contentDiv)) {
-                        trackedThreeInstances.set(contentDiv, []);
-                    }
-                    const instance = {
-                        renderer,
-                        getScene: () => associatedScene,
-                    };
-                    trackedThreeInstances.get(contentDiv).push(instance);
-
-                    // 注册到可见性优化器
-                    const messageItem = contentDiv.closest('.message-item');
-                    if (messageItem) {
-                        visibilityOptimizer.registerThreeContext(messageItem, {
-                            renderer,
-                            getScene: () => associatedScene,
-                            getCamera: () => associatedCamera,
-                            // 注意：这里无法直接获取外部的 renderLoop，
-                            // 但我们可以通过拦截 setAnimationLoop 来获取
-                        });
-                    }
-                }
-                observer.disconnect();
+        const messageItem = contentDiv.closest('.message-item');
+        controller.own(() => {
+            for (const scene of scenes) {
+                try { disposeScene(scene); } catch (error) { console.warn('[Animation] scene dispose failed:', error); }
+            }
+            scenes.clear();
+            try { renderer.dispose(); } finally {
+                visibilityOptimizer?.unregisterAnimationResource?.(messageItem, context);
             }
         });
-
-        renderer._vcpMutationObserver = observer;
-
-        observer.observe(document.body, { childList: true, subtree: true });
+        if (messageItem) visibilityOptimizer?.registerThreeContext?.(messageItem, context);
 
         return renderer;
     };
 
-    window.THREE.WebGLRenderer.prototype = OriginalWebGLRenderer.prototype;
-    isThreePatched = true;
-    console.log('[Three.js Patch] THREE.WebGLRenderer patched with safety checks.');
+    MessageWebGLRenderer.prototype = OriginalWebGLRenderer.prototype;
+    Object.setPrototypeOf(MessageWebGLRenderer, OriginalWebGLRenderer);
+    const constructors = new Map();
+    return new Proxy(three, {
+        get(target, prop) {
+            if (prop === 'WebGLRenderer') return MessageWebGLRenderer;
+            const value = target[prop];
+            if (typeof value !== 'function' || typeof value.prototype?.dispose !== 'function') return value;
+            if (!constructors.has(value)) constructors.set(value, new Proxy(value, {
+                construct(constructor, args, newTarget) {
+                    if (!controller.isCurrent()) throw new Error('Animation mount revoked');
+                    const resource = Reflect.construct(constructor, args, newTarget);
+                    controller.own(() => disposeResource(resource));
+                    return resource;
+                },
+            }));
+            return constructors.get(value);
+        },
+    });
 }
 
-function createMessagePixiFacade(messageItem, visibilityOptimizer) {
-    const originalPixi = window.PIXI;
+function createMessagePixiFacade(messageItem, visibilityOptimizer, controller) {
+    const originalPixi = controller.root.ownerDocument.defaultView.PIXI;
     if (!originalPixi?.Application || !messageItem || !visibilityOptimizer?.registerPixiContext) {
         return originalPixi;
     }
@@ -179,6 +211,7 @@ function createMessagePixiFacade(messageItem, visibilityOptimizer) {
     const OriginalApplication = originalPixi.Application;
 
     function MessageOwnedApplication(...args) {
+        if (!controller.isCurrent()) throw new Error('Animation mount revoked');
         const app = Reflect.construct(OriginalApplication, args, new.target === MessageOwnedApplication
             ? OriginalApplication
             : new.target);
@@ -208,8 +241,14 @@ function createMessagePixiFacade(messageItem, visibilityOptimizer) {
             },
             destroy() {
                 if (context.isDestroyed) return;
-                context.isDestroyed = true;
+                if (context.isInitializing) {
+                    context.pendingDestroy = true;
+                    context.pause();
+                    context.isDestroyed = true;
+                    return;
+                }
                 context.pause();
+                context.isDestroyed = true;
                 const canvas = app.canvas || app.view;
                 try {
                     originalDestroy?.(
@@ -223,29 +262,38 @@ function createMessagePixiFacade(messageItem, visibilityOptimizer) {
             }
         };
 
+        controller.own(() => {
+            context.destroy();
+            visibilityOptimizer.unregisterAnimationResource?.(messageItem, context);
+        });
         // AI 的显式 start 也必须经过气泡热区与话题配额，不得绕过调度器。
         app.start = () => {
-            visibilityOptimizer.registerPixiContext(messageItem, context);
+            if (controller.isCurrent() && !context.isDestroyed) visibilityOptimizer.registerPixiContext(messageItem, context);
         };
         app.stop = () => {
             context.pause();
             context.isPaused = true;
         };
-        app.destroy = (...destroyArgs) => {
-            if (context.isDestroyed) return;
-            context.isDestroyed = true;
-            try {
-                originalStop?.();
-                app.ticker?.stop?.();
-                return originalDestroy?.(...destroyArgs);
-            } finally {
-                (app.canvas || app.view)?.remove?.();
-            }
+        app.destroy = () => {
+            context.destroy();
+            visibilityOptimizer.unregisterAnimationResource?.(messageItem, context);
         };
 
         if (originalInit) {
             app.init = async (options = {}) => {
-                const result = await originalInit({ ...options, autoStart: false });
+                if (!controller.isCurrent() || context.isDestroyed) return;
+                context.isInitializing = true;
+                let result;
+                try {
+                    result = await originalInit({ ...options, autoStart: false });
+                } finally {
+                    context.isInitializing = false;
+                    if (!controller.isCurrent() || context.pendingDestroy) {
+                        context.isDestroyed = false;
+                        context.destroy();
+                    }
+                }
+                if (!controller.isCurrent() || context.isDestroyed) return result;
                 context.isReady = true;
                 visibilityOptimizer.registerPixiContext(messageItem, context);
                 return result;
@@ -268,29 +316,48 @@ function createMessagePixiFacade(messageItem, visibilityOptimizer) {
     });
 }
 
-function loadScript(src, onLoad, onError) {
-    if (window._vcp_loaded_scripts.has(src)) {
-        if(onLoad) onLoad();
-        return;
-    }
-    window._vcp_loaded_scripts.add(src); // Pre-mark to prevent race conditions
-    
-    const scriptEl = document.createElement('script');
-    scriptEl.src = src;
-    scriptEl.onload = () => {
-        console.log(`[Animation] ✅ Library loaded: ${src}`);
-        if (onLoad) onLoad();
-    };
-    scriptEl.onerror = () => {
-        console.error(`[Animation] ❌ Failed to load: ${src}`);
-        window._vcp_loaded_scripts.delete(src); // Allow retry on failure
-        if (onError) onError();
-    };
-    document.head.appendChild(scriptEl);
+function loadScript(src, realm) {
+    const resolved = new URL(replaceCdnUrls(src), realm.document.baseURI);
+    const local = [...ALLOWED_DEPENDENCIES].find(path =>
+        new URL(path, realm.document.baseURI).href === resolved.href);
+    if (!local) return Promise.reject(new Error('Animation dependency is not allowlisted'));
+    let tasks = dependencyTasks.get(realm);
+    if (!tasks) dependencyTasks.set(realm, tasks = new Map());
+    if (tasks.has(local)) return tasks.get(local);
+    const globalName = local.includes('three') ? 'THREE' : local.includes('pixi') ? 'PIXI' : 'anime';
+    if (realm[globalName]) return Promise.resolve();
+    const task = new Promise((resolve, reject) => {
+        const script = realm.document.createElement('script');
+        let settled = false;
+        const settle = error => {
+            if (settled) return;
+            settled = true;
+            realm.clearTimeout(timeout);
+            script.onload = script.onerror = null;
+            if (error) { script.remove(); reject(error); }
+            else resolve();
+        };
+        const timeout = realm.setTimeout(() => settle(new Error('Animation dependency timeout')), 15000);
+        script.src = local;
+        script.onload = () => settle(realm[globalName] ? null : new Error('Animation dependency missing global'));
+        script.onerror = () => settle(new Error('Animation dependency failed'));
+        realm.document.head.appendChild(script);
+    });
+    tasks.set(local, task);
+    task.catch(() => { if (tasks.get(local) === task) tasks.delete(local); });
+    return task;
 }
 
 function processScripts(containerElement, visibilityOptimizer) {
-    if (visibilityOptimizer) visibilityOwnerByContent.set(containerElement, visibilityOptimizer);
+    const realm = containerElement.ownerDocument.defaultView;
+    const previous = mounts.get(containerElement);
+    if (previous && (previous.state === 'revoked' || previous.revision !== containerElement._vcpRenderRevision || previous.optimizer !== visibilityOptimizer)) {
+        cleanupAnimationsInContent(containerElement);
+    }
+    const controller = mounts.get(containerElement) || createAnimationMountController(containerElement, visibilityOptimizer);
+    mounts.set(containerElement, controller);
+    const execution = controller;
+    scriptExecutions.set(containerElement, execution);
     const messageItem = containerElement.closest('.message-item');
 
     // Markdown fenced/inline code and HTML code preview wrappers are display-only domains.
@@ -327,78 +394,53 @@ function processScripts(containerElement, visibilityOptimizer) {
     executableScripts.forEach(s => { if (s.parentNode) s.parentNode.removeChild(s); });
 
     const executeInline = () => {
+        if (scriptExecutions.get(containerElement) !== execution || !controller.isCurrent()) return;
         // 🛡️ 拦截 anime.js 的创建，以便自动注册
-        const originalAnime = window.anime;
-        let animePatched = false;
-        if (originalAnime && !originalAnime._vcp_patched) {
-            window.anime = function(options) {
-                const instance = originalAnime(options);
-                if (messageItem) {
-                    visibilityOptimizer.registerAnimeInstance(messageItem, instance);
+        const originalAnime = realm.anime;
+        const messageAnime = originalAnime && Object.assign(function(options) {
+            if (!controller.isCurrent()) return;
+            const instance = originalAnime(options);
+            controller.own(() => {
+                try { instance.pause?.(); } finally {
+                    visibilityOptimizer?.unregisterAnimationResource?.(messageItem, instance);
                 }
-                return instance;
-            };
-            Object.assign(window.anime, originalAnime);
-            window.anime._vcp_patched = true;
-            animePatched = true;
-        }
+                const targets = instance.animatables?.map(entry => entry.target) || [];
+                if (targets.length) originalAnime.remove?.(targets);
+            });
+            if (messageItem) visibilityOptimizer?.registerAnimeInstance?.(messageItem, instance);
+            return instance;
+        }, originalAnime);
 
         // 🛡️ Document API Shadowing - 防止 document.write/open/close 导致 SPA 崩溃
-        const originalWrite = document.write;
-        const originalOpen = document.open;
-        const originalClose = document.close;
+        const document = realm.document;
 
         const blockedApiHandler = function(...args) {
             console.warn('[Animation] Blocked document.write/open/close call in inline script:', args);
         };
 
-        document.write = blockedApiHandler;
-        document.open = blockedApiHandler;
-        document.close = blockedApiHandler;
-
-        try {
+        {
             inlineScripts.forEach(script => {
+                if (!controller.isCurrent()) return;
                 try {
                     // 1. 注册所有 canvas，以便优化器监控
                     const canvases = containerElement.querySelectorAll('canvas');
                     canvases.forEach(canvas => {
                         if (messageItem) {
-                            visibilityOptimizer?.registerCanvasAnimation?.(messageItem, { canvas });
+                            const context = visibilityOptimizer?.registerCanvasAnimation?.(messageItem, { canvas });
+                            if (context) controller.own(() => visibilityOptimizer?.unregisterAnimationResource?.(messageItem, context));
                         }
                     });
 
                     // 2. 创建可暂停的 rAF 与 timer 包装器
-                    const pausableRAF = messageItem
-                        ? visibilityOptimizer?.createPausableRAF?.(messageItem) || window.requestAnimationFrame
-                        : window.requestAnimationFrame;
-                    const pausableTimerAPI = messageItem
-                        ? visibilityOptimizer?.createPausableTimerAPI?.(messageItem) || {
-                            setTimeout: window.setTimeout.bind(window), clearTimeout: window.clearTimeout.bind(window),
-                            setInterval: window.setInterval.bind(window), clearInterval: window.clearInterval.bind(window)
-                        }
-                        : {
-                            setTimeout: window.setTimeout.bind(window),
-                            clearTimeout: window.clearTimeout.bind(window),
-                            setInterval: window.setInterval.bind(window),
-                            clearInterval: window.clearInterval.bind(window)
-                        };
+                    const pausableRAF = controller.api.requestAnimationFrame;
+                    const pausableTimerAPI = controller.api;
 
-                    // 3. 影子注入：通过 IIFE 重新定义局部作用域内的 API
-                    // 我们将 pausableRAF / pausableTimerAPI 挂载到临时全局变量上，以便注入脚本读取
-                    const tempRafId = `_vcp_raf_${Math.random().toString(36).slice(2, 11)}`;
-                    window[tempRafId] = pausableRAF;
-                    const tempTimerId = `_vcp_timer_${Math.random().toString(36).slice(2, 11)}`;
-                    window[tempTimerId] = pausableTimerAPI;
-
-                    const tempDocId = `_vcp_doc_${Math.random().toString(36).slice(2, 11)}`;
-                    const tempContainerId = `_vcp_container_${Math.random().toString(36).slice(2, 11)}`;
-                    window[tempContainerId] = containerElement;
-                    const tempPixiId = `_vcp_pixi_${Math.random().toString(36).slice(2, 11)}`;
-                    window[tempPixiId] = createMessagePixiFacade(messageItem, visibilityOptimizer);
+                    // A single synchronous handoff captures all message-owned APIs.
+                    const messagePixi = createMessagePixiFacade(messageItem, visibilityOptimizer, controller);
                     const virtualCurrentScript = {
                         tagName: 'SCRIPT',
                         nodeName: 'SCRIPT',
-                        nodeType: Node.ELEMENT_NODE,
+                        nodeType: realm.Node.ELEMENT_NODE,
                         id: script.id,
                         className: script.className,
                         type: script.type,
@@ -412,6 +454,9 @@ function processScripts(containerElement, visibilityOptimizer) {
                     };
                     const shadowDocument = new Proxy(document, {
                         get(target, prop) {
+                            if (prop === 'write' || prop === 'open' || prop === 'close') return blockedApiHandler;
+                            if (prop === 'addEventListener') return (type, callback, options) => controller.listen(target, type, callback, options);
+                            if (prop === 'removeEventListener') return (type, callback, options) => controller.unlisten(target, type, callback, options);
                             if (prop === 'currentScript') {
                                 return virtualCurrentScript;
                             }
@@ -461,8 +506,8 @@ function processScripts(containerElement, visibilityOptimizer) {
 
                             if (prop === 'getElementById') {
                                 return function(id) {
-                                    const escapedId = window.CSS?.escape
-                                        ? window.CSS.escape(String(id))
+                                    const escapedId = realm.CSS?.escape
+                                        ? realm.CSS.escape(String(id))
                                         : String(id).replace(/(["\\])/g, '\\$1');
                                     const localMatch = containerElement.querySelector(`#${escapedId}`);
                                     return localMatch || target.getElementById(id);
@@ -500,153 +545,116 @@ function processScripts(containerElement, visibilityOptimizer) {
                             return true;
                         }
                     });
-                    window[tempDocId] = shadowDocument;
+                    const scopedApis = {
+                        document: shadowDocument,
+                        PIXI: messagePixi,
+                        THREE: patchThreeJS(containerElement, visibilityOptimizer, controller),
+                        anime: messageAnime,
+                        requestAnimationFrame: pausableRAF,
+                        webkitRequestAnimationFrame: pausableRAF,
+                        mozRequestAnimationFrame: pausableRAF,
+                        webkitCancelAnimationFrame: controller.api.cancelAnimationFrame,
+                        mozCancelAnimationFrame: controller.api.cancelAnimationFrame,
+                        ...pausableTimerAPI,
+                        container: containerElement,
+                    };
+                    const scopedWindow = new Proxy(realm, {
+                        get(target, prop) {
+                            if (prop === 'window' || prop === 'self' || prop === 'globalThis') return scopedWindow;
+                            if (Object.prototype.hasOwnProperty.call(scopedApis, prop)) return scopedApis[prop];
+                            const value = Reflect.get(target, prop, target);
+                            return typeof value === 'function' && !value.prototype ? value.bind(target) : value;
+                        },
+                        set(target, prop, value) { target[prop] = value; return true; },
+                    });
+                    // Same-Realm compatibility execution, deliberately not a security boundary.
                     
-                    // [优化] 拦截脚本中的 requestAnimationFrame / timer，强制指向可暂停 API
-                    let scriptContent = replaceCdnUrls(script.textContent);
-                    
-                    // 简单的正则替换，处理常见的 window.* 调用方式
-                    // 注意：这只是辅助手段，核心拦截靠 IIFE 作用域覆盖
-                    scriptContent = scriptContent
-                        .replace(/window\.PIXI/g, `window['${tempPixiId}']`)
-                        .replace(/window\.requestAnimationFrame/g, `window['${tempRafId}']`)
-                        .replace(/window\.webkitRequestAnimationFrame/g, `window['${tempRafId}']`)
-                        .replace(/window\.mozRequestAnimationFrame/g, `window['${tempRafId}']`)
-                        .replace(/window\.setTimeout/g, `window['${tempTimerId}'].setTimeout`)
-                        .replace(/window\.clearTimeout/g, `window['${tempTimerId}'].clearTimeout`)
-                        .replace(/window\.setInterval/g, `window['${tempTimerId}'].setInterval`)
-                        .replace(/window\.clearInterval/g, `window['${tempTimerId}'].clearInterval`);
+                    const scriptContent = replaceCdnUrls(script.textContent);
+                    // Explicit window/globalThis calls resolve through the captured local proxy.
                     
                     const wrappedScript = `
-(function() {
-    const document = window['${tempDocId}'];
-    const PIXI = window['${tempPixiId}'];
-    const requestAnimationFrame = window['${tempRafId}'];
+(function(window) {
+    const globalThis = window;
+    const self = window;
+    const document = window.document;
+    const PIXI = window.PIXI;
+    const THREE = window.THREE;
+    const anime = window.anime;
+    const requestAnimationFrame = window.requestAnimationFrame;
+    const cancelAnimationFrame = window.cancelAnimationFrame;
+    const webkitCancelAnimationFrame = cancelAnimationFrame;
+    const mozCancelAnimationFrame = cancelAnimationFrame;
     // 同时也覆盖 webkitRequestAnimationFrame 等变体以防万一
     const webkitRequestAnimationFrame = requestAnimationFrame;
     const mozRequestAnimationFrame = requestAnimationFrame;
-    const __vcpTimerAPI = window['${tempTimerId}'];
+    const __vcpTimerAPI = window;
     const setTimeout = __vcpTimerAPI.setTimeout;
     const clearTimeout = __vcpTimerAPI.clearTimeout;
     const setInterval = __vcpTimerAPI.setInterval;
     const clearInterval = __vcpTimerAPI.clearInterval;
     
+    const addEventListener = window.addEventListener;
+    const removeEventListener = window.removeEventListener;
+    const MutationObserver = window.MutationObserver;
+    const ResizeObserver = window.ResizeObserver;
+    const IntersectionObserver = window.IntersectionObserver;
+    const fetch = window.fetch;
+    const URL = window.URL;
+    const Worker = window.Worker;
+    const queueMicrotask = window.queueMicrotask;
+
     // 直接绑定本次处理所属的内容根，不再通过消息 ID 和全局 document 反查。
     // 因此 script 位于 DIV 岛内部、岛外或辅助 Surface 时语义完全一致。
-    const container = window['${tempContainerId}'];
+    const container = window.container;
     try {
         ${scriptContent}
     } catch (e) {
         console.error('[Animation] Error in AI script:', e);
     }
-})();`;
-                    
-                    const newScript = document.createElement('script');
-                    newScript.textContent = wrappedScript;
-                    document.head.appendChild(newScript).parentNode.removeChild(newScript);
-                    
-                    // 稍微延迟清理，确保脚本解析完成；已创建的回调闭包会继续持有可暂停 API
-                    setTimeout(() => {
-                        delete window[tempRafId];
-                        delete window[tempTimerId];
-                        delete window[tempDocId];
-                        delete window[tempContainerId];
-                        delete window[tempPixiId];
-                    }, 0);
+}).call(window, window);`;
+                    if (script.type && !/^(?:text|application)\/javascript$/i.test(script.type)) {
+                        console.warn('[Animation] Unsupported inline script type:', script.type);
+                        return;
+                    }
+                    const runner = document.createElement('script');
+                    runner.textContent = `document.currentScript.__vcpRun = function(window) { ${wrappedScript} };`;
+                    try {
+                        document.head.appendChild(runner);
+                        if (typeof runner.__vcpRun === 'function') runner.__vcpRun.call(scopedWindow, scopedWindow);
+                        else console.warn('[Animation] Inline execution unavailable under this document policy');
+                    } finally {
+                        delete runner.__vcpRun;
+                        runner.remove();
+                    }
 
                 } catch (e) {
                     console.error('[Animation] Error executing inline script:', e);
                 }
             });
-        } finally {
-            // 🔄 恢复原始 API
-            document.write = originalWrite;
-            document.open = originalOpen;
-            document.close = originalClose;
-            
-            // 如果我们在本次执行中临时修改了 anime，且希望保持全局干净（可选）
-            // 但通常 anime 是全局加载的，保持 patch 也没关系
-            document.open = originalOpen;
-            document.close = originalClose;
         }
     };
 
-    const loadOtherScriptsAndExecuteInline = () => {
-        let remaining = otherExternalScripts.length;
-        if (remaining === 0) {
-            executeInline();
-            return;
-        }
-        const onScriptLoaded = () => {
-            remaining--;
-            if (remaining === 0) {
-                executeInline();
-            }
-        };
-        otherExternalScripts.forEach(s => {
-            loadScript(replaceCdnUrls(s.src), onScriptLoaded, onScriptLoaded);
+    const dependencies = [...threeScripts, ...otherExternalScripts];
+    if (!dependencies.length) executeInline();
+    else Promise.all(dependencies.map(script => loadScript(script.src, realm)))
+        .then(executeInline)
+        .catch(error => {
+            if (controller.isCurrent()) console.error('[Animation] Execution stopped:', error);
         });
-    };
-
-    if (threeScripts.length > 0) {
-        loadScript('vendor/three.min.js', () => {
-            patchThreeJS();
-            loadOtherScriptsAndExecuteInline();
-        });
-    } else {
-        loadOtherScriptsAndExecuteInline();
-    }
+    return controller;
 }
 
 export function processAnimationsInContent(containerElement, visibilityOptimizer = null) {
     if (!containerElement) return;
-    processScripts(containerElement, visibilityOptimizer);
+    return processScripts(containerElement, visibilityOptimizer);
 }
 
 
 export function cleanupAnimationsInContent(contentDiv) {
     if (!contentDiv) return;
-    const visibilityOptimizer = visibilityOwnerByContent.get(contentDiv);
-    const messageItem = contentDiv.closest?.('.message-item');
-    visibilityOptimizer?.destroyPixiMessage?.(messageItem);
-    visibilityOwnerByContent.delete(contentDiv);
-
-    if (window.anime) {
-        const animatedElements = contentDiv.querySelectorAll('*');
-        if (animatedElements.length > 0) anime.remove(animatedElements);
-    }
-
-    if (trackedThreeInstances.has(contentDiv)) {
-        const instancesToClean = trackedThreeInstances.get(contentDiv);
-        console.log(`[Cleanup] Cleaning ${instancesToClean.length} Three.js instance(s)`);
-
-        instancesToClean.forEach(instance => {
-            if (instance.renderer && !instance.renderer._disposed) {
-                const scene = instance.getScene();
-                if (scene) {
-                    scene.traverse(object => {
-                        if (object.isMesh) {
-                            if (object.geometry) object.geometry.dispose();
-                            if (object.material) {
-                                if (Array.isArray(object.material)) {
-                                    object.material.forEach(mat => { if (mat.dispose) mat.dispose(); });
-                                } else if (object.material.dispose) {
-                                    object.material.dispose();
-                                }
-                            }
-                        }
-                    });
-                }
-                try {
-                    instance.renderer.dispose();
-                } catch (e) {
-                    console.warn('[Cleanup] Error during renderer disposal:', e);
-                }
-            }
-        });
-
-        trackedThreeInstances.delete(contentDiv);
-    }
+    mounts.get(contentDiv)?.revoke();
+    mounts.delete(contentDiv);
+    scriptExecutions.delete(contentDiv);
 }
 
 export function animateMessageIn(messageItem) {

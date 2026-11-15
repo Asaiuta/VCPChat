@@ -38,6 +38,19 @@ const HTML_ISLAND_STACK_TAGS = new Set([
 ]);
 
 
+const RAW_TEXT_OPEN = /<(style|script)\b[^>]*>/iy;
+const DIV_OPEN = /<div(?:\s|>)/iy;
+const HTML_TAG_START = /<(?:[a-zA-Z][a-zA-Z0-9:-]*(?:\s|\/?>|$)|\/[a-zA-Z]|!)/y;
+const FENCE_OPEN = /(`{3,}|~{3,})([^\n]*)/y;
+const PARAGRAPH_BOUNDARY = /\r?\n[ \t]*\r?\n/g;
+const EXPLICIT_FEATURE = /[<`~$\\[\-]/g;
+const RAW_TEXT_CLOSE = { script: /<\/script\b/ig, style: /<\/style\b/ig };
+
+function matchAt(regex, text, index) {
+    regex.lastIndex = index;
+    return regex.exec(text);
+}
+
 function startsWithAt(text, index, token) {
     return text.startsWith(token, index);
 }
@@ -45,7 +58,7 @@ function findFenceOpeningAt(text, startIndex) {
     const lineStart = startIndex === 0 ? 0 : text.lastIndexOf('\n', startIndex - 1) + 1;
     const prefix = text.slice(lineStart, startIndex);
     if (!/^[ \t]{0,3}$/.test(prefix)) return null;
-    const match = text.slice(startIndex).match(/^(`{3,}|~{3,})([^\n]*)/);
+    const match = matchAt(FENCE_OPEN, text, startIndex);
     if (!match) return null;
     return { markerChar: match[1][0], markerLength: match[1].length };
 }
@@ -150,7 +163,7 @@ function findParagraphStableCutoff(text, floorOffset) {
     let searchIndex = Math.max(0, floorOffset);
 
     while (searchIndex < text.length) {
-        const boundary = /\r?\n[ \t]*\r?\n/g;
+        const boundary = PARAGRAPH_BOUNDARY;
         boundary.lastIndex = searchIndex;
         const match = boundary.exec(text);
         if (!match) break;
@@ -253,7 +266,6 @@ function isBareDivIslandLineStart(text, tagStart) {
 function scanBareDivIslandEnd(text, startIndex) {
     const stack = [];
     let index = startIndex;
-    const lowerText = text.toLowerCase();
 
     while (index < text.length) {
         if (index - startIndex > HTML_ISLAND_MAX_CHARS) {
@@ -315,7 +327,9 @@ function scanBareDivIslandEnd(text, startIndex) {
         index = tagEnd + 1;
 
         if (HTML_RAWTEXT_TAGS.has(name)) {
-            const rawTextCloseStart = lowerText.indexOf(`</${name}`, index);
+            const closePattern = RAW_TEXT_CLOSE[name];
+            closePattern.lastIndex = index;
+            const rawTextCloseStart = closePattern.exec(text)?.index ?? -1;
             if (rawTextCloseStart === -1) {
                 return { end: -1, blocked: true };
             }
@@ -387,7 +401,7 @@ function findBareDivIslandStableCutoff(text, startOffset = 0, codeDomains = []) 
             continue;
         }
 
-        if (!/^<(?:[a-zA-Z][a-zA-Z0-9:-]*(?:\s|\/?>|$)|\/[a-zA-Z]|!)/.test(text.slice(tagStart))) {
+        if (!matchAt(HTML_TAG_START, text, tagStart)) {
             index = tagStart + 1;
             continue;
         }
@@ -455,6 +469,14 @@ function findRoleDividerSectionEnd(text, startIndex, toolResultRanges = null) {
 }
 
 export function findExplicitStablePrefix(text, startOffset = 0) {
+    if (startOffset > 0) {
+        const offset = Math.min(text.length, startOffset);
+        const lineStart = text.lastIndexOf('\n', offset - 1) + 1;
+        const linePrefix = text.slice(lineStart, offset);
+        // 切点可能紧随行内协议/HTML；不可凭空创造一个行首。
+        const context = linePrefix.trim() ? 'x' : linePrefix;
+        return Math.max(offset, offset + findExplicitStablePrefix(context + text.slice(offset), 0) - context.length);
+    }
     const batches = collectToolBatchRanges(text).filter(batch => batch.closed && batch.end > startOffset);
     if (batches.length) {
         const end = batches[batches.length - 1].end;
@@ -488,6 +510,8 @@ export function findExplicitStablePrefix(text, startOffset = 0) {
         includeUnclosedInline: true,
     });
     let codeDomainIndex = 0;
+    let nextThoughtStart = findThoughtChainStart(text, index);
+    let nextThinkStart = findConventionalThinkStart(text, index);
 
     while (codeDomainIndex < codeDomains.length && codeDomains[codeDomainIndex].end <= index) {
         codeDomainIndex += 1;
@@ -501,7 +525,7 @@ export function findExplicitStablePrefix(text, startOffset = 0) {
             codeDomainIndex += 1;
         }
         // 独立 raw-text 标签也拥有内部的空行；不能在 CSS/JS 中途提交段落。
-        const rawTextOpen = text.slice(index).match(/^<(style|script)\b[^>]*>/i);
+        const rawTextOpen = text.charCodeAt(index) === 60 ? matchAt(RAW_TEXT_OPEN, text, index) : null;
         if (rawTextOpen) {
             const close = new RegExp('</' + rawTextOpen[1] + '\\s*>', 'ig');
             close.lastIndex = index + rawTextOpen[0].length;
@@ -516,7 +540,7 @@ export function findExplicitStablePrefix(text, startOffset = 0) {
             continue;
         }
         // HTML islands own all inner delimiters, including Markdown-looking text.
-        if (text[index] === '<' && /^<div(?:\s|>)/i.test(text.slice(index)) && isBareDivIslandLineStart(text, index)) {
+        if (text[index] === '<' && matchAt(DIV_OPEN, text, index) && isBareDivIslandLineStart(text, index)) {
             const island = scanBareDivIslandEnd(text, index);
             if (island.end < 0) {
                 blockedByUnclosedExplicitBlock = true;
@@ -645,8 +669,8 @@ export function findExplicitStablePrefix(text, startOffset = 0) {
             continue;
         }
 
-        const thoughtChainStart = findThoughtChainStart(text, index);
-        if (thoughtChainStart === index) {
+        if (nextThoughtStart >= 0 && nextThoughtStart < index) nextThoughtStart = findThoughtChainStart(text, index);
+        if (nextThoughtStart === index) {
             const thoughtChainEnd = findThoughtChainEnd(text, index, toolResultRanges);
             if (thoughtChainEnd === -1) {
                 blockedByUnclosedExplicitBlock = true;
@@ -681,8 +705,8 @@ export function findExplicitStablePrefix(text, startOffset = 0) {
             continue;
         }
 
-        const thinkStart = findConventionalThinkStart(text, index);
-        if (thinkStart === index) {
+        if (nextThinkStart >= 0 && nextThinkStart < index) nextThinkStart = findConventionalThinkStart(text, index);
+        if (nextThinkStart === index) {
             const thinkEnd = findConventionalThinkEnd(text, index, toolResultRanges);
             if (thinkEnd === -1) {
                 blockedByUnclosedExplicitBlock = true;
@@ -694,7 +718,16 @@ export function findExplicitStablePrefix(text, startOffset = 0) {
             continue;
         }
 
-        index += 1;
+        EXPLICIT_FEATURE.lastIndex = index + 1;
+        const nextFeature = EXPLICIT_FEATURE.exec(text)?.index ?? text.length;
+        // A code domain can start on a character not otherwise used by protocols.
+        const nextCodeStart = codeDomains[codeDomainIndex]?.start ?? text.length;
+        index = Math.min(
+            nextFeature,
+            nextCodeStart > index ? nextCodeStart : text.length,
+            nextThoughtStart > index ? nextThoughtStart : text.length,
+            nextThinkStart > index ? nextThinkStart : text.length,
+        );
     }
 
     if (blockedByUnclosedExplicitBlock) {
@@ -716,3 +749,67 @@ export function findExplicitStablePrefix(text, startOffset = 0) {
     return Math.max(stableCutoff, paragraphCutoff);
 }
 
+
+/**
+ * Stateful compatibility adapter, not a strict delta lexer.
+ * Generic callers retain exact prefix validation. An appendEpoch object is an
+ * owner-issued guarantee: within that identity only the visible prefix of the
+ * same append-only source may be supplied. Replacements MUST change the epoch;
+ * visible-length rollback also invalidates the cutoff. No source hash is used.
+ * Unfinished tails still use the reference parser. The retained string remains
+ * stream-owned and is never stored in the template cache.
+ */
+export function createStableBoundaryState() {
+    let previous = '';
+    let previousEpoch = null;
+    let cutoff = 0;
+    let scans = 0;
+    let hits = 0;
+    let revisions = 0;
+    let prefixChecks = 0;
+    let trustedUpdates = 0;
+    return {
+        update(source, options = {}) {
+            const epoch = options.appendEpoch;
+            const trusted = epoch !== null && typeof epoch === 'object';
+            let revised;
+            if (trusted) {
+                trustedUpdates++;
+                // Check identity/length BEFORE string equality: equal visible
+                // lengths in one append epoch need no content comparison.
+                if (epoch === previousEpoch && source.length === previous.length) {
+                    hits++;
+                    return { cutoff, revised: false };
+                }
+                revised = previous.length > 0
+                    && (epoch !== previousEpoch || source.length < previous.length);
+            } else {
+                // A generic call breaks the trusted chain, even on an exact hit.
+                previousEpoch = null;
+                if (source === previous) {
+                    hits++;
+                    return { cutoff, revised: false };
+                }
+                prefixChecks++;
+                revised = !source.startsWith(previous);
+            }
+            if (revised) {
+                cutoff = 0;
+                revisions++;
+            }
+            cutoff = findExplicitStablePrefix(source, cutoff);
+            previous = source;
+            previousEpoch = trusted ? epoch : null;
+            scans++;
+            return { cutoff, revised };
+        },
+        reset() {
+            previous = '';
+            previousEpoch = null;
+            cutoff = 0;
+        },
+        getDiagnostics() {
+            return { scans, hits, revisions, prefixChecks, trustedUpdates, retainedChars: previous.length, cutoff };
+        },
+    };
+}

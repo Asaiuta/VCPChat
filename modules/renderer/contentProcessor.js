@@ -1,5 +1,6 @@
 // modules/renderer/contentProcessor.js
 import * as cssTree from '../../node_modules/css-tree/dist/csstree.esm.js';
+import { replaceMarkdownCodeDomains } from './markdownCodeDomainScanner.js';
 
 /** Creates one rendered-content interaction owner for one MessageRenderer instance. */
 export function createContentProcessor() {
@@ -8,8 +9,10 @@ let mainRefs = {};
 function scheduleOwnedTimeout(owner, callback, delay) {
     if (!owner) return setTimeout(callback, delay);
     if (!owner._vcpOwnedTimeouts) owner._vcpOwnedTimeouts = new Set();
+    owner.setAttribute?.('data-vcp-has-timeout', 'true');
     const timerId = setTimeout(() => {
         owner._vcpOwnedTimeouts?.delete(timerId);
+        if (!owner._vcpOwnedTimeouts?.size) owner.removeAttribute?.('data-vcp-has-timeout');
         callback();
     }, delay);
     owner._vcpOwnedTimeouts.add(timerId);
@@ -21,6 +24,7 @@ function clearOwnedTimeouts(owner) {
     for (const timerId of owner._vcpOwnedTimeouts) clearTimeout(timerId);
     owner._vcpOwnedTimeouts.clear();
     delete owner._vcpOwnedTimeouts;
+    owner.removeAttribute?.('data-vcp-has-timeout');
 }
 
 /**
@@ -252,15 +256,18 @@ function removeSpeakerTags(text) {
  * @param {string} text The input string.
  * @returns {string} The processed string.
  */
-function ensureBlankLineAfterStandaloneImageTag(text) {
-    if (typeof text !== 'string' || !/<img\b/i.test(text)) return text;
+function ensureBlankLineAfterStandaloneImageTag(text, options = {}) {
+    if (typeof text !== 'string'
+        || (!options.normalizeFenceMarkers && !/<img\b/i.test(text))) return text;
 
     const lines = text.split('\n');
     const result = [];
     let activeFence = null;
 
     for (let index = 0; index < lines.length; index++) {
-        const line = lines[index];
+        const sourceLine = lines[index];
+        const line = options.normalizeFenceMarkers && sourceLine.trim().startsWith('```')
+            ? sourceLine.trim() : sourceLine;
         const fenceMatch = line.match(/^[ \t]{0,3}(`{3,}|~{3,})(.*)$/);
 
         if (fenceMatch) {
@@ -430,9 +437,7 @@ function prettifySinglePreElement(preElement, type, relevantContent) {
     }
 }
 
-const TAG_REGEX = /@([\u4e00-\u9fa5A-Za-z0-9_]+)/g;
-const ALERT_TAG_REGEX = /@!([\u4e00-\u9fa5A-Za-z0-9_]+)/g;
-const QUOTE_REGEX = /(?:"([^"]*)"|“([^”]*)”)/g; // Matches English "..." and Chinese “...”
+const PATTERN_REGEX = /(@![\u4e00-\u9fa5A-Za-z0-9_]+)|(@[\u4e00-\u9fa5A-Za-z0-9_]+)|"([^"]*)"|“([^”]*)”/g;
 
 /**
  * 一次性高亮所有文本模式（标签、引号），替换旧的多次遍历方法。
@@ -478,26 +483,17 @@ function highlightAllPatternsInMessage(messageElement) {
             if (!text) continue;
             const matches = [];
 
-            // 收集所有匹配
             let match;
-            while ((match = TAG_REGEX.exec(text)) !== null) {
-                matches.push({ type: 'tag', index: match.index, length: match[0].length, content: match[0] });
-            }
-            while ((match = ALERT_TAG_REGEX.exec(text)) !== null) {
-                matches.push({ type: 'alert-tag', index: match.index, length: match[0].length, content: match[0] });
-            }
-            while ((match = QUOTE_REGEX.exec(text)) !== null) {
-                // 确保引号内有内容
-                if (match[1] || match[2]) {
-                    matches.push({ type: 'quote', index: match.index, length: match[0].length, content: match[0] });
-                }
+            PATTERN_REGEX.lastIndex = 0;
+            while ((match = PATTERN_REGEX.exec(text)) !== null) {
+                if (!match[1] && !match[2] && !match[3] && !match[4]) continue;
+                matches.push({
+                    type: match[1] ? 'alert-tag' : match[2] ? 'tag' : 'quote',
+                    index: match.index, length: match[0].length, content: match[0],
+                });
             }
 
-            if (matches.length > 0) {
-                // 按位置排序
-                matches.sort((a, b) => a.index - b.index);
-                nodesToProcess.push({ node, matches });
-            }
+            if (matches.length > 0) nodesToProcess.push({ node, matches });
         }
     } catch (error) {
         if (!error.message.includes("no longer runnable")) {
@@ -510,17 +506,7 @@ function highlightAllPatternsInMessage(messageElement) {
         const { node, matches } = nodesToProcess[i];
         if (!node.parentNode) continue;
 
-        // 健壮的重叠匹配过滤逻辑
-        const filteredMatches = [];
-        let lastIndexProcessed = -1;
-        for (const currentMatch of matches) {
-            if (currentMatch.index >= lastIndexProcessed) {
-                filteredMatches.push(currentMatch);
-                lastIndexProcessed = currentMatch.index + currentMatch.length;
-            }
-        }
-
-        if (filteredMatches.length === 0) continue;
+        const filteredMatches = matches;
 
         const fragment = ownerDocument.createDocumentFragment();
         let lastIndex = 0;
@@ -1392,12 +1378,8 @@ function applyContentProcessors(text) {
     // Apply processors that need special handling first
     let processedText = text;
 
-    // Use the proper function for code block markers (preserves content formatting)
-    processedText = removeIndentationFromCodeBlockMarkers(processedText);
-
-    // A standalone raw <img> line must be terminated before following Markdown.
-    // Do this after fence-marker normalization so fenced examples remain protected.
-    processedText = ensureBlankLineAfterStandaloneImageTag(processedText);
+    // Normalize fence markers and standalone images in one line pass.
+    processedText = ensureBlankLineAfterStandaloneImageTag(processedText, { normalizeFenceMarkers: true });
 
     // Then apply simple regex replacements
     return processedText
@@ -1424,11 +1406,20 @@ function applyContentProcessors(text) {
  * @param {string} text 输入文本。
  * @returns {string} 处理后的文本。
  */
-function deIndentMisinterpretedCodeBlocks(text) {
+function deIndentMisinterpretedCodeBlocks(text, options = {}) {
     if (typeof text !== 'string') return text;
+    if (!options.codeDomainsProtected && (text.includes('`') || text.includes('~~~'))) {
+        const blocks = new Map();
+        const protectedText = replaceMarkdownCodeDomains(text, block => {
+            const token = `<!--VCP_DEINDENT_CODE_${blocks.size}-->`;
+            blocks.set(token, block);
+            return token;
+        });
+        return deIndentMisinterpretedCodeBlocks(protectedText, { codeDomainsProtected: true })
+            .replace(/<!--VCP_DEINDENT_CODE_\d+-->/g, token => blocks.get(token) ?? token);
+    }
 
     const lines = text.split('\n');
-    let inFence = false;
 
     // 匹配 Markdown 列表标记，例如 *, -, 1.
     const listRegex = /^\s*([-*]|\d+\.)\s+/;
@@ -1447,20 +1438,19 @@ function deIndentMisinterpretedCodeBlocks(text) {
     // 匹配中文字符开头，用于识别首行缩进的段落
     const chineseParagraphRegex = /^[\u4e00-\u9fa5]/;
 
+    let listIndent = null;
     return lines.map(line => {
-        // 检测代码围栏
-        if (line.trim().startsWith('```')) {
-            inFence = !inFence;
-            // 移除代码围栏标记本身的缩进
-            return line.trimStart();
-        }
-
-        // 如果在代码块内，完全不处理
-        if (inFence) {
+        const trimmedStartLine = line.trimStart();
+        const indentation = line.length - trimmedStartLine.length;
+        if (listRegex.test(line)) {
+            listIndent = indentation;
             return line;
         }
-
-        const trimmedStartLine = line.trimStart();
+        if (trimmedStartLine && listIndent !== null) {
+            if (indentation > listIndent) return line;
+            listIndent = null;
+        }
+        if (/^[ \t]*>/.test(line)) return line;
         const hasIndentation = line.length > trimmedStartLine.length;
 
         // 只处理有缩进的行
@@ -1471,7 +1461,9 @@ function deIndentMisinterpretedCodeBlocks(text) {
             }
 
             // 🟢 如果是HTML标签、HTML注释或中文段落，则移除会触发 Markdown 缩进代码块的缩进
-            if (htmlTagRegex.test(line) || indentedHtmlCommentRegex.test(line) || chineseParagraphRegex.test(trimmedStartLine)) {
+            if ((options.normalizeHtml && /^\s+<(!|[a-zA-Z])/.test(line) && !line.includes('<img'))
+                || htmlTagRegex.test(line) || indentedHtmlCommentRegex.test(line)
+                || (/^(?: {4,}|\t+)/.test(line) && chineseParagraphRegex.test(trimmedStartLine))) {
                 return trimmedStartLine;
             }
         }
@@ -1490,7 +1482,7 @@ function deIndentMisinterpretedCodeBlocks(text) {
 function cleanupPreviewsInContent(contentDiv) {
     if (!contentDiv) return;
     clearOwnedTimeouts(contentDiv);
-    contentDiv.querySelectorAll('*').forEach(clearOwnedTimeouts);
+    contentDiv.querySelectorAll('[data-vcp-has-timeout]').forEach(clearOwnedTimeouts);
     contentDiv.querySelectorAll('button[data-vcp-interactive="true"]').forEach(button => {
         button._vcpInteractiveCleanup?.();
         delete button._vcpInteractiveCleanup;
