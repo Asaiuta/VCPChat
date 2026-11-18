@@ -182,6 +182,8 @@
 
     const editorFacade = Object.freeze({
         flush: (...args) => activeEditor?.flush?.(...args) ?? true,
+        recoverPendingEdit: () => activeEditor?.recoverPendingEdit?.() ?? false,
+        draftRevision: () => activeEditor?.draftRevision?.() ?? 0,
         captureViewState: (...args) =>
             activeEditor?.captureViewState?.(...args) || null,
         restoreViewState: (...args) =>
@@ -392,7 +394,10 @@
             core,
             historyPort,
             notificationPort: notificationFacade,
-            restoreSemantics: primitives.restoreMathSemantics,
+            restoreSemantics: node => {
+                primitives.restoreMathSemantics(node);
+                primitives.restoreRuntimeResources(node);
+            },
             mediaPort: {
                 open: () => mediaPort?.open?.(),
             },
@@ -474,8 +479,8 @@
 
     function activateAdapter(adapter) {
         if (!adapter) return null;
-        activeEditor?.flush?.();
-        activeAdapter?.disposeSurface?.();
+        if (activeEditor?.flush?.() === false) return null;
+        if (activeAdapter?.disposeSurface?.() === false) return null;
         activeAdapter = adapter;
         activeEditor = adapter.kind === 'deck'
             ? deckEditor
@@ -500,7 +505,8 @@
         const result = window.ScriptoriumObjects.applyMutationToSource(
             activeAdapter.currentSource(),
             mutation,
-            activeAdapter.kind === 'deck'
+            activeAdapter.kind === 'deck',
+            core
         );
         if (!result.changed) return false;
         activeAdapter.replaceCurrentSource(result.source, {

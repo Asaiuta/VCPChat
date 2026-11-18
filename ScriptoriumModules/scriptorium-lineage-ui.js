@@ -559,7 +559,7 @@
         async function confirmRestore() {
             const targetId = pendingRestoreId;
             if (!targetId) return false;
-            context.editorResolver?.()?.flush?.();
+            if (context.editorResolver?.()?.flush?.() === false) return false;
             context.historyPort?.finalize?.();
             try {
                 const restored = lineagePort.restore(
@@ -688,7 +688,7 @@
             const name =
                 elements['checkpoint-name-input']?.value.trim() || '';
             if (!name) return false;
-            context.editorResolver?.()?.flush?.();
+            if (context.editorResolver?.()?.flush?.() === false) return false;
             context.historyPort?.finalize?.();
             lineagePort.createCheckpoint({
                 name,

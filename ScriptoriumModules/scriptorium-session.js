@@ -29,6 +29,7 @@
         }
 
         async function activateDocument(documentModel, metadata = {}) {
+            if (context.editorResolver?.()?.flush?.() === false) return false;
             const previousDocumentId = documentPort.status().documentId;
             documentPort.setActivity({
                 loading: true,
@@ -243,12 +244,17 @@
         async function save(saveAs = false) {
             const status = documentPort.status();
             if (!status.ready || status.saving) return false;
-            context.editorResolver?.()?.flush?.();
+            if (context.editorResolver?.()?.flush?.() === false) return false;
             // 渲染编辑器与源码编辑器均实时写入同一个文档模型。保存只需
             // 结束当前历史输入脉冲，不再从源码面板提交第二份草稿。
             context.historyPort.finalize();
 
-            const operationContext = documentPort.captureContext();
+            const initialContext = documentPort.captureContext();
+            const savingEditor = context.editorResolver?.();
+            const verified = documentPort.document()?.manifest?.scene?.kind === core.PROJECT_KINDS.SLIDE_DECK;
+            let operationContext = initialContext;
+            let persistenceSnapshot;
+            let draftRevision = savingEditor?.draftRevision?.() ?? 0;
             documentPort.setActivity({
                 saving: true,
                 reason: 'document-saving',
@@ -256,10 +262,25 @@
             try {
                 context.lineagePort?.sync?.();
                 context.onBeforeSave?.(documentPort.document(), adapter());
-                const bytes = await containerModule.pack(
-                    documentPort.document(),
-                    documentPort.resourceData()
-                );
+                if (!documentPort.isContextCurrent(initialContext)) return false;
+                if (savingEditor?.flush?.() === false) return false;
+                operationContext = documentPort.captureContext();
+                draftRevision = savingEditor?.draftRevision?.() ?? 0;
+                let model;
+                let resources;
+                if (verified) {
+                    persistenceSnapshot = documentPort.capturePersistenceSnapshot();
+                    const captured = documentPort.readPersistenceSnapshot(persistenceSnapshot);
+                    operationContext = captured.context;
+                    model = captured.document;
+                    resources = captured.resourceData;
+                } else {
+                    model = JSON.parse(JSON.stringify(documentPort.document()));
+                    resources = new Map([...documentPort.resourceData()].map(([id, bytes]) => [id, Uint8Array.from(bytes)]));
+                }
+                // The packer owns a materialization, never the private witness.
+                // Its byte output must encode exactly these captured inputs.
+                const bytes = await containerModule.pack(model, resources);
                 const result = await persistencePort.save({
                     filePath: status.currentPath,
                     suggestedName: status.currentName,
@@ -274,6 +295,10 @@
                     filePath: result.filePath,
                     name: result.name,
                     revision: operationContext.revision,
+                    persistenceRevision: operationContext.persistenceRevision,
+                    pendingChanges: (savingEditor?.draftRevision?.() ?? 0) !== draftRevision,
+                    ...(verified ? { operationContext, persistenceSnapshot, savedDraftRevision: draftRevision,
+                        currentDraftRevision: savingEditor?.draftRevision?.() ?? 0, success: true } : {}),
                 });
                 notificationPort.show?.(
                     `已保存 · ${result.name}`,
@@ -289,7 +314,12 @@
                 );
                 return false;
             } finally {
-                if (documentPort.isContextCurrent(
+                const current = documentPort.status();
+                const release = verified ? (context.verifiedKernel || window.ScriptoriumVerifiedKernel)?.completeSave?.(
+                    current.generation, operationContext.generation, current.persistenceRevision, operationContext.persistenceRevision,
+                    savingEditor?.draftRevision?.() ?? 0, draftRevision, current.documentId === operationContext.documentId,
+                    false, current.dirty)?.release : true;
+                if (release && documentPort.isContextCurrent(
                     operationContext,
                     { document: false }
                 )) {

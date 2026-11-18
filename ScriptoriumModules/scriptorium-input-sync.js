@@ -19,6 +19,12 @@
      * - 同一编辑目标的多次 input 只保留最后一个待提交快照。
      */
     function createInputSync(options = {}) {
+        const protocol = options.verifiedKernel;
+        if (protocol && (!protocol.createInputMailbox || !protocol.readInputMailbox
+            || !protocol.publishInputMailbox || !protocol.stepInputMailbox || !protocol.INPUT_ACTION)) {
+            throw new TypeError('The verified input protocol is unavailable.');
+        }
+        const actions = protocol?.INPUT_ACTION;
         const delay = Number.isFinite(options.delay)
             ? Math.max(0, options.delay)
             : 0;
@@ -54,15 +60,32 @@
             if (!entry && create) {
                 entry = {
                     target,
-                    composing: false,
-                    dirty: false,
-                    pending: null,
                     lastInputAt: 0,
                     compositionEpoch: 0,
+                    ...(protocol ? { mailbox: protocol.createInputMailbox() }
+                        : { composing: false, dirty: false, pending: null }),
                 };
+                if (protocol) Object.defineProperties(entry, {
+                    composing: { get: () => protocol.readInputMailbox(entry.mailbox).composing },
+                    dirty: { get: () => protocol.readInputMailbox(entry.mailbox).dirty },
+                });
                 state.entries.set(target, entry);
             }
             return entry;
+        }
+
+        function advance(entry, action, token = 0) {
+            const next = protocol.stepInputMailbox(entry.mailbox, action, token);
+            if (!next) throw new Error('Input mailbox rejected its action or token.');
+            entry.mailbox = next;
+            return protocol.readInputMailbox(next);
+        }
+
+        function publish(entry, snapshot, ending = false) {
+            const next = protocol.publishInputMailbox(entry.mailbox, snapshot, ending);
+            if (!next) throw new Error('Input mailbox exhausted its version range.');
+            entry.mailbox = next;
+            return protocol.readInputMailbox(next);
         }
 
         function snapshotOf(entry, event = null) {
@@ -100,6 +123,13 @@
             if (!entry) return false;
 
             const snapshot = snapshotOf(entry, event);
+            if (protocol) {
+                publish(entry, snapshot);
+                entry.lastInputAt = now();
+                notifyVisual(entry, event, snapshot);
+                if (!entry.composing) schedule();
+                return true;
+            }
             // 视觉反馈永远先于源码提交调度。
             notifyVisual(entry, event, snapshot);
 
@@ -115,7 +145,8 @@
             const entry = entryFor(target);
             if (!entry) return false;
             entry.compositionEpoch += 1;
-            entry.composing = true;
+            if (protocol) advance(entry, actions.START);
+            else entry.composing = true;
             options.onCompositionStart?.({
                 target,
                 event,
@@ -128,6 +159,13 @@
             assertActive();
             const entry = entryFor(target, false);
             if (!entry) return false;
+            if (protocol) {
+                const snapshot = snapshotOf(entry, event);
+                publish(entry, snapshot, true);
+                options.onCompositionEnd?.({ target, event, epoch: entry.compositionEpoch, snapshot });
+                schedule();
+                return true;
+            }
             entry.composing = false;
             // compositionend 本身不假设 DOM 已经收到最终 input；先取一次
             // 快照，再安排一帧提交。迟到的最终 input 会覆盖 pending。
@@ -145,6 +183,24 @@
 
         function flushEntry(entry) {
             if (!entry?.dirty || entry.composing) return false;
+            if (protocol) {
+                if (options.canCommit?.(entry.target) === false) return false;
+                if (protocol.readInputMailbox(entry.mailbox).hasLease || typeof options.commit !== 'function') return false;
+                const delivery = advance(entry, actions.ACQUIRE);
+                if (!delivery.hasLease) return false;
+                const token = delivery.lease;
+                try {
+                    const accepted = options.commit({ target: entry.target,
+                        snapshot: delivery.leasedPayload, lastInputAt: entry.lastInputAt });
+                    // Reentry can replace entry.mailbox. Confirm this old receipt
+                    // against the current mailbox, preserving any newer payload.
+                    advance(entry, accepted === false ? actions.FAIL : actions.ACK, token);
+                    return accepted !== false;
+                } catch (error) {
+                    if (protocol.readInputMailbox(entry.mailbox).lease === token) advance(entry, actions.FAIL, token);
+                    throw error;
+                }
+            }
             const pending = entry.pending;
             entry.dirty = false;
             entry.pending = null;
@@ -173,12 +229,18 @@
             const entry = entryFor(target, false);
             if (!entry) return false;
             flushEntry(entry);
+            if (protocol && (entry.composing || entry.dirty || protocol.readInputMailbox(entry.mailbox).hasLease)) return false;
             state.entries.delete(target);
             return true;
         }
 
         function dispose() {
             if (state.disposed) return;
+            if (protocol) {
+                state.entries.forEach(entry => flushEntry(entry));
+                if ([...state.entries.values()].some(entry => entry.composing || entry.dirty
+                    || protocol.readInputMailbox(entry.mailbox).hasLease)) return false;
+            }
             if (state.frame) cancelFrame(state.frame);
             if (state.timer) clearTimeout(state.timer);
             state.frame = 0;
@@ -195,6 +257,10 @@
             flush,
             unbind,
             dispose,
+            hasPending() {
+                return [...state.entries.values()].some(entry => entry.dirty || entry.composing
+                    || (protocol && protocol.readInputMailbox(entry.mailbox).hasLease));
+            },
             isComposing(target) {
                 return Boolean(entryFor(target, false)?.composing);
             },

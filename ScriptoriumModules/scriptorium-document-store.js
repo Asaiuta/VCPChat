@@ -1,6 +1,53 @@
 'use strict';
 
 (() => {
+    const stringify = JSON.stringify.bind(JSON);
+    const parse = JSON.parse.bind(JSON);
+    const freeze = Object.freeze;
+    const createObject = Object.create;
+    const ByteArray = Uint8Array;
+    const NativeMap = Map;
+    const NativeWeakMap = WeakMap;
+    const call = Function.prototype.call.bind(Function.prototype.call);
+    const mapEntries = Map.prototype.entries;
+    const mapGet = Map.prototype.get;
+    const mapHas = Map.prototype.has;
+    const mapSet = Map.prototype.set;
+    const mapSize = Object.getOwnPropertyDescriptor(Map.prototype, 'size').get;
+    const mapNext = Object.getPrototypeOf(new Map().entries()).next;
+    const weakGet = WeakMap.prototype.get;
+    const weakSet = WeakMap.prototype.set;
+    const isArray = Array.isArray;
+    const isView = ArrayBuffer.isView;
+    const isInteger = Number.isInteger;
+    const typedLength = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), 'length').get;
+
+    function cloneResourceBytes(bytes) {
+        const length = isArray(bytes) ? bytes.length
+            : isView(bytes) ? call(typedLength, bytes) : undefined;
+        if (!isInteger(length) || length < 0) throw new TypeError('Resource bytes must be a byte array.');
+        const copy = new ByteArray(length);
+        for (let index = 0; index < length; index += 1) {
+            const value = bytes[index];
+            if (!isInteger(value) || value < 0 || value > 255) {
+                throw new TypeError('Resource bytes must contain integers from 0 to 255.');
+            }
+            copy[index] = value;
+        }
+        return copy;
+    }
+
+    function cloneResourceMap(resources) {
+        const copy = new NativeMap();
+        const entries = call(mapEntries, resources);
+        for (let item = call(mapNext, entries); !item.done; item = call(mapNext, entries)) {
+            const [id, bytes] = item.value;
+            if (typeof id !== 'string') throw new TypeError('Resource IDs must be strings.');
+            call(mapSet, copy, id, cloneResourceBytes(bytes));
+        }
+        return copy;
+    }
+
     const EVENTS = Object.freeze({
         DOCUMENT_REPLACED: 'document-replaced',
         DOCUMENT_MUTATED: 'document-mutated',
@@ -16,6 +63,7 @@
         if (!core) throw new TypeError('Document store requires VDocCore.');
 
         const listeners = new Map();
+        const persistenceSnapshots = new NativeWeakMap();
         const state = {
             document: null,
             currentPath: null,
@@ -25,6 +73,7 @@
             saving: false,
             loading: false,
             revision: 0,
+            persistenceRevision: 0,
             generation: 0,
             resourceData: new Map(),
             resourceObjectUrls: new Map(),
@@ -42,6 +91,7 @@
                 document: state.document,
                 documentId: state.document?.manifest?.id || null,
                 revision: state.revision,
+                persistenceRevision: state.persistenceRevision,
                 generation: state.generation,
                 ...detail,
             });
@@ -87,6 +137,7 @@
                 saving: state.saving,
                 loading: state.loading,
                 revision: state.revision,
+                persistenceRevision: state.persistenceRevision,
                 generation: state.generation,
             });
         }
@@ -156,6 +207,7 @@
             state.saving = false;
             state.loading = false;
             state.revision = 0;
+            state.persistenceRevision = 0;
             emit(EVENTS.DOCUMENT_REPLACED, {
                 previousDocumentId: metadata.previousDocumentId || null,
                 reason: metadata.reason || 'replace',
@@ -168,14 +220,17 @@
             assertActive();
             if (!state.document || typeof mutator !== 'function') return false;
             const beforeRevision = state.revision;
+            const beforePersistenceRevision = state.persistenceRevision;
             const result = mutator(state.document);
             if (result === false) return false;
             state.document.manifest.modifiedAt = new Date().toISOString();
             state.revision += 1;
+            state.persistenceRevision += 1;
             state.dirty = options.dirty !== false;
             emit(EVENTS.DOCUMENT_MUTATED, {
                 reason: options.reason || 'mutation',
                 beforeRevision,
+                beforePersistenceRevision,
                 result,
             });
             emit(EVENTS.STATUS_CHANGED, {
@@ -187,11 +242,15 @@
         function updateDerived(mutator, options = {}) {
             assertActive();
             if (!state.document || typeof mutator !== 'function') return false;
+            const beforePersistenceRevision = state.persistenceRevision;
             const result = mutator(state.document);
             if (result === false) return false;
+            // Derived fields are packed too, even when source and dirty stay unchanged.
+            state.persistenceRevision += 1;
             emit(EVENTS.DOCUMENT_MUTATED, {
                 reason: options.reason || 'derived-state',
                 beforeRevision: state.revision,
+                beforePersistenceRevision,
                 derived: true,
                 result,
             });
@@ -202,11 +261,14 @@
             assertActive();
             if (!state.ready || state.loading || !state.document) return false;
             const beforeRevision = state.revision;
+            const beforePersistenceRevision = state.persistenceRevision;
             if (options.incrementRevision !== false) state.revision += 1;
+            state.persistenceRevision += 1;
             state.dirty = true;
             emit(EVENTS.DOCUMENT_MUTATED, {
                 reason: options.reason || 'dirty',
                 beforeRevision,
+                beforePersistenceRevision,
                 metadataOnly: options.metadataOnly === true,
             });
             emit(EVENTS.STATUS_CHANGED, { reason: options.reason || 'dirty' });
@@ -215,14 +277,44 @@
 
         function markSaved(metadata = {}) {
             assertActive();
+            let completion = null;
+            if (metadata.persistenceSnapshot !== undefined) {
+                const snapshot = call(weakGet, persistenceSnapshots, metadata.persistenceSnapshot);
+                if (!snapshot || metadata.operationContext !== snapshot.context
+                    || !isContextCurrent(snapshot.context)) return false;
+                const kernel = options.verifiedKernel || window.ScriptoriumVerifiedKernel;
+                if (!kernel?.completeSaveWitness) throw new Error('Verified save content witness is not loaded.');
+                const ticket = snapshot.context;
+                completion = kernel.completeSaveWitness(state.generation, ticket.generation,
+                    state.persistenceRevision, ticket.persistenceRevision, metadata.currentDraftRevision, metadata.savedDraftRevision,
+                    ticket.documentId === (state.document?.manifest?.id || null), metadata.success === true, state.dirty,
+                    matchesPersistenceSnapshot(metadata.persistenceSnapshot));
+                if (!completion?.apply) return false;
+            } else if (metadata.operationContext) {
+                const kernel = options.verifiedKernel || window.ScriptoriumVerifiedKernel;
+                if (!kernel?.completeSave) throw new Error('Verified save protocol is not loaded.');
+                const ticket = metadata.operationContext;
+                completion = kernel.completeSave(state.generation, ticket.generation,
+                    state.persistenceRevision, ticket.persistenceRevision, metadata.currentDraftRevision, metadata.savedDraftRevision,
+                    ticket.documentId === (state.document?.manifest?.id || null), metadata.success === true, state.dirty);
+                if (!completion?.apply) return false;
+            }
             if (metadata.filePath !== undefined) state.currentPath = metadata.filePath;
             if (metadata.name !== undefined) state.currentName = String(metadata.name);
             const savedRevision = metadata.revision;
-            if (savedRevision === undefined || savedRevision === state.revision) {
+            const savedPersistenceRevision = metadata.operationContext?.persistenceRevision ?? metadata.persistenceRevision;
+            if (completion) {
+                state.dirty = completion.dirty;
+            } else if (metadata.pendingChanges === true) {
+                state.dirty = true;
+            } else if (savedPersistenceRevision !== undefined) {
+                state.dirty = savedPersistenceRevision !== state.persistenceRevision;
+            } else if (savedRevision === undefined || savedRevision === state.revision) {
                 state.dirty = false;
             }
             emit(EVENTS.SAVED, {
                 savedRevision: savedRevision ?? state.revision,
+                savedPersistenceRevision: savedPersistenceRevision ?? null,
                 dirtyAfterSave: state.dirty,
             });
             emit(EVENTS.STATUS_CHANGED, { reason: 'saved' });
@@ -257,8 +349,58 @@
                 generation: state.generation,
                 documentId: state.document?.manifest?.id || null,
                 revision: state.revision,
+                persistenceRevision: state.persistenceRevision,
                 ...extra,
             });
+        }
+
+        function capturePersistenceSnapshot() {
+            assertActive();
+            if (!state.document) throw new Error('No document is available to save.');
+            // JSON and bytes are captured synchronously. Plain JSON data and
+            // ordinary byte arrays are required; accessors/proxies are outside
+            // this adapter's trusted representation contract.
+            const modelJson = stringify(state.document);
+            const resources = cloneResourceMap(state.resourceData);
+            const context = captureContext();
+            const handle = freeze(createObject(null));
+            call(weakSet, persistenceSnapshots, handle, { modelJson, resources, context });
+            return handle;
+        }
+
+        function readPersistenceSnapshot(handle) {
+            assertActive();
+            const snapshot = call(weakGet, persistenceSnapshots, handle);
+            if (!snapshot) throw new TypeError('Unknown persistence snapshot.');
+            return {
+                document: parse(snapshot.modelJson),
+                resourceData: cloneResourceMap(snapshot.resources),
+                context: snapshot.context,
+            };
+        }
+
+        function matchesPersistenceSnapshot(handle) {
+            try {
+                const snapshot = call(weakGet, persistenceSnapshots, handle);
+                if (!snapshot || !isContextCurrent(snapshot.context)
+                    || stringify(state.document) !== snapshot.modelJson
+                    || call(mapSize, state.resourceData) !== call(mapSize, snapshot.resources)) return false;
+                const entries = call(mapEntries, snapshot.resources);
+                for (let item = call(mapNext, entries); !item.done; item = call(mapNext, entries)) {
+                    const [id, expected] = item.value;
+                    if (!call(mapHas, state.resourceData, id)) return false;
+                    const actual = cloneResourceBytes(call(mapGet, state.resourceData, id));
+                    if (actual.length !== expected.length) return false;
+                    for (let index = 0; index < expected.length; index += 1) {
+                        if (actual[index] !== expected[index]) return false;
+                    }
+                }
+                return true;
+            } catch (_) {
+                // Cycles, invalid byte values and unsupported resources cannot
+                // establish equality, even if no revision notification fired.
+                return false;
+            }
         }
 
         function isContextCurrent(context, checks = {}) {
@@ -269,6 +411,10 @@
                 return false;
             }
             if (checks.revision === true && context.revision !== state.revision) {
+                return false;
+            }
+            if (checks.persistenceRevision === true
+                && context.persistenceRevision !== state.persistenceRevision) {
                 return false;
             }
             return true;
@@ -300,6 +446,10 @@
             updateIdentity,
             serialize,
             captureContext,
+            capturePersistenceSnapshot,
+            readPersistenceSnapshot,
+            materializePersistenceSnapshot: readPersistenceSnapshot,
+            matchesPersistenceSnapshot,
             isContextCurrent,
             dispose,
         });

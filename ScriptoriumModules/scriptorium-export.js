@@ -69,7 +69,7 @@
             assertActive();
             const status = documentPort.status();
             if (!status.ready || status.saving) return false;
-            context.editorPort?.flush?.();
+            if (context.editorPort?.flush?.() === false) return false;
             context.historyPort?.finalize?.();
 
             const operationContext = documentPort.captureContext({
